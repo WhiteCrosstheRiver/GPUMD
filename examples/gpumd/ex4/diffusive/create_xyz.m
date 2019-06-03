@@ -2,7 +2,7 @@ clear; close all;
 
 r0=[1/2,0,0;0,1/6,0;0,1/2,0;1/2,2/3,0];
 n0=size(r0,1);
-nxyz=[40,161,1];
+nxyz=[200,161,1];
 N=nxyz(1)*nxyz(2)*nxyz(3)*n0;
 a=[1.42*sqrt(3),1.42*3,3.35];
 r=zeros(N,3);
@@ -44,9 +44,9 @@ end
 r=r(index,:);
 
 fid=fopen('xyz.in','w');
-fprintf(fid,'%d 3 2.1 0 0 0 1\n',N);
-fprintf(fid,'1 1 0 %g %g %g\n',a.*nxyz);
+fprintf(fid,'%d %g %g\n',N,3,2.1);
+fprintf(fid,'%d %d %d %g %g %g\n',1,1,0,a.*nxyz);
 for n=1:N
-    fprintf(fid,'%d %g %g %g %g %d\n',0,r(n,:),12,label(n));
+    fprintf(fid,'%d %d %g %g %g %g\n',0,label(n),12,r(n,:));
 end
 fclose(fid);

@@ -4,8 +4,10 @@ load compute.out; temperature=compute;
 % Some parameters from MD
 dt = 0.001; % ps
 Ns = 1000;  % sample interval
+
 N_temp = size(temperature, 1);
-temp_difference = 20;
+temp_ave=mean(temperature(end/2+1:end,2:end-2));
+temp_difference = temp_ave(1)-temp_ave(end);
 
 % temperature profile
 figure;
@@ -36,6 +38,6 @@ Q2=(temperature(end,end)-temperature(end/2,end))/(N_temp/2)/dt/Ns;
 Q=(Q1+Q2)/2 % eV/ps
 
 % classical ballistic conductance
-A=0.335*40*0.142*sqrt(3); % nm^2
+A=0.335*200*0.142*sqrt(3); % nm^2
 G=160*Q/A/temp_difference % GW/m^2K
 
