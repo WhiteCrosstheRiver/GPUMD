@@ -60,7 +60,7 @@ xlabel('Temperature (K)')
 title('(b)')
 tight_layout()
 show()    
-savefig("DOS.eps", bbox_inches='tight')
+savefig("DOS.png", bbox_inches='tight')
 
 output1 = np.c_[dos['nu'], dos['DOSxyz']]
 output2 = np.c_[Temp, Cxyz]

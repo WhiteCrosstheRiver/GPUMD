@@ -1,4 +1,3 @@
-#Frequency(THz) kappa(omega)(W/m/K/THz) kappa_quantum(omega)(W/m/K/THz)
 0.127324    0.000886    0.000886
 0.254648    0.001771    0.001771
 0.381972    0.009025    0.009022
