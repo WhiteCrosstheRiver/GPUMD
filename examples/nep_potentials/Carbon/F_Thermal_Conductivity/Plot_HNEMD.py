@@ -2,6 +2,7 @@ from pylab import *
 from thermo.gpumd.data import load_kappa, load_shc
 from thermo.gpumd.calc import running_ave, hnemd_spectral_kappa
 import pandas as pd
+from ase.io import read
 
 def kappa_std(kappa, run_num):
     std = []
@@ -50,12 +51,14 @@ def calc_hnemd(path):
 
 def calc_shc_hnemd(path, Fe):
     shc = load_shc(Nc=[200]*5, num_omega=[500]*5, directory=path)
-    with open(path+"xyz.in", "r") as fin:
-        fin.readline()
-        line = fin.readline().split()
-    lx = float(line[-3])
-    ly = float(line[-2])
-    lz = float(line[-1])
+    # with open(path+"xyz.in", "r") as fin:
+    #     fin.readline()
+    #     line = fin.readline().split()
+    atoms = read(path + "model.xyz")
+    
+    lx = atoms.cell[0, 0]
+    ly = atoms.cell[1, 1]
+    lz = atoms.cell[2, 2]
     V = lx*ly*lz
     T = 300
     for keys in shc:
@@ -152,7 +155,7 @@ xlabel(r'$\omega$/2$\pi$ (THz)')
 title('(b)')
 
 subplots_adjust(wspace = 0.3)
-savefig("HNEMD_SHC.eps", bbox_inches='tight')
+savefig("HNEMD_SHC.png", bbox_inches='tight')
 
 output1 = np.c_[k['t']*0.001, k['k_run'], k['k_std'], k['k_tol']]
 np.savetxt("./hnemd_results.txt", output1, fmt='%f', delimiter='    ')

@@ -9,7 +9,8 @@ from thermo.gpumd.data import load_thermo
 from pylab import *
 
 aw = 1.5
-fs = 14
+fs = 18
+lw = 2
 font = {'size'   : fs}
 matplotlib.rc('font', **font)
 matplotlib.rc('axes' , linewidth=aw)
@@ -28,8 +29,12 @@ thermo = load_thermo("Run/")
 strain = thermo["Lz"]/thermo["Lz"][0] - 1
 stress = thermo["Pz"] * -1
 
-output = np.c_[strain, stress]
-np.savetxt("./Uniaxial_Tension_Results.txt", output, fmt='%f', delimiter='    ')
+figure(figsize=(10, 6.2))
+set_fig_properties([gca()])
+plot(strain, stress, lw = lw,)  
+xlabel(r"Strain")
+ylabel(r"Stress (GPa)") 
+savefig("Tension.png", bbox_inches='tight')
 
         
         
