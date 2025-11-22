@@ -131,7 +131,11 @@
 #define gpuSetDevice cudaSetDevice
 #define gpuGetDeviceCount cudaGetDeviceCount
 #define gpuDeviceProp cudaDeviceProp
+#if (CUDA_VERSION >= 12000)
+#define gpuGetDeviceProperties cudaGetDeviceProperties_v2
+#else
 #define gpuGetDeviceProperties cudaGetDeviceProperties
+#endif
 #define gpuDeviceCanAccessPeer cudaDeviceCanAccessPeer
 #define gpuDeviceEnablePeerAccess cudaDeviceEnablePeerAccess
 #define gpuDeviceSynchronize cudaDeviceSynchronize

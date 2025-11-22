@@ -185,6 +185,11 @@ void find_cell_list(
     cell_count_sum.resize(N_cells);
   }
 
+  // Ensure cell_contents is properly allocated
+  if (cell_contents.size() < N) {
+    cell_contents.resize(N);
+  }
+
   CHECK(gpuMemset(cell_count.data(), 0, sizeof(int) * N_cells));
   CHECK(gpuMemset(cell_count_sum.data(), 0, sizeof(int) * N_cells));
   CHECK(gpuMemset(cell_contents.data(), 0, sizeof(int) * N));
