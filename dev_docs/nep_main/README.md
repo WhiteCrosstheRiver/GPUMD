@@ -20,13 +20,11 @@
 
 7. **[数学公式集合](07_mathematical_formulas.md)** - 所有涉及的数学公式
 8. **[工具函数说明](08_utilities_functions.md)** - 辅助函数和宏定义
+14. **[NEP训练流程详解](training.md)** - 从数据到神经网络的完整流程和SNES训练方法
 
 ### Fine_tune功能文档
 
-9. **[Fine_tune功能概述](09_fine_tune_overview.md)** - 微调功能的整体设计和执行流程
-10. **[参数映射机制](10_fine_tune_parameter_mapping.md)** - 从基础模型提取参数的详细逻辑
-11. **[元素映射机制](11_fine_tune_element_mapping.md)** - 元素索引映射详解
-12. **[参数初始化策略](12_fine_tune_initialization.md)** - mu/sigma初始化和优化策略
+9. **[Fine_tune功能完整详解](fine_tune.md)** - 微调功能的完整文档（整合版，包含功能概述、参数映射、元素映射、初始化策略等）
 
 ## NEP执行总体逻辑图
 
