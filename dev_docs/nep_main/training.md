@@ -950,6 +950,239 @@ if (fine_tune) {
 - `μ[n] = random(-1, 1)` 或从`nep.restart`读取
 - `σ[n] = sigma0`（默认0.1）或从`nep.restart`读取
 
+##### Fine_tune模式下的参数复制机制
+
+在fine_tune模式下，所有参数（包括径向/角向描述符参数和NN权重）都是从原始NEP89基础模型**直接复制（copy）**过来的。**即使fine_tune之后元素数量减少了（例如从89种减少到3种），复制的参数仍然基于原始NEP89模型的对应元素或元素对，参数数值直接继承，不做重新初始化。**
+
+**代码位置**：`src/main_nep/snes.cu` - `SNES::initialize_mu_and_sigma_fine_tune()` (第144-238行)
+
+###### 1. 参数数组的存储结构
+
+在SNES算法中，所有可优化参数存储在一个线性数组中：
+
+```cpp
+// SNES类中的成员变量
+std::vector<float> mu;      // [number_of_variables] 参数分布的均值
+std::vector<float> sigma;   // [number_of_variables] 参数分布的标准差
+```
+
+**参数数组结构**（按顺序排列）：
+```
+parameters[0 ... number_of_variables_ann - 1]           : 神经网络参数
+  [0 ... num_types × number_of_variables_ann_1 - 1]    : 每种元素的ANN参数
+  [num_types × number_of_variables_ann_1]              : 全局偏置
+parameters[number_of_variables_ann ... number_of_variables_ann + num_cnk_radial - 1]  : 径向描述符参数
+parameters[number_of_variables_ann + num_cnk_radial ... number_of_variables - 1]      : 角向描述符参数
+```
+
+其中：
+- `number_of_variables_ann_1 = (dim + 2) × num_neurons1`：每种元素的ANN参数数量
+- `number_of_variables_ann = num_types × number_of_variables_ann_1 + 1`：所有ANN参数数量
+- `num_cnk_radial = num_types² × (n_max_radial + 1) × (basis_size_radial + 1)`：径向描述符参数数量
+- `num_cnk_angular = num_types² × (n_max_angular + 1) × (basis_size_angular + 1)`：角向描述符参数数量
+
+###### 2. 元素映射机制
+
+基础模型（NEP89）支持89种元素，但缺少5种元素（Po, At, Rn, Fr, Ra）。需要通过元素映射将原子序数映射到基础模型的元素索引。
+
+**元素映射数组**（代码位置：`src/main_nep/snes.cu` 第147-153行）：
+```cpp
+const int element_map[94] = {
+  0,1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,
+  20,21,22,23,24,25,26,27,28,29,30,31,32,33,34,35,36,37,38,39,
+  40,41,42,43,44,45,46,47,48,49,50,51,52,53,54,55,56,57,58,59,
+  60,61,62,63,64,65,66,67,68,69,70,71,72,73,74,75,76,77,78,79,
+  80,81,82,0,0,0,0,0,83,84,85,86,87,88  // 缺失元素映射为0
+};
+```
+
+**映射规则**：
+```cpp
+element_index = element_map[atomic_number - 1]
+```
+
+其中：
+- `atomic_number`：元素的原子序数（1-94）
+- `element_index`：在基础模型中的索引（0-88，或0表示不存在）
+
+**示例**：
+- Si（原子序数14）→ `element_index = element_map[13] = 13`
+- C（原子序数6）→ `element_index = element_map[5] = 5`
+- O（原子序数8）→ `element_index = element_map[7] = 7`
+
+###### 3. 神经网络参数的复制
+
+**位置**：`src/main_nep/snes.cu` 第181-190行
+
+```cpp
+int count = 0;
+for (int i = 0; i < para.num_types; ++i) {
+  int element_index = element_map[para.atomic_numbers[i] - 1];
+  for (int j = 0; j < para.number_of_variables_ann_1; ++j) {
+    mu[count] = restart_mu[element_index * para.number_of_variables_ann_1 + j];
+    sigma[count] = restart_sigma[element_index * para.number_of_variables_ann_1 + j];
+    ++count;
+  }
+}
+++count; // 全局偏置
+```
+
+**复制逻辑**：
+1. **元素索引映射**：通过`element_map`将用户指定的元素原子序数映射到基础模型的元素索引
+2. **参数提取**：从基础模型中提取该元素的所有ANN参数（`w0`, `b0`, `w1`）
+3. **直接复制**：`mu`和`sigma`直接从基础模型的`restart_mu`和`restart_sigma`中复制对应位置的值
+
+**关键点**：
+- **数值完全继承**：`mu[count]`和`sigma[count]`的值**直接等于**基础模型中对应元素的参数值
+- **参数不变性**：即使fine_tune后元素数量从89种减少到3种，复制的参数仍然是**原始NEP89模型中该元素的训练结果**
+- **全局偏置共享**：全局偏置`b1`从基础模型的全局偏置位置直接复制
+
+**维度变化示例**（用户指定Si, C, O三种元素）：
+- 基础模型：89种元素 × 2560参数/元素 + 1（全局偏置）= 227,841个ANN参数
+- 用户模型：提取Si（索引13）、C（索引5）、O（索引7）的参数
+  - Si的参数：`restart_mu[13 × 2560 ... 14 × 2560 - 1]` → `mu[0 ... 2559]`
+  - C的参数：`restart_mu[5 × 2560 ... 6 × 2560 - 1]` → `mu[2560 ... 5119]`
+  - O的参数：`restart_mu[7 × 2560 ... 8 × 2560 - 1]` → `mu[5120 ... 7679]`
+  - 全局偏置：`restart_mu[89 × 2560]` → `mu[7680]`
+  - 总计：3 × 2560 + 1 = 7,681个ANN参数
+
+###### 4. 径向描述符参数的复制
+
+**位置**：`src/main_nep/snes.cu` 第192-211行
+
+```cpp
+for (int n = 0; n <= para.n_max_radial; ++n) {
+  for (int k = 0; k <= para.basis_size_radial; ++k) {
+    int nk = n * (para.basis_size_radial + 1) + k;
+    for (int t1 = 0; t1 < para.num_types; ++t1) {
+      for (int t2 = 0; t2 < para.num_types; ++t2) {
+        int element_index_1 = element_map[para.atomic_numbers[t1] - 1];
+        int element_index_2 = element_map[para.atomic_numbers[t2] - 1];
+        int t12 = element_index_1 * NUM89 + element_index_2;  // 基础模型中的元素对索引
+        mu[count] = restart_mu[nk * NUM89 * NUM89 + t12 + num_ann];
+        #ifdef FINE_TUNE_DESCRIPTOR
+          sigma[count] = restart_sigma[nk * NUM89 * NUM89 + t12 + num_ann];
+        #else
+          sigma[count] = 0.0f;  // 默认冻结描述符参数
+        #endif
+        ++count;
+      }
+    }
+  }
+}
+```
+
+**复制逻辑**：
+1. **元素对索引计算**：
+   - 用户模型中的元素对：`(t1, t2)`，例如`(Si, C)`
+   - 映射到基础模型：`element_index_1 = 13`（Si），`element_index_2 = 5`（C）
+   - 基础模型中的元素对索引：`t12 = 13 × 89 + 5 = 1,162`
+2. **参数位置计算**：
+   ```
+   index_in_restart = nk × 89² + t12 + num_ann
+   ```
+   - `nk = n × (basis_size_radial + 1) + k`：n和k的组合索引
+   - `89²`：基础模型的元素对总数（89 × 89 = 7,921）
+   - `num_ann`：跳过神经网络参数部分
+3. **直接复制**：`mu[count] = restart_mu[index_in_restart]`
+
+**关键点**：
+- **元素对映射**：用户模型中的元素对`(Si, C)`直接映射到基础模型中的元素对`(13, 5)`
+- **参数完全继承**：描述符参数`c[n][k][t1][t2]`的值**直接等于**基础模型中对应元素对的参数值
+- **基于NEP89模型**：即使fine_tune后只有3种元素，所有描述符参数仍然是**原始NEP89模型在89×89=7,921种元素对上训练的结果**
+
+**维度变化示例**（用户指定Si, C, O三种元素）：
+- 基础模型：89²种元素对 × 5阶(n) × 9基函数(k) = 7,921 × 45 = 356,445个径向描述符参数
+- 用户模型：提取9种元素对（Si-Si, Si-C, Si-O, C-Si, C-C, C-O, O-Si, O-C, O-O）的参数
+  - 每个元素对的参数：`restart_mu[nk × 7,921 + t12 + num_ann]`
+  - 例如Si-C对：`restart_mu[nk × 7,921 + (13×89+5) + num_ann]` → `mu[...]`
+  - 总计：3² × 5 × 9 = 405个径向描述符参数
+
+###### 5. 角向描述符参数的复制
+
+**位置**：`src/main_nep/snes.cu` 第213-232行
+
+```cpp
+for (int n = 0; n <= para.n_max_angular; ++n) {
+  for (int k = 0; k <= para.basis_size_angular; ++k) {
+    int nk = n * (para.basis_size_angular + 1) + k;
+    for (int t1 = 0; t1 < para.num_types; ++t1) {
+      for (int t2 = 0; t2 < para.num_types; ++t2) {
+        int element_index_1 = element_map[para.atomic_numbers[t1] - 1];
+        int element_index_2 = element_map[para.atomic_numbers[t2] - 1];
+        int t12 = element_index_1 * NUM89 + element_index_2;
+        mu[count] = restart_mu[nk * NUM89 * NUM89 + t12 + num_ann + num_cnk_radial];
+        #ifdef FINE_TUNE_DESCRIPTOR
+          sigma[count] = restart_sigma[nk * NUM89 * NUM89 + t12 + num_ann + num_cnk_radial];
+        #else
+          sigma[count] = 0.0f;
+        #endif
+        ++count;
+      }
+    }
+  }
+}
+```
+
+**与径向描述符的区别**：
+- 参数位置需要额外加上`num_cnk_radial`，跳过径向描述符部分
+- 其他逻辑完全相同：通过元素对索引从基础模型提取对应参数
+
+###### 6. 参数使用流程
+
+复制后的参数在训练过程中的使用：
+
+```cpp
+// 1. SNES生成种群（每次迭代）
+for (int p = 0; p < population_size; ++p) {
+  for (int v = 0; v < number_of_variables; ++v) {
+    float s = gpurand_normal(&state);  // s ~ N(0, 1)
+    population[p][v] = sigma[v] * s + mu[v];  // ~ N(mu[v], sigma[v]²)
+  }
+}
+
+// 2. 使用参数计算描述符和能量
+potential->find_force(para, population[p], train_set, ...);
+
+// 3. update_potential解析参数数组
+void update_potential(float* parameters, ...) {
+  // 提取ANN参数
+  for (int t = 0; t < num_types; ++t) {
+    w0[t] = parameters[offset...];
+    b0[t] = parameters[offset...];
+    w1[t] = parameters[offset...];
+  }
+  b1 = parameters[offset...];
+  
+  // 提取描述符参数
+  c_radial[n][k][t1][t2] = parameters[offset...];
+  c_angular[n][k][t1][t2] = parameters[offset...];
+}
+```
+
+**关键点**：
+- **参数值的连续性**：虽然参数数组的维度减少了（从940,731减少到8,491），但提取的参数值**完全继承**自基础模型
+- **基于NEP89的知识**：所有参数都携带了原始NEP89模型在大数据集上训练得到的知识
+- **微调而非重训练**：fine_tune是在基础模型参数的基础上进行小幅调整（通过更新`mu`和`sigma`），而不是从零开始训练
+
+###### 7. 参数复制的核心结论
+
+1. **直接数值复制**：所有参数（ANN和描述符）通过**直接内存复制**从基础模型继承，不是重新初始化或重新计算
+2. **基于NEP89模型**：即使fine_tune后元素数量减少了，所有参数仍然是**原始NEP89模型在该元素或元素对上训练得到的参数值**
+3. **元素映射保证一致性**：通过`element_map`确保用户指定的元素正确映射到基础模型的对应元素索引
+4. **知识迁移**：fine_tune利用了基础模型在大数据集上学到的通用知识，只在小数据集上进行微调适应
+
+**数学表达**：
+```
+用户模型参数[用户元素i] = 基础模型参数[element_map[用户元素i]]
+```
+
+例如：
+```
+mu_user[Si的所有ANN参数] = mu_NEP89[element_map[14-1] = 13的所有ANN参数]
+                          = mu_NEP89[基础模型中Si元素的ANN参数]
+```
+
 #### 步骤2：生成种群
 
 **位置**：`src/main_nep/snes.cu` - `create_population()`
