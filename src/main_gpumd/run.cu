@@ -65,6 +65,7 @@ Run simulation according to the inputs in the run.in file.
 #include "phonon/hessian.cuh"
 #include "replicate.cuh"
 #include "deposit.cuh"
+#include "delete.cuh"
 #include "run.cuh"
 #include "utilities/error.cuh"
 #include "utilities/gpu_macro.cuh"
@@ -362,6 +363,9 @@ void Run::parse_one_keyword(std::vector<std::string>& tokens)
     allocate_memory_gpu(group, atom, thermo);
   } else if (strcmp(param[0], "deposit") == 0) {
     Deposit(param, num_param, atom, group);
+    allocate_memory_gpu(group, atom, thermo);
+  } else if (strcmp(param[0], "delete") == 0) {
+    Delete(param, num_param, atom, group);
     allocate_memory_gpu(group, atom, thermo);
   } else if (strcmp(param[0], "minimize") == 0) {
     Minimize minimize;
