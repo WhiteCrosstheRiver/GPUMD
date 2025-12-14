@@ -53,9 +53,27 @@ static __global__ void find_cell_counts(
 {
   const int n1 = blockIdx.x * blockDim.x + threadIdx.x;
   if (n1 < N) {
-    int cell_id;
-    find_cell_id(box, x[n1], y[n1], z[n1], rc_inv, nx, ny, nz, cell_id);
-    atomicAdd(&cell_count[cell_id], 1);
+    const int N_cells = nx * ny * nz;
+    // Bounds check: ensure n1 is valid before accessing position arrays
+    if (n1 >= 0 && n1 < N) {
+      // Check for valid coordinates (not NaN or Inf)
+      const double x_val = x[n1];
+      const double y_val = y[n1];
+      const double z_val = z[n1];
+      
+      // Skip if coordinates are invalid
+      if (!isfinite(x_val) || !isfinite(y_val) || !isfinite(z_val)) {
+        return;
+      }
+      
+      int cell_id;
+      find_cell_id(box, x_val, y_val, z_val, rc_inv, nx, ny, nz, cell_id);
+      
+      // Bounds check: ensure cell_id is valid before accessing cell_count
+      if (cell_id >= 0 && cell_id < N_cells) {
+        atomicAdd(&cell_count[cell_id], 1);
+      }
+    }
   }
 }
 
@@ -75,10 +93,32 @@ static __global__ void find_cell_contents(
 {
   const int n1 = blockIdx.x * blockDim.x + threadIdx.x;
   if (n1 < N) {
-    int cell_id;
-    find_cell_id(box, x[n1], y[n1], z[n1], rc_inv, nx, ny, nz, cell_id);
-    const int ind = atomicAdd(&cell_count[cell_id], 1);
-    cell_contents[cell_count_sum[cell_id] + ind] = n1;
+    const int N_cells = nx * ny * nz;
+    // Bounds check: ensure n1 is valid before accessing position arrays
+    if (n1 >= 0 && n1 < N) {
+      // Check for valid coordinates (not NaN or Inf)
+      const double x_val = x[n1];
+      const double y_val = y[n1];
+      const double z_val = z[n1];
+      
+      // Skip if coordinates are invalid
+      if (!isfinite(x_val) || !isfinite(y_val) || !isfinite(z_val)) {
+        return;
+      }
+      
+      int cell_id;
+      find_cell_id(box, x_val, y_val, z_val, rc_inv, nx, ny, nz, cell_id);
+      
+      // Bounds check: ensure cell_id is valid
+      if (cell_id >= 0 && cell_id < N_cells) {
+        const int ind = atomicAdd(&cell_count[cell_id], 1);
+        const int idx = cell_count_sum[cell_id] + ind;
+        // Bounds check: ensure index is within cell_contents bounds
+        if (idx >= 0 && idx < N) {
+          cell_contents[idx] = n1;
+        }
+      }
+    }
   }
 }
 
@@ -119,28 +159,58 @@ static __global__ void gpu_find_neighbor_ON1(
     const int x_lim = box.pbc_x ? 2 : 0;
 
     // get radial descriptors
+    const int N_cells = nx * ny * nz;
     for (int k = -z_lim; k <= z_lim; ++k) {
       for (int j = -y_lim; j <= y_lim; ++j) {
         for (int i = -x_lim; i <= x_lim; ++i) {
-          int neighbor_cell = cell_id + k * nx * ny + j * nx + i;
-          if (cell_id_x + i < 0)
-            neighbor_cell += nx;
-          if (cell_id_x + i >= nx)
-            neighbor_cell -= nx;
-          if (cell_id_y + j < 0)
-            neighbor_cell += ny * nx;
-          if (cell_id_y + j >= ny)
-            neighbor_cell -= ny * nx;
-          if (cell_id_z + k < 0)
-            neighbor_cell += nz * ny * nx;
-          if (cell_id_z + k >= nz)
-            neighbor_cell -= nz * ny * nx;
+          // Calculate neighbor cell coordinates with periodic boundary conditions
+          int neighbor_cell_x = cell_id_x + i;
+          int neighbor_cell_y = cell_id_y + j;
+          int neighbor_cell_z = cell_id_z + k;
+          
+          // Apply periodic boundary conditions
+          if (box.pbc_x) {
+            while (neighbor_cell_x < 0) neighbor_cell_x += nx;
+            while (neighbor_cell_x >= nx) neighbor_cell_x -= nx;
+          }
+          if (box.pbc_y) {
+            while (neighbor_cell_y < 0) neighbor_cell_y += ny;
+            while (neighbor_cell_y >= ny) neighbor_cell_y -= ny;
+          }
+          if (box.pbc_z) {
+            while (neighbor_cell_z < 0) neighbor_cell_z += nz;
+            while (neighbor_cell_z >= nz) neighbor_cell_z -= nz;
+          }
+          
+          // Check if neighbor cell is valid
+          if (neighbor_cell_x < 0 || neighbor_cell_x >= nx ||
+              neighbor_cell_y < 0 || neighbor_cell_y >= ny ||
+              neighbor_cell_z < 0 || neighbor_cell_z >= nz) {
+            continue; // Skip invalid cells (non-periodic boundaries)
+          }
+          
+          // Calculate neighbor cell ID
+          int neighbor_cell = neighbor_cell_x + nx * neighbor_cell_y + nx * ny * neighbor_cell_z;
+          
+          // Bounds check before accessing arrays
+          if (neighbor_cell < 0 || neighbor_cell >= N_cells) {
+            continue;
+          }
 
           const int num_atoms_neighbor_cell = cell_counts[neighbor_cell];
           const int num_atoms_previous_cells = cell_count_sum[neighbor_cell];
 
+          // Bounds check for cell_contents access
+          if (num_atoms_previous_cells + num_atoms_neighbor_cell > N) {
+            continue;
+          }
+
           for (int m = 0; m < num_atoms_neighbor_cell; ++m) {
-            const int n2 = cell_contents[num_atoms_previous_cells + m];
+            const int idx = num_atoms_previous_cells + m;
+            if (idx < 0 || idx >= N) {
+              continue;
+            }
+            const int n2 = cell_contents[idx];
             if (n2 >= N1 && n2 < N2 && n1 != n2) {
 
               double x12 = x[n2] - x1;
@@ -170,7 +240,20 @@ void find_cell_list(
   GPU_Vector<int>& cell_count_sum,
   GPU_Vector<int>& cell_contents)
 {
+  // Validate position_per_atom size
+  if (position_per_atom.size() % 3 != 0) {
+    printf("ERROR: position_per_atom.size() = %zu is not divisible by 3\n", position_per_atom.size());
+    fflush(stdout);
+    return;
+  }
+  
   const int N = position_per_atom.size() / 3;
+  if (N <= 0) {
+    printf("ERROR: N = %d is invalid\n", N);
+    fflush(stdout);
+    return;
+  }
+  
   const int block_size = 256;
   const int grid_size = (N - 1) / block_size + 1;
   const double rc_inv = 1.0 / rc;
@@ -178,6 +261,13 @@ void find_cell_list(
   const double* y = position_per_atom.data() + N;
   const double* z = position_per_atom.data() + N * 2;
   const int N_cells = num_bins[0] * num_bins[1] * num_bins[2];
+  
+  if (N_cells <= 0) {
+    printf("ERROR: N_cells = %d is invalid (num_bins: %d %d %d)\n", 
+           N_cells, num_bins[0], num_bins[1], num_bins[2]);
+    fflush(stdout);
+    return;
+  }
 
   // number of cells is allowed to be larger than the number of atoms
   if (N_cells > cell_count.size()) {
@@ -185,8 +275,9 @@ void find_cell_list(
     cell_count_sum.resize(N_cells);
   }
 
-  // Ensure cell_contents is properly allocated
-  if (cell_contents.size() < N) {
+  // Ensure cell_contents is properly allocated with correct size
+  // After delete/deposit operations, N may change, so we need to update cell_contents size
+  if (cell_contents.size() != N) {
     cell_contents.resize(N);
   }
 
@@ -198,8 +289,47 @@ void find_cell_list(
     box, N, cell_count.data(), x, y, z, num_bins[0], num_bins[1], num_bins[2], rc_inv);
   GPU_CHECK_KERNEL
 
+  // Debug: Check buffer sizes before exclusive_scan
+  printf("[DEBUG] find_cell_list: N = %d, N_cells = %d, cell_count.size() = %zu, cell_count_sum.size() = %zu\n", 
+         N, N_cells, cell_count.size(), cell_count_sum.size());
+  fflush(stdout);
+  
+  // Debug: Check CUDA error before exclusive_scan
+  CHECK(gpuDeviceSynchronize());
+  gpuError_t err = gpuGetLastError();
+  if (err != gpuSuccess) {
+    printf("[DEBUG] CUDA error before exclusive_scan: %s\n", gpuGetErrorString(err));
+    fflush(stdout);
+  }
+  
   thrust::exclusive_scan(
     thrust::device, cell_count.data(), cell_count.data() + N_cells, cell_count_sum.data());
+  
+  // Debug: Check CUDA error after exclusive_scan
+  CHECK(gpuDeviceSynchronize());
+  err = gpuGetLastError();
+  if (err != gpuSuccess) {
+    printf("[DEBUG] CUDA error after exclusive_scan: %s\n", gpuGetErrorString(err));
+    fflush(stdout);
+  }
+  
+  // Debug: Check the last value of cell_count_sum and cell_count to verify total
+  if (N_cells > 0) {
+    int last_cell_count = 0;
+    int last_cell_count_sum = 0;
+    cell_count.copy_to_host(&last_cell_count, 1, N_cells - 1);
+    cell_count_sum.copy_to_host(&last_cell_count_sum, 1, N_cells - 1);
+    int total_expected = last_cell_count_sum + last_cell_count;
+    printf("[DEBUG] After exclusive_scan: last_cell_count = %d, last_cell_count_sum = %d, total_expected = %d, N = %d, cell_contents.size() = %zu\n",
+           last_cell_count, last_cell_count_sum, total_expected, N, cell_contents.size());
+    fflush(stdout);
+    if (total_expected > (int)cell_contents.size()) {
+      printf("[DEBUG] WARNING: total_expected (%d) > cell_contents.size() (%zu), resizing...\n",
+             total_expected, cell_contents.size());
+      fflush(stdout);
+      cell_contents.resize(total_expected);
+    }
+  }
 
   CHECK(gpuMemset(cell_count.data(), 0, sizeof(int) * N_cells));
 
@@ -238,19 +368,53 @@ void find_cell_list(
   GPU_Vector<int>& cell_count_sum,
   GPU_Vector<int>& cell_contents)
 {
+  // Validate position_per_atom size
+  if (position_per_atom.size() % 3 != 0) {
+    printf("ERROR: position_per_atom.size() = %zu is not divisible by 3\n", position_per_atom.size());
+    fflush(stdout);
+    return;
+  }
+  
   const int offset = position_per_atom.size() / 3;
+  if (N > offset) {
+    printf("ERROR: N = %d > offset = %d (position_per_atom.size() = %zu)\n", 
+           N, offset, position_per_atom.size());
+    fflush(stdout);
+    return;
+  }
+  
+  if (N <= 0) {
+    printf("ERROR: N = %d is invalid\n", N);
+    fflush(stdout);
+    return;
+  }
+  
   const int block_size = 256;
   const int grid_size = (N - 1) / block_size + 1;
   const double rc_inv = 1.0 / rc;
+  // Use N instead of offset for y and z offsets to ensure valid access
   const double* x = position_per_atom.data();
-  const double* y = position_per_atom.data() + offset;
-  const double* z = position_per_atom.data() + offset * 2;
+  const double* y = position_per_atom.data() + N;
+  const double* z = position_per_atom.data() + N * 2;
   const int N_cells = num_bins[0] * num_bins[1] * num_bins[2];
+  
+  if (N_cells <= 0) {
+    printf("ERROR: N_cells = %d is invalid (num_bins: %d %d %d)\n", 
+           N_cells, num_bins[0], num_bins[1], num_bins[2]);
+    fflush(stdout);
+    return;
+  }
 
   // number of cells is allowed to be larger than the number of atoms
   if (N_cells > cell_count.size()) {
     cell_count.resize(N_cells);
     cell_count_sum.resize(N_cells);
+  }
+
+  // Ensure cell_contents is properly allocated with correct size
+  // After delete/deposit operations, N may change, so we need to update cell_contents size
+  if (cell_contents.size() != N) {
+    cell_contents.resize(N);
   }
 
   set_to_zero<<<(cell_count.size() - 1) / 64 + 1, 64, 0, stream>>>(
@@ -269,6 +433,19 @@ void find_cell_list(
     box, N, cell_count.data(), x, y, z, num_bins[0], num_bins[1], num_bins[2], rc_inv);
   GPU_CHECK_KERNEL
 
+  // Debug: Check buffer sizes before exclusive_scan (stream version)
+  printf("[DEBUG] find_cell_list (stream): N = %d, N_cells = %d, cell_count.size() = %zu, cell_count_sum.size() = %zu\n", 
+         N, N_cells, cell_count.size(), cell_count_sum.size());
+  fflush(stdout);
+  
+  // Debug: Check CUDA error before exclusive_scan
+  CHECK(gpuDeviceSynchronize());
+  gpuError_t err = gpuGetLastError();
+  if (err != gpuSuccess) {
+    printf("[DEBUG] CUDA error before exclusive_scan (stream): %s\n", gpuGetErrorString(err));
+    fflush(stdout);
+  }
+  
   thrust::exclusive_scan(
 #ifdef USE_HIP
     thrust::hip::par.on(stream),
@@ -278,6 +455,14 @@ void find_cell_list(
     cell_count.data(),
     cell_count.data() + N_cells,
     cell_count_sum.data());
+  
+  // Debug: Check CUDA error after exclusive_scan
+  CHECK(gpuDeviceSynchronize());
+  err = gpuGetLastError();
+  if (err != gpuSuccess) {
+    printf("[DEBUG] CUDA error after exclusive_scan (stream): %s\n", gpuGetErrorString(err));
+    fflush(stdout);
+  }
 
   set_to_zero<<<(cell_count.size() - 1) / 64 + 1, 64, 0, stream>>>(
     cell_count.size(), cell_count.data());
@@ -396,28 +581,58 @@ static __global__ void gpu_find_neighbor_ON1_ilp(
     const int x_lim = box.pbc_x ? 2 : 0;
 
     // get radial descriptors
+    const int N_cells = nx * ny * nz;
     for (int k = -z_lim; k <= z_lim; ++k) {
       for (int j = -y_lim; j <= y_lim; ++j) {
         for (int i = -x_lim; i <= x_lim; ++i) {
-          int neighbor_cell = cell_id + k * nx * ny + j * nx + i;
-          if (cell_id_x + i < 0)
-            neighbor_cell += nx;
-          if (cell_id_x + i >= nx)
-            neighbor_cell -= nx;
-          if (cell_id_y + j < 0)
-            neighbor_cell += ny * nx;
-          if (cell_id_y + j >= ny)
-            neighbor_cell -= ny * nx;
-          if (cell_id_z + k < 0)
-            neighbor_cell += nz * ny * nx;
-          if (cell_id_z + k >= nz)
-            neighbor_cell -= nz * ny * nx;
+          // Calculate neighbor cell coordinates with periodic boundary conditions
+          int neighbor_cell_x = cell_id_x + i;
+          int neighbor_cell_y = cell_id_y + j;
+          int neighbor_cell_z = cell_id_z + k;
+          
+          // Apply periodic boundary conditions
+          if (box.pbc_x) {
+            while (neighbor_cell_x < 0) neighbor_cell_x += nx;
+            while (neighbor_cell_x >= nx) neighbor_cell_x -= nx;
+          }
+          if (box.pbc_y) {
+            while (neighbor_cell_y < 0) neighbor_cell_y += ny;
+            while (neighbor_cell_y >= ny) neighbor_cell_y -= ny;
+          }
+          if (box.pbc_z) {
+            while (neighbor_cell_z < 0) neighbor_cell_z += nz;
+            while (neighbor_cell_z >= nz) neighbor_cell_z -= nz;
+          }
+          
+          // Check if neighbor cell is valid
+          if (neighbor_cell_x < 0 || neighbor_cell_x >= nx ||
+              neighbor_cell_y < 0 || neighbor_cell_y >= ny ||
+              neighbor_cell_z < 0 || neighbor_cell_z >= nz) {
+            continue; // Skip invalid cells (non-periodic boundaries)
+          }
+          
+          // Calculate neighbor cell ID
+          int neighbor_cell = neighbor_cell_x + nx * neighbor_cell_y + nx * ny * neighbor_cell_z;
+          
+          // Bounds check before accessing arrays
+          if (neighbor_cell < 0 || neighbor_cell >= N_cells) {
+            continue;
+          }
 
           const int num_atoms_neighbor_cell = cell_counts[neighbor_cell];
           const int num_atoms_previous_cells = cell_count_sum[neighbor_cell];
 
+          // Bounds check for cell_contents access
+          if (num_atoms_previous_cells + num_atoms_neighbor_cell > N) {
+            continue;
+          }
+
           for (int m = 0; m < num_atoms_neighbor_cell; ++m) {
-            const int n2 = cell_contents[num_atoms_previous_cells + m];
+            const int idx = num_atoms_previous_cells + m;
+            if (idx < 0 || idx >= N) {
+              continue;
+            }
+            const int n2 = cell_contents[idx];
             // neighbors in different layers
             if (n2 >= N1 && n2 < N2 && n1 != n2) {
 
@@ -548,28 +763,58 @@ static __global__ void gpu_find_neighbor_ON1_SW(
     const int x_lim = box.pbc_x ? 2 : 0;
 
     // get radial descriptors
+    const int N_cells = nx * ny * nz;
     for (int k = -z_lim; k <= z_lim; ++k) {
       for (int j = -y_lim; j <= y_lim; ++j) {
         for (int i = -x_lim; i <= x_lim; ++i) {
-          int neighbor_cell = cell_id + k * nx * ny + j * nx + i;
-          if (cell_id_x + i < 0)
-            neighbor_cell += nx;
-          if (cell_id_x + i >= nx)
-            neighbor_cell -= nx;
-          if (cell_id_y + j < 0)
-            neighbor_cell += ny * nx;
-          if (cell_id_y + j >= ny)
-            neighbor_cell -= ny * nx;
-          if (cell_id_z + k < 0)
-            neighbor_cell += nz * ny * nx;
-          if (cell_id_z + k >= nz)
-            neighbor_cell -= nz * ny * nx;
+          // Calculate neighbor cell coordinates with periodic boundary conditions
+          int neighbor_cell_x = cell_id_x + i;
+          int neighbor_cell_y = cell_id_y + j;
+          int neighbor_cell_z = cell_id_z + k;
+          
+          // Apply periodic boundary conditions
+          if (box.pbc_x) {
+            while (neighbor_cell_x < 0) neighbor_cell_x += nx;
+            while (neighbor_cell_x >= nx) neighbor_cell_x -= nx;
+          }
+          if (box.pbc_y) {
+            while (neighbor_cell_y < 0) neighbor_cell_y += ny;
+            while (neighbor_cell_y >= ny) neighbor_cell_y -= ny;
+          }
+          if (box.pbc_z) {
+            while (neighbor_cell_z < 0) neighbor_cell_z += nz;
+            while (neighbor_cell_z >= nz) neighbor_cell_z -= nz;
+          }
+          
+          // Check if neighbor cell is valid
+          if (neighbor_cell_x < 0 || neighbor_cell_x >= nx ||
+              neighbor_cell_y < 0 || neighbor_cell_y >= ny ||
+              neighbor_cell_z < 0 || neighbor_cell_z >= nz) {
+            continue; // Skip invalid cells (non-periodic boundaries)
+          }
+          
+          // Calculate neighbor cell ID
+          int neighbor_cell = neighbor_cell_x + nx * neighbor_cell_y + nx * ny * neighbor_cell_z;
+          
+          // Bounds check before accessing arrays
+          if (neighbor_cell < 0 || neighbor_cell >= N_cells) {
+            continue;
+          }
 
           const int num_atoms_neighbor_cell = cell_counts[neighbor_cell];
           const int num_atoms_previous_cells = cell_count_sum[neighbor_cell];
 
+          // Bounds check for cell_contents access
+          if (num_atoms_previous_cells + num_atoms_neighbor_cell > N) {
+            continue;
+          }
+
           for (int m = 0; m < num_atoms_neighbor_cell; ++m) {
-            const int n2 = cell_contents[num_atoms_previous_cells + m];
+            const int idx = num_atoms_previous_cells + m;
+            if (idx < 0 || idx >= N) {
+              continue;
+            }
+            const int n2 = cell_contents[idx];
             if (n2 >= N1 && n2 < N2 && n1 != n2) {
 
               double x12 = x[n2] - x1;
