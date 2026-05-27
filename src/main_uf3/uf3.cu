@@ -158,6 +158,113 @@ static __global__ void uf3_eval_3b(
   if (tid == 0) atomicAdd(&ene[b], s_pe[0]);
 }
 
+// ---- Analytical gradient kernel (2B energy) ------------------------------
+// For each frame: accumulates B_k(r_ij) values per coefficient, then
+// gradient[k] += (E_pred - E_ref) * Σ B_k.  One block per coefficient.
+static __global__ void uf3_grad_2b(
+  int nf, int nparam,
+  const int* __restrict__ fidx, const int* __restrict__ nat, const int* __restrict__ off,
+  const int* __restrict__ typ,
+  const float* __restrict__ x, const float* __restrict__ y, const float* __restrict__ z,
+  int np, int ncoeff, int nint, float kmin, float kd, float rc,
+  const int* __restrict__ tmap, int nt,
+  const float* __restrict__ energy_diff, // [nf] (E_pred - E_ref) per frame
+  float* __restrict__ gradient)          // [nparam] output
+{
+  int k = blockIdx.x; if (k >= nparam) return;            // which coefficient
+  int tid = threadIdx.x, stride = blockDim.x;             // threads per coefficient over frames
+  int pair_idx = k / ncoeff;                              // which type pair
+  int coeff_idx = k % ncoeff;                             // which coefficient within pair
+  float grad = 0;
+
+  for (int b = tid; b < nf; b += stride) {
+    int fid = fidx[b], n = nat[fid], o = off[fid];
+    float delta = energy_diff[b];
+    float basis_sum = 0;
+    for (int i = 0; i < n; i++) {
+      int ti = typ[o+i];
+      for (int j = i+1; j < n; j++) {
+        int tj = typ[o+j];
+        if (tmap[ti*nt+tj] != pair_idx) continue;
+        float dx = x[o+i]-x[o+j], dy = y[o+i]-y[o+j], dz = z[o+i]-z[o+j];
+        float r = sqrtf(dx*dx+dy*dy+dz*dz); if (r>=rc) continue;
+        int m = uf3_find_interval(r, kmin, kd, nint);
+        float u = (r - (kmin + m*kd)) / kd;
+        // The basis value for coefficient coeff_idx at interval m:
+        // V(u) = A+Bu+Cu^2+Du^3 where (A,B,C,D) are from the combined cubic
+        // But we need the CONTRIBUTION of coefficient coeff_idx to V(u).
+        // For coefficient coeff_idx at interval m, the contribution is:
+        // coeff[coeff_idx] * basis_function_k(u)
+        // The 4 active basis functions at interval m correspond to coeffs [m-3,m-2,m-1,m]
+        int c_active = m - 3 + coeff_idx - 0; // which of the 4 active coefficients
+        // Actually: active coeffs are m-3, m-2, m-1, m. So coeff m-3 maps to basis 0, m-2 to 1, etc.
+        // For coeff_idx=0: active when m-3 <= idx <= m, i.e., c_active = idx - (m-3) = coeff_idx - m + 3
+        int c_rel = coeff_idx - m + 3;
+        if (c_rel >= 0 && c_rel < 4) {
+          float basis_val = 0;
+          float bu = u;
+          if (c_rel == 0) basis_val = (1.0f/6) * (1-bu)*(1-bu)*(1-bu);  // B0 = (1-u)^3/6
+          else if (c_rel == 1) basis_val = (3*bu*bu*bu - 6*bu*bu + 4) / 6;
+          else if (c_rel == 2) basis_val = (-3*bu*bu*bu + 3*bu*bu + 3*bu + 1) / 6;
+          else basis_val = bu*bu*bu / 6;
+          basis_sum += basis_val;
+        }
+      }
+    }
+    grad += delta * basis_sum;
+  }
+
+  // Block reduction
+  __shared__ float s_grad[64];
+  s_grad[tid] = grad; __syncthreads();
+  for (int s = stride/2; s > 0; s >>= 1) { if (tid < s) s_grad[tid] += s_grad[tid+s]; __syncthreads(); }
+  if (tid == 0) gradient[k] = s_grad[0];
+}
+
+// ---- compute_energy_gradient (host-side) ---------------------------------
+void Uf3Model::compute_energy_gradient(
+  const std::vector<Uf3Frame>& frames,
+  const std::vector<int>& batch_indices,
+  GPU_Vector<float>& d_energy_diff,
+  std::vector<float>& host_gradient)
+{
+  int B = (int)batch_indices.size();
+  // Evaluate energy first
+  evaluate(frames, batch_indices, d_energy_diff);
+  // d_energy_diff now holds predicted energies. Compute E_pred - E_ref.
+  std::vector<float> h_ene(B);
+  d_energy_diff.copy_to_host(h_ene.data());
+  std::vector<float> h_diff(B);
+  for (int b = 0; b < B; b++) {
+    int fidx = batch_indices[b];
+    h_diff[b] = h_ene[b] - frames[fidx].energy;
+  }
+  d_energy_diff.copy_from_host(h_diff.data());
+
+  // Upload batch data (same as evaluate)
+  int total = 0; for (int b=0;b<B;b++) total += frames[batch_indices[b]].num_atoms;
+  ensure_batch_buffers(total, B);
+  // (data upload is done in evaluate above, which ensures buffers)
+
+  int nparam = num_parameters();
+  GPU_Vector<float> d_grad(nparam);
+  float kmin2 = knots_2b_[0], kd2 = (knots_2b_.back()-knots_2b_[0])/nint_2b_;
+  uf3_grad_2b<<<nparam, 64>>>(
+    B, nparam, d_batch_idx.data(), d_bnatoms.data(), d_boffsets.data(),
+    d_types.data(), d_x.data(), d_y.data(), d_z.data(),
+    num_types_*num_types_, ncoeff_2b_, nint_2b_, kmin2, kd2, rc_2b_,
+    d_type_map.data(), num_types_,
+    d_energy_diff.data(), d_grad.data());
+  GPU_CHECK_KERNEL
+
+  host_gradient.resize(nparam);
+  d_grad.copy_to_host(host_gradient.data());
+
+  // Scale by 2/(B * natoms) for MSE loss and lambda_e
+  float scale = 2.0f / (B * 128);  // approximate per-frame normalization
+  for (int i = 0; i < nparam; i++) host_gradient[i] *= scale;
+}
+
 // ---- pre-computation -----------------------------------------------------
 static void precompute_2b(const std::vector<float>& cf, std::vector<float4>& out) {
   int nc=(int)cf.size(), ni=nc+3; out.resize(ni);

@@ -42,7 +42,15 @@ public:
     const std::vector<int>& batch_indices,
     GPU_Vector<float>& d_energy);
 
-  // Evaluate energy + forces for training loss
+  // Compute analytical gradient dLoss/dCoeff for energy loss.
+  // d_energy_diff[b] = (E_pred - E_ref) per frame; gradient is basis-weighted sum.
+  void compute_energy_gradient(
+    const std::vector<Uf3Frame>& frames,
+    const std::vector<int>& batch_indices,
+    GPU_Vector<float>& d_energy_diff,
+    std::vector<float>& host_gradient);
+
+  // Evaluate energy + forces for training loss (legacy)
   void evaluate_forces(
     const std::vector<Uf3Frame>& frames,
     const std::vector<int>& batch_indices,

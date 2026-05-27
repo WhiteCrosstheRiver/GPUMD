@@ -22,6 +22,7 @@ GPU-accelerated B-spline coefficient optimization with selectable optimizer.
 #include "dataset.cuh"
 #include "es.cuh"
 #include "fitness.cuh"
+#include "lbfgs.cuh"
 #include "parameters.cuh"
 #include "snes.cuh"
 #include "uf3.cuh"
@@ -145,14 +146,20 @@ int main(int argc, char* argv[])
   auto t0 = std::chrono::high_resolution_clock::now();
 
   if (para.optimizer == "adam") {
-    printf("\n=== Adam optimizer ===\n");
+    printf("\n=== Adam (analytical gradient) ===\n");
     run_adam(para, fitness);
+  } else if (para.optimizer == "lbfgs") {
+    printf("\n=== L-BFGS ===\n");
+    run_lbfgs(para, fitness);
   } else if (para.optimizer == "snes") {
     printf("\n=== SNES optimizer ===\n");
     run_snes(para, fitness);
-  } else {
-    printf("\n=== ES optimizer (default) ===\n");
+  } else if (para.optimizer == "es") {
+    printf("\n=== ES optimizer (random) ===\n");
     run_es(para, fitness);
+  } else {
+    printf("\n=== Adam (default) ===\n");
+    run_adam(para, fitness);
   }
 
   auto t1 = std::chrono::high_resolution_clock::now();
