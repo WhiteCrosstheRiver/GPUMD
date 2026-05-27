@@ -66,45 +66,49 @@ float Uf3Fitness::compute_loss(const std::vector<int>& batch_indices, int genera
   cudaMemcpy(h_fy_.data(), model_->d_fy.data(), total * sizeof(float), cudaMemcpyDeviceToHost);
   cudaMemcpy(h_fz_.data(), model_->d_fz.data(), total * sizeof(float), cudaMemcpyDeviceToHost);
 
-  // Compute energy RMSE
+  // ---- Energy RMSE (per atom, matching NEP formula) ----
+  // NEP: diff = E_pred_per_atom - E_ref_per_atom, RMSE = sqrt(mean(diff^2))
   double e_sum2 = 0;
   for (int b = 0; b < B; b++) {
     int fidx = batch_indices[b];
-    double diff = (double)h_energy_[b] - (double)train_set_[fidx].energy;
+    int na = train_set_[fidx].num_atoms;
+    double e_pred_pa = (double)h_energy_[b] / na;       // per-atom predicted
+    double e_ref_pa  = (double)train_set_[fidx].energy / na; // per-atom reference
+    double diff = e_pred_pa - e_ref_pa;
     e_sum2 += diff * diff;
   }
-  float e_rmse = (float)sqrt(e_sum2 / B); // per-frame RMSE (eV)
+  loss_e = (float)sqrt(e_sum2 / B);  // RMSE of per-atom energy (eV/atom)
 
-  // Compute force RMSE
-  double f_sum2 = 0; int f_count = 0;
+  // ---- Force RMSE (per component, matching NEP formula) ----
+  // NEP: error = sum of dx^2+dy^2+dz^2 over all atoms;
+  //      RMSE = sqrt(error / (3 * total_atoms))
+  double f_sum2 = 0; int total_atoms = 0;
   { int off = 0;
     for (int b = 0; b < B; b++) {
       const Uf3Frame& f = train_set_[batch_indices[b]];
+      total_atoms += f.num_atoms;
       for (int i = 0; i < f.num_atoms; i++) {
         double dx = (double)h_fx_[off+i] - (double)f.fx[i];
         double dy = (double)h_fy_[off+i] - (double)f.fy[i];
         double dz = (double)h_fz_[off+i] - (double)f.fz[i];
         f_sum2 += dx*dx + dy*dy + dz*dz;
-        f_count += 3;
       }
       off += f.num_atoms;
     }
   }
-  float f_rmse = (float)sqrt(f_sum2 / f_count); // per-component force RMSE (eV/A)
+  loss_f = (float)sqrt(f_sum2 / (3.0 * total_atoms)); // RMSE per force component (eV/A)
 
-  // L1/L2 regularization
+  // ---- L1/L2 regularization (per parameter average) ----
   float l1 = 0, l2 = 0;
-  std::vector<float> params(model_->num_parameters());
-  model_->get_parameters(params.data());
-  for (size_t i = 0; i < params.size(); i++) { l1 += fabsf(params[i]); l2 += params[i]*params[i]; }
-  l1 /= params.size(); l2 = sqrtf(l2 / params.size());
+  { std::vector<float> params(model_->num_parameters());
+    model_->get_parameters(params.data());
+    for (size_t i = 0; i < params.size(); i++) { l1 += fabsf(params[i]); l2 += params[i]*params[i]; }
+    l1 /= params.size(); l2 = sqrtf(l2 / params.size()); }
+  loss_l1 = lambda_1_ > 0 ? l1 : 0;
+  loss_l2 = lambda_2_ > 0 ? l2 : 0;
 
-  // Total loss (NEP convention: per-component RMSE weighted by lambda)
-  loss_e = e_rmse / train_set_[batch_indices[0]].num_atoms; // eV/atom
-  loss_f = f_rmse;
-  loss_l1 = 0; loss_l2 = 0;
-  if (lambda_1_ > 0) { loss_l1 = lambda_1_ * l1; loss_l2 = lambda_2_ * l2; }
-  loss_total = lambda_e_ * loss_e + lambda_f_ * loss_f + loss_l1 + loss_l2;
+  // ---- Total loss (matches NEP convention) ----
+  loss_total = lambda_e_ * loss_e + lambda_f_ * loss_f + lambda_1_ * loss_l1 + lambda_2_ * loss_l2;
 
   // Write loss.out every 100 generations
   if (floss_ && generation % 100 == 0) {
