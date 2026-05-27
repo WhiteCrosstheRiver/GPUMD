@@ -67,7 +67,7 @@ static void write_uf3_file(UF3_Parameters& para, Uf3Model* model)
   auto& elements = model->elements();
   auto& knots = model->knots_2b();
 
-  std::vector<float> coeffs(nc * np);
+  std::vector<float> coeffs(model->num_parameters());
   model->get_parameters(coeffs.data());
 
   for (int p = 0; p < np; p++) {

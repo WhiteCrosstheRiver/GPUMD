@@ -71,6 +71,7 @@ static __global__ void uf3_eval_3b(
   float km0,float kd0,float rc0, float km1,float kd1,float rc1,
   float km2,float kd2,float rc2, const int* __restrict__ tmap, int ntr,int nt,
   const int* __restrict__ nn_off, const int* __restrict__ nn_lst,
+  const int* __restrict__ nn_frame_off,
   float* __restrict__ ene)
 {
   int b = blockIdx.x; if (b >= nf) return;
@@ -78,14 +79,13 @@ static __global__ void uf3_eval_3b(
   int fid = fidx[b], n = nat[fid], o = off[fid];
   float pe = 0;
 
-  // nn_off is a flat array indexed by global atom position in the batch.
-  // nn_off[o+i] = start offset in nn_lst for atom i of this frame.
-  // nn_off[o+i+1] = start offset for next atom → count = nn_off[o+i+1] - nn_off[o+i]
+  // nn_frame_off[fid] = start index in nn_off for this frame's atoms
+  int nn_base = nn_frame_off[fid];
 
   for (int i = tid; i < n; i += stride) {
     int ti = typ[o+i];
-    int nni = nn_off[o+i+1] - nn_off[o+i];
-    int nn_start = nn_off[o+i];
+    int nni = nn_off[nn_base + i + 1] - nn_off[nn_base + i];
+    int nn_start = nn_off[nn_base + i];
 
     // Iterate over all pairs (j,k) from i's neighbor list
     for (int jj = 0; jj < nni; jj++) {
@@ -279,24 +279,28 @@ void Uf3Model::evaluate(
   std::vector<int> h_btypes(total);
   std::vector<float> h_bx(total),h_by(total),h_bz(total);
   // 3B: neighbor list flat arrays
-  std::vector<int> h_nn_offset;  // [total + B] per-atom offsets
-  std::vector<int> h_nn_list;    // flat neighbor indices
-  if(has_3b_){ h_nn_offset.reserve(total + B*2); h_nn_list.reserve(max_nn); }
+  std::vector<int> h_nn_offset;     // per-atom offsets into nn_list
+  std::vector<int> h_nn_list;       // flat neighbor indices
+  std::vector<int> h_nn_frame_off;  // per-frame start in nn_offset
+  if(has_3b_){ h_nn_offset.reserve(total + B); h_nn_list.reserve(max_nn); h_nn_frame_off.reserve(B+1); }
 
   h_boffsets[0]=0; int nn_global_off=0;
   {int off=0; for(int b=0;b<B;b++){const Uf3Frame& f = frames[batch_indices[b]];
     h_bnatoms[b]=f.num_atoms;h_boffsets[b+1]=h_boffsets[b]+f.num_atoms;
     for(int i=0;i<f.num_atoms;i++){h_btypes[off+i]=f.types[i];h_bx[off+i]=f.x[i];h_by[off+i]=f.y[i];h_bz[off+i]=f.z[i];}
-    // 3B: append neighbor list for this frame
-    if(has_3b_ && !f.nn_list.empty()){
+    // 3B: append neighbor list for this frame (always add entry, even if empty)
+    if(has_3b_){
+      h_nn_frame_off.push_back((int)h_nn_offset.size());
       for(int i=0;i<f.num_atoms;i++){
         h_nn_offset.push_back(nn_global_off);
-        for(int jj=0;jj<f.nn_counts[i];jj++) h_nn_list.push_back(f.nn_list[f.nn_offset[i]+jj]);
-        nn_global_off += f.nn_counts[i];
+        if(!f.nn_list.empty()) {
+          for(int jj=0;jj<f.nn_counts[i];jj++) h_nn_list.push_back(f.nn_list[f.nn_offset[i]+jj]);
+          nn_global_off += f.nn_counts[i];
+        }
       }
-      h_nn_offset.push_back(nn_global_off); // trailing sentinel for i+1 access
     }
     off+=f.num_atoms;}}
+  if(has_3b_) h_nn_frame_off.push_back((int)h_nn_offset.size()); // trailing
 
   // Upload
   d_types.copy_from_host(h_btypes.data());
@@ -316,10 +320,10 @@ void Uf3Model::evaluate(
   GPU_CHECK_KERNEL
 
   // 3B: neighbor-list-based, multi-threaded
-  if(has_3b_ && !h_nn_list.empty()){
-    // Upload neighbor lists to pre-allocated buffers
+  if(has_3b_ && h_nn_frame_off.size() > 1){
     d_nn_off.resize(h_nn_offset.size()); d_nn_off.copy_from_host(h_nn_offset.data());
     d_nn_lst.resize(h_nn_list.size());   d_nn_lst.copy_from_host(h_nn_list.data());
+    d_nn_frame_off.resize(h_nn_frame_off.size()); d_nn_frame_off.copy_from_host(h_nn_frame_off.data());
     uf3_eval_3b<<<B, BLK>>>(B,d_batch_idx.data(),d_bnatoms.data(),d_boffsets.data(),
       d_types.data(),d_x.data(),d_y.data(),d_z.data(),
       d_tensor_3b.data(),nc_3b_[0],nc_3b_[1],nc_3b_[2],
@@ -328,7 +332,7 @@ void Uf3Model::evaluate(
       knots_3b_[1][0],(knots_3b_[1].back()-knots_3b_[1][0])/nint_3b_[1],rc_3b_[1],
       knots_3b_[2][0],(knots_3b_[2].back()-knots_3b_[2][0])/nint_3b_[2],rc_3b_[2],
       d_trip_map.data(),num_trips_,num_types_,
-      d_nn_off.data(),d_nn_lst.data(),
+      d_nn_off.data(),d_nn_lst.data(),d_nn_frame_off.data(),
       d_energy_buf.data());
     GPU_CHECK_KERNEL
   }
