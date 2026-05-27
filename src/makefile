@@ -47,7 +47,9 @@ SOURCES_GNEP =                     \
 	$(wildcard utilities/*.cu)
 SOURCES_UF3 =                     \
 	$(wildcard main_uf3/*.cu)     \
-	$(wildcard utilities/*.cu)
+	utilities/error.cu            \
+	utilities/main_common.cu      \
+	utilities/read_file.cu
 
 
 

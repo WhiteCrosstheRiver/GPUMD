@@ -16,7 +16,8 @@
 /*----------------------------------------------------------------------------80
 UF3 training model: manages 2-body and 3-body B-spline coefficients,
 pre-computes cubic polynomial tables, and launches GPU kernels for batch
-energy evaluation.
+energy evaluation.  All GPU buffers are pre-allocated once; no per-call
+resize to avoid heap fragmentation.
 ------------------------------------------------------------------------------*/
 
 #pragma once
@@ -34,7 +35,8 @@ public:
   void get_parameters(float* params) const;
   void set_parameters(const float* params);
 
-  // GPU batch energy evaluation (2B + 3B)
+  // GPU batch energy evaluation (2B + 3B).  d_energy is overwritten
+  // with per-frame energies; must be pre-sized to match batch_indices.size().
   void evaluate(
     const std::vector<Uf3Frame>& frames,
     const std::vector<int>& batch_indices,
@@ -58,19 +60,13 @@ public:
   float rc_2b() const { return rc_2b_; }
   float rc_3b(int d) const { return rc_3b_[d]; }
 
-  // Pre-allocated GPU buffers
-  GPU_Vector<int> d_types, d_batch_idx, d_bnatoms, d_boffsets, d_type_map;
-  GPU_Vector<float> d_x, d_y, d_z;
-  GPU_Vector<float4> d_coeff_2b;
-  GPU_Vector<float> d_tensor_3b;       // [num_trips * nc0 * nc1 * nc2]
-  GPU_Vector<float4> d_basis_3b[3];    // per-interval basis polynomials
-  GPU_Vector<int> d_trip_map;          // trip type mapping
-
 private:
   void build_knots();
+  void prealloc_gpu(const UF3_Parameters& para);
   void upload_2b_coeffs();
   void upload_3b_coeffs();
   void init_3b_basis();
+  void ensure_batch_buffers(int batch_atoms, int batch_size);
 
   // 2B
   int ncoeff_2b_, nknots_2b_, nint_2b_;
@@ -83,12 +79,27 @@ private:
 
   // 3B
   bool has_3b_ = false;
-  int nc_3b_[3];           // coefficient dimensions
+  int nc_3b_[3];
   int nk_3b_[3], nint_3b_[3];
-  int num_trips_;           // num_types^3
+  int num_trips_;
   float rc_3b_[3];
   std::vector<float> knots_3b_[3];
-  std::vector<float> coeffs_3b_; // flattened tensor per triplet
+  std::vector<float> coeffs_3b_;
   int num_params_3b_;
   int num_params_total_;
+
+  // ---- Pre-allocated GPU buffers (never resized after init) ----
+  int gpu_max_atoms_ = 0;       // current capacity
+  int gpu_max_batch_ = 0;
+  int gpu_max_tensor_ = 0;
+  int gpu_max_coeff_2b_ = 0;
+
+public:  // (optimizers access these directly)
+  GPU_Vector<int>    d_types, d_batch_idx, d_bnatoms, d_boffsets;
+  GPU_Vector<float>  d_x, d_y, d_z, d_energy_buf;
+  GPU_Vector<float4> d_coeff_2b;
+  GPU_Vector<float>  d_tensor_3b;
+  GPU_Vector<float4> d_basis_3b_all;
+  int basis_offsets_[3];
+  GPU_Vector<int>    d_trip_map, d_type_map;
 };
