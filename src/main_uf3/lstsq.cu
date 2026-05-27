@@ -71,6 +71,23 @@ static float eval_basis(int coeff_idx, int nint, float r, float kmin, float kd, 
   return u*u*u/6;
 }
 
+// ---- Evaluate 2B basis DERIVATIVE ----
+static float eval_basis_deriv(int coeff_idx, int nint, float r, float kmin, float kd, float rc)
+{
+  if (r >= rc) return 0;
+  int m = (int)((r - kmin) / kd);
+  if (m < 0) m = 0; if (m >= nint) m = nint - 1;
+  float u = (r - (kmin + m*kd)) / kd;
+  int crel = coeff_idx - m + 3;
+  if (crel < 0 || crel > 3) return 0;
+  float ddu = 0;
+  if (crel == 0) ddu = -3*(1-u)*(1-u)/6;
+  else if (crel == 1) ddu = (9*u*u - 12*u)/6;
+  else if (crel == 2) ddu = (-9*u*u + 6*u + 3)/6;
+  else ddu = 3*u*u/6;
+  return ddu / kd;
+}
+
 void run_lstsq(UF3_Parameters& para, Uf3Fitness& fitness)
 {
   int ncoeff = fitness.model()->ncoeff_2b();
@@ -127,6 +144,41 @@ void run_lstsq(UF3_Parameters& para, Uf3Fitness& fitness)
         int pair_idx = ti * nt + tj;
         for (int c = 0; c < ncoeff; c++)
           basis_sum[pair_idx * ncoeff + c] += eval_basis(c, nint, r, kmin, kd, rc);
+      }
+    }
+
+    // ---- 2B force contribution to normal equations ----
+    float lf = (float)para.lambda_f;
+    if (lf > 0) {
+      float fnorm = 1.0f / (3.0f * n); // normalize by force components per frame
+      for (int i = 0; i < n; i++) {
+        int ti = fr.types[i];
+        std::vector<double> fbx(num_params_2b, 0), fby(num_params_2b, 0), fbz(num_params_2b, 0);
+        for (int j = 0; j < n; j++) {
+          if (i == j) continue;
+          int tj = fr.types[j];
+          float dx = fr.x[i]-fr.x[j], dy = fr.y[i]-fr.y[j], dz = fr.z[i]-fr.z[j];
+          float r = sqrtf(dx*dx+dy*dy+dz*dz);
+          if (r >= rc) continue;
+          float inv_r = 1.0f / r;
+          int pair_idx = ti * nt + tj;
+          for (int c = 0; c < ncoeff; c++) {
+            float dbdr = eval_basis_deriv(c, nint, r, kmin, kd, rc);
+            float factor = -dbdr * inv_r;
+            int kk = pair_idx * ncoeff + c;
+            fbx[kk] += factor * dx; fby[kk] += factor * dy; fbz[kk] += factor * dz;
+          }
+        }
+        // Add force equations: ATA += lf * fnorm * G·G^T, ATb += lf * fnorm * G·F_ref
+        float wf = lf * fnorm;
+        for (int k = 0; k < num_params_2b; k++) {
+          if (fbx[k]==0 && fby[k]==0 && fbz[k]==0) continue;
+          ATb[k] += wf * (fbx[k]*fr.fx[i] + fby[k]*fr.fy[i] + fbz[k]*fr.fz[i]);
+          for (int m = 0; m < num_params_2b; m++) {
+            double gk_gm = fbx[k]*fbx[m] + fby[k]*fby[m] + fbz[k]*fbz[m];
+            if (gk_gm != 0) ATA[k*nparam + m] += wf * gk_gm;
+          }
+        }
       }
     }
 
