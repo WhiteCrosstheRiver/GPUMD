@@ -136,9 +136,17 @@ int main(int argc, char* argv[])
   auto train_frames = load_uf3_frames(para.train_data.c_str(), nn_cutoff);
   printf("Loaded %zu training frames.\n", train_frames.size());
 
+  // Load test data if available
+  std::vector<Uf3Frame> test_frames;
+  if (!para.test_data.empty()) {
+    test_frames = load_uf3_frames(para.test_data.c_str(), 0.0f);
+    printf("Loaded %zu test frames.\n", test_frames.size());
+  }
+
   // Create model and fitness
   Uf3Model model(para);
   Uf3Fitness fitness(para, &model, train_frames);
+  if (!test_frames.empty()) fitness.set_test_set(test_frames);
 
   printf("Model: %d params, %d pairs, %d coeffs/pair\n",
          model.num_parameters(), model.num_pairs(), model.ncoeff_2b());
