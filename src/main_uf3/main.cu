@@ -130,7 +130,8 @@ int main(int argc, char* argv[])
 
   // Load data
   printf("Loading data...\n");
-  auto train_frames = load_uf3_frames(para.train_data.c_str());
+  float nn_cutoff = para.n_max_3b[0] > 0 ? (float)std::max(para.rc_3b[0], para.rc_3b[1]) : 0.0f;
+  auto train_frames = load_uf3_frames(para.train_data.c_str(), nn_cutoff);
   printf("Loaded %zu training frames.\n", train_frames.size());
 
   // Create model and fitness

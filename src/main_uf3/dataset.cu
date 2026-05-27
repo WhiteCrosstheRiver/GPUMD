@@ -14,11 +14,12 @@
 */
 
 #include "dataset.cuh"
+#include <cmath>
 #include <fstream>
 #include <iostream>
 #include <sstream>
 
-std::vector<Uf3Frame> load_uf3_frames(const char* filename)
+std::vector<Uf3Frame> load_uf3_frames(const char* filename, float nn_cutoff)
 {
   std::vector<Uf3Frame> frames;
   std::ifstream input(filename);
@@ -51,6 +52,38 @@ std::vector<Uf3Frame> load_uf3_frames(const char* filename)
       else if (elem == "Ge") f.types[i] = 1;
       else f.types[i] = 0;
     }
+
+    // Build neighbor list within nn_cutoff (for 3B optimization)
+    if (nn_cutoff > 0.0f) {
+      float cutoff_sq = nn_cutoff * nn_cutoff;
+      f.nn_counts.resize(natoms, 0);
+      f.nn_offset.resize(natoms + 1, 0);
+      // Pass 1: count neighbors
+      for (int i = 0; i < natoms; i++) {
+        for (int j = i + 1; j < natoms; j++) {
+          float dx = f.x[i] - f.x[j], dy = f.y[i] - f.y[j], dz = f.z[i] - f.z[j];
+          if (dx*dx + dy*dy + dz*dz < cutoff_sq) {
+            f.nn_counts[i]++; f.nn_counts[j]++;
+          }
+        }
+      }
+      // Compute offsets
+      for (int i = 0; i < natoms; i++) f.nn_offset[i+1] = f.nn_offset[i] + f.nn_counts[i];
+      int total_nn = f.nn_offset[natoms];
+      f.nn_list.resize(total_nn);
+      // Pass 2: fill (use temp per-atom counters)
+      std::vector<int> counters(natoms, 0);
+      for (int i = 0; i < natoms; i++) {
+        for (int j = i + 1; j < natoms; j++) {
+          float dx = f.x[i] - f.x[j], dy = f.y[i] - f.y[j], dz = f.z[i] - f.z[j];
+          if (dx*dx + dy*dy + dz*dz < cutoff_sq) {
+            f.nn_list[f.nn_offset[i] + counters[i]++] = j;
+            f.nn_list[f.nn_offset[j] + counters[j]++] = i;
+          }
+        }
+      }
+    }
+
     frames.push_back(f);
   }
   input.close();

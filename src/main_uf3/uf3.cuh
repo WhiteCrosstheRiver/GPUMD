@@ -102,4 +102,5 @@ public:  // (optimizers access these directly)
   GPU_Vector<float4> d_basis_3b_all;
   int basis_offsets_[3];
   GPU_Vector<int>    d_trip_map, d_type_map;
+  GPU_Vector<int>    d_nn_off, d_nn_lst;   // pre-alloc'd 3B neighbor lists
 };

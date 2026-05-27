@@ -23,6 +23,11 @@ struct Uf3Frame {
   std::vector<float> x, y, z;
   std::vector<float> fx, fy, fz;
   float energy = 0.0f;
+
+  // Pre-built neighbor list (indices of atoms within 3B cutoff)
+  std::vector<int> nn_counts;    // per-atom neighbor count
+  std::vector<int> nn_offset;    // per-atom offset in nn_list (cumsum)
+  std::vector<int> nn_list;      // flat neighbor indices
 };
 
-std::vector<Uf3Frame> load_uf3_frames(const char* filename);
+std::vector<Uf3Frame> load_uf3_frames(const char* filename, float nn_cutoff = 0.0f);

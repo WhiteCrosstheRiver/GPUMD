@@ -28,7 +28,7 @@ __device__ inline int uf3_find_interval(float r, float kmin, float kdelta, int n
   return i;
 }
 
-// ---- 2B kernel ------------------------------------------------------------
+// ---- 2B kernel (multi-threaded: each thread handles some atoms) -----------
 static __global__ void uf3_eval_2b(
   int nf, const int* __restrict__ fidx, const int* __restrict__ nat,
   const int* __restrict__ off, const int* __restrict__ typ,
@@ -37,19 +37,30 @@ static __global__ void uf3_eval_2b(
   const int* __restrict__ tmap, int nt, float* __restrict__ ene)
 {
   int b = blockIdx.x; if (b >= nf) return;
-  int fid = fidx[b], n = nat[fid], o = off[fid]; float pe = 0;
-  for (int i = 0; i < n; i++) for (int j = i+1; j < n; j++) {
-    float dx = x[o+i]-x[o+j], dy = y[o+i]-y[o+j], dz = z[o+i]-z[o+j];
-    float r = sqrtf(dx*dx+dy*dy+dz*dz); if (r >= rc) continue;
-    int m = uf3_find_interval(r, kmin, kd, nint);
-    float u = (r - (kmin + m*kd)) / kd;
-    float4 c = __ldg(&coeff[tmap[typ[o+i]*nt+typ[o+j]] * nint + m]);
-    pe += uf3_eval_cubic(c, u);
+  int tid = threadIdx.x, stride = blockDim.x;
+  int fid = fidx[b], n = nat[fid], o = off[fid];
+  float pe = 0;
+  for (int i = tid; i < n; i += stride) {
+    for (int j = i+1; j < n; j++) {
+      float dx = x[o+i]-x[o+j], dy = y[o+i]-y[o+j], dz = z[o+i]-z[o+j];
+      float r = sqrtf(dx*dx+dy*dy+dz*dz); if (r >= rc) continue;
+      int m = uf3_find_interval(r, kmin, kd, nint);
+      float u = (r - (kmin + m*kd)) / kd;
+      float4 c = __ldg(&coeff[tmap[typ[o+i]*nt+typ[o+j]] * nint + m]);
+      pe += uf3_eval_cubic(c, u);
+    }
   }
-  ene[b] = pe;
+  // Warp/block reduction
+  __shared__ float s_pe[64];
+  s_pe[tid] = pe; __syncthreads();
+  for (int s = stride/2; s > 0; s >>= 1) {
+    if (tid < s) s_pe[tid] += s_pe[tid + s];
+    __syncthreads();
+  }
+  if (tid == 0) ene[b] = s_pe[0];
 }
 
-// ---- 3B kernel ------------------------------------------------------------
+// ---- 3B kernel (neighbor-list-based, multi-threaded) ---------------------
 static __global__ void uf3_eval_3b(
   int nf, const int* __restrict__ fidx, const int* __restrict__ nat,
   const int* __restrict__ off, const int* __restrict__ typ,
@@ -59,17 +70,34 @@ static __global__ void uf3_eval_3b(
   const float4* __restrict__ b2, int ni2,
   float km0,float kd0,float rc0, float km1,float kd1,float rc1,
   float km2,float kd2,float rc2, const int* __restrict__ tmap, int ntr,int nt,
+  const int* __restrict__ nn_off, const int* __restrict__ nn_lst,
   float* __restrict__ ene)
 {
   int b = blockIdx.x; if (b >= nf) return;
-  int fid = fidx[b], n = nat[fid], o = off[fid]; float pe = 0;
-  for (int i = 0; i < n; i++) {
+  int tid = threadIdx.x, stride = blockDim.x;
+  int fid = fidx[b], n = nat[fid], o = off[fid];
+  float pe = 0;
+
+  // nn_off is a flat array indexed by global atom position in the batch.
+  // nn_off[o+i] = start offset in nn_lst for atom i of this frame.
+  // nn_off[o+i+1] = start offset for next atom → count = nn_off[o+i+1] - nn_off[o+i]
+
+  for (int i = tid; i < n; i += stride) {
     int ti = typ[o+i];
-    for (int j = i+1; j < n; j++) {
+    int nni = nn_off[o+i+1] - nn_off[o+i];
+    int nn_start = nn_off[o+i];
+
+    // Iterate over all pairs (j,k) from i's neighbor list
+    for (int jj = 0; jj < nni; jj++) {
+      int j = nn_lst[nn_start + jj];
+      if (j <= i) continue; // ensure unique triplets: i < j < k
       float dx12=x[o+j]-x[o+i], dy12=y[o+j]-y[o+i], dz12=z[o+j]-z[o+i];
       float r12=sqrtf(dx12*dx12+dy12*dy12+dz12*dz12); if (r12>=rc0) continue;
       int tj=typ[o+j];
-      for (int k=j+1; k<n; k++) {
+
+      for (int kk = jj+1; kk < nni; kk++) {
+        int k = nn_lst[nn_start + kk];
+        if (k <= j) continue;
         float dx13=x[o+k]-x[o+i], dy13=y[o+k]-y[o+i], dz13=z[o+k]-z[o+i];
         float r13=sqrtf(dx13*dx13+dy13*dy13+dz13*dz13); if (r13>=rc1) continue;
         float dx23=x[o+k]-x[o+j], dy23=y[o+k]-y[o+j], dz23=z[o+k]-z[o+j];
@@ -81,16 +109,23 @@ static __global__ void uf3_eval_3b(
         for(int p=0;p<4;p++){vb0[p]=uf3_eval_cubic(__ldg(&b0[m0*4+p]),u0);}
         for(int p=0;p<4;p++){vb1[p]=uf3_eval_cubic(__ldg(&b1[m1*4+p]),u1);}
         for(int p=0;p<4;p++){vb2[p]=uf3_eval_cubic(__ldg(&b2[m2*4+p]),u2);}
-        int p0=m0-3;if(p0<0)p0=0; int p1=m1-3;if(p1<0)p1=0; int p2=m2-3;if(p2<0)p2=0;
+        int p0=m0-3;if(p0<0)p0=0;int p1=m1-3;if(p1<0)p1=0;int p2=m2-3;if(p2<0)p2=0;
         const float* C=&tensor[tmap[(ti*nt+tj)*nt+tk]*nc0*nc1*nc2];
-        for(int dp=0;dp<4;dp++){int q=p0+dp;if(q>=nc0)continue; float bp=vb0[dp];
-        for(int dq=0;dq<4;dq++){int r=p1+dq;if(r>=nc1)continue; float bq=vb1[dq];
+        for(int dp=0;dp<4;dp++){int q=p0+dp;if(q>=nc0)continue;float bp=vb0[dp];
+        for(int dq=0;dq<4;dq++){int r=p1+dq;if(r>=nc1)continue;float bq=vb1[dq];
         for(int dr=0;dr<4;dr++){int s=p2+dr;if(s>=nc2)continue;
         pe+=C[q+r*nc0+s*nc0*nc1]*bp*bq*vb2[dr];}}}
       }
     }
   }
-  ene[b] += pe;
+  // Block reduction
+  __shared__ float s_pe[64];
+  s_pe[tid] = pe; __syncthreads();
+  for (int s = stride/2; s > 0; s >>= 1) {
+    if (tid < s) s_pe[tid] += s_pe[tid + s];
+    __syncthreads();
+  }
+  if (tid == 0) atomicAdd(&ene[b], s_pe[0]);
 }
 
 // ---- pre-computation -----------------------------------------------------
@@ -234,20 +269,36 @@ void Uf3Model::evaluate(
   GPU_Vector<float>& d_energy)
 {
   int B = (int)batch_indices.size();
-  int total=0; for(int b=0;b<B;b++)total+=frames[batch_indices[b]].num_atoms;
+  int total=0; int max_nn=0;
+  for(int b=0;b<B;b++){const auto& f=frames[batch_indices[b]]; total+=f.num_atoms;
+    if(has_3b_ && (int)f.nn_list.size()>max_nn) max_nn=(int)f.nn_list.size();}
   ensure_batch_buffers(total, B);
 
-  // Build host batch arrays
+  // Build host batch arrays + neighbor list data for 3B
   std::vector<int> h_bnatoms(B),h_boffsets(B+1);
   std::vector<int> h_btypes(total);
   std::vector<float> h_bx(total),h_by(total),h_bz(total);
-  h_boffsets[0]=0;
+  // 3B: neighbor list flat arrays
+  std::vector<int> h_nn_offset;  // [total + B] per-atom offsets
+  std::vector<int> h_nn_list;    // flat neighbor indices
+  if(has_3b_){ h_nn_offset.reserve(total + B*2); h_nn_list.reserve(max_nn); }
+
+  h_boffsets[0]=0; int nn_global_off=0;
   {int off=0; for(int b=0;b<B;b++){const Uf3Frame& f = frames[batch_indices[b]];
     h_bnatoms[b]=f.num_atoms;h_boffsets[b+1]=h_boffsets[b]+f.num_atoms;
     for(int i=0;i<f.num_atoms;i++){h_btypes[off+i]=f.types[i];h_bx[off+i]=f.x[i];h_by[off+i]=f.y[i];h_bz[off+i]=f.z[i];}
+    // 3B: append neighbor list for this frame
+    if(has_3b_ && !f.nn_list.empty()){
+      for(int i=0;i<f.num_atoms;i++){
+        h_nn_offset.push_back(nn_global_off);
+        for(int jj=0;jj<f.nn_counts[i];jj++) h_nn_list.push_back(f.nn_list[f.nn_offset[i]+jj]);
+        nn_global_off += f.nn_counts[i];
+      }
+      h_nn_offset.push_back(nn_global_off); // trailing sentinel for i+1 access
+    }
     off+=f.num_atoms;}}
 
-  // Upload (no resize — pre-alloc'd)
+  // Upload
   d_types.copy_from_host(h_btypes.data());
   d_x.copy_from_host(h_bx.data()); d_y.copy_from_host(h_by.data()); d_z.copy_from_host(h_bz.data());
   std::vector<int> h_bidx(B); for(int b=0;b<B;b++)h_bidx[b]=b;
@@ -255,27 +306,33 @@ void Uf3Model::evaluate(
   d_bnatoms.copy_from_host(h_bnatoms.data());
   d_boffsets.copy_from_host(h_boffsets.data());
 
-  // d_energy_buf receives the 2B result
+  // 2B: multi-threaded (BLOCK_SIZE threads per frame, each handles some atoms)
+  const int BLK = 64;
   float kmin2=knots_2b_[0], kd2=(knots_2b_.back()-knots_2b_[0])/nint_2b_;
-  uf3_eval_2b<<<B,1>>>(B,d_batch_idx.data(),d_bnatoms.data(),d_boffsets.data(),
+  uf3_eval_2b<<<B, BLK>>>(B,d_batch_idx.data(),d_bnatoms.data(),d_boffsets.data(),
     d_types.data(),d_x.data(),d_y.data(),d_z.data(),
     d_coeff_2b.data(),num_types_*num_types_,nint_2b_,kmin2,kd2,rc_2b_,
     d_type_map.data(),num_types_,d_energy_buf.data());
   GPU_CHECK_KERNEL
 
-  if(has_3b_){
-    uf3_eval_3b<<<B,1>>>(B,d_batch_idx.data(),d_bnatoms.data(),d_boffsets.data(),
+  // 3B: neighbor-list-based, multi-threaded
+  if(has_3b_ && !h_nn_list.empty()){
+    // Upload neighbor lists to pre-allocated buffers
+    d_nn_off.resize(h_nn_offset.size()); d_nn_off.copy_from_host(h_nn_offset.data());
+    d_nn_lst.resize(h_nn_list.size());   d_nn_lst.copy_from_host(h_nn_list.data());
+    uf3_eval_3b<<<B, BLK>>>(B,d_batch_idx.data(),d_bnatoms.data(),d_boffsets.data(),
       d_types.data(),d_x.data(),d_y.data(),d_z.data(),
       d_tensor_3b.data(),nc_3b_[0],nc_3b_[1],nc_3b_[2],
       d_basis_3b_all.data()+basis_offsets_[0],nint_3b_[0],d_basis_3b_all.data()+basis_offsets_[1],nint_3b_[1],d_basis_3b_all.data()+basis_offsets_[2],nint_3b_[2],
       knots_3b_[0][0],(knots_3b_[0].back()-knots_3b_[0][0])/nint_3b_[0],rc_3b_[0],
       knots_3b_[1][0],(knots_3b_[1].back()-knots_3b_[1][0])/nint_3b_[1],rc_3b_[1],
       knots_3b_[2][0],(knots_3b_[2].back()-knots_3b_[2][0])/nint_3b_[2],rc_3b_[2],
-      d_trip_map.data(),num_trips_,num_types_,d_energy_buf.data());
+      d_trip_map.data(),num_trips_,num_types_,
+      d_nn_off.data(),d_nn_lst.data(),
+      d_energy_buf.data());
     GPU_CHECK_KERNEL
   }
 
-  // Copy result to caller's d_energy
   d_energy.resize(B);
   cudaMemcpy(d_energy.data(), d_energy_buf.data(), B*sizeof(float), cudaMemcpyDeviceToDevice);
 }
