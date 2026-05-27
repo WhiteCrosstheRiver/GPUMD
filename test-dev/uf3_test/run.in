@@ -1,0 +1,6 @@
+replicate 3 3 3
+potential   ./Nb.uf3
+time_step   1
+ensemble    nve
+dump_thermo 10
+run         10

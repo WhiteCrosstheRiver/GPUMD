@@ -1,0 +1,19 @@
+replicate 20 20 1
+potential   ./nep.txt
+
+time_step   1
+
+fix 1
+
+dump_thermo 500
+dump_exyz   500 1 1
+dftd3 pbe 6 6
+
+
+
+
+# use a large tau_T to mimic NPH
+ensemble    nvt_ber 400 400 10
+run         2000
+
+fused_nep

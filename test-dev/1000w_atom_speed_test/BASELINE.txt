@@ -1,0 +1,14 @@
+### Baseline (v5.3, sm_120, CUDA 13.1, RTX 5090) ###
+Date: Tue May 26 21:39:28 CST 2026
+Atoms: 346,000 (3460 x replicate 10 10 1)
+Steps: 5000
+Run time: 121.6 seconds
+Speed: 1.42276e+07 atom*step/second
+GPU: NVIDIA GeForce RTX 5090 D v2 (sm_120, 170 SMs, 24GB)
+
+### 20x20x1 Test ###
+Date: Tue May 26
+Atoms: 1,384,000 (3460 x replicate 20 20 1)
+Steps: 5000
+Run time: 455.8 seconds
+Speed: 1.51811e+07 atom*step/second
