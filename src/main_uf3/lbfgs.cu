@@ -71,10 +71,16 @@ void run_lbfgs(UF3_Parameters& para, Uf3Fitness& fitness)
     fitness.model()->set_parameters(x.data());
     if (loss_new < best_loss) best_loss = loss_new;
 
-    // New batch + gradient
+    // New batch + gradient (with clipping for stability)
     for (int b = 0; b < batch; b++) bidx[b] = rand() % nframes;
     for (int i = 0; i < nparam; i++) grad_old[i] = grad[i];
     fitness.model()->compute_energy_gradient(train_set, bidx, d_ediff, grad);
+
+    // Gradient clipping: cap magnitude to prevent extreme steps
+    float gnorm = 0;
+    for (int i = 0; i < nparam; i++) gnorm += grad[i] * grad[i];
+    gnorm = sqrtf(gnorm);
+    if (gnorm > 10.0f) { float scl = 10.0f / gnorm; for (int i=0;i<nparam;i++) grad[i] *= scl; }
 
     // Update L-BFGS history: s = dx, y = dgrad
     float ys = 0;
@@ -83,9 +89,8 @@ void run_lbfgs(UF3_Parameters& para, Uf3Fitness& fitness)
       y[hist_idx * nparam + i] = grad[i] - grad_old[i];
       ys += s[hist_idx * nparam + i] * y[hist_idx * nparam + i];
     }
-    rho[hist_idx] = (ys > 1e-10f) ? 1.0f / ys : 0.0f;
-    hist_idx = (hist_idx + 1) % M;
-    hist_count = std::min(hist_count + 1, M);
+    rho[hist_idx] = (ys > 1e-8f) ? 1.0f / ys : 0.0f;
+    if (ys > 1e-8f) { hist_idx = (hist_idx + 1) % M; hist_count = std::min(hist_count + 1, M); }
 
     // Two-loop recursion for search direction
     for (int i = 0; i < nparam; i++) q[i] = grad[i];
