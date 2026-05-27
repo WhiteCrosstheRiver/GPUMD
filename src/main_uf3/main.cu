@@ -62,10 +62,10 @@ static void write_uf3_file(UF3_Parameters& para, Uf3Model* model)
   for (int n = 0; n < para.num_types; n++) out << " " << para.elements[n];
   out << "\n";
 
-  int nk = model->nknots(), nc = model->ncoeff();
+  int nk = model->nknots_2b(), nc = model->ncoeff_2b();
   int np = model->num_pairs(), nt = model->num_types();
   auto& elements = model->elements();
-  auto& knots = model->knots();
+  auto& knots = model->knots_2b();
 
   std::vector<float> coeffs(nc * np);
   model->get_parameters(coeffs.data());
@@ -73,7 +73,7 @@ static void write_uf3_file(UF3_Parameters& para, Uf3Model* model)
   for (int p = 0; p < np; p++) {
     int ti = p / nt, tj = p % nt;
     out << "2B " << elements[ti] << " " << elements[tj] << " 0 3 uk\n";
-    out << model->rc() << " " << nk << "\n";
+    out << model->rc_2b() << " " << nk << "\n";
     out << std::fixed;
     for (int k = 0; k < nk; k++) out << knots[k] << (k < nk - 1 ? " " : "\n");
     out << nc << "\n";
@@ -81,6 +81,35 @@ static void write_uf3_file(UF3_Parameters& para, Uf3Model* model)
       out << coeffs[p * nc + c] << (c < nc - 1 ? " " : "\n");
     out << "#\n";
   }
+  // 3B blocks
+  if (model->has_3b()) {
+    int num_2b = np * nc;
+    for (int t = 0; t < model->num_triplets(); t++) {
+      int ti = t / (nt * nt), tj = (t / nt) % nt, tk = t % nt;
+      out << "3B " << elements[ti] << " " << elements[tj] << " " << elements[tk]
+          << " 0 3 uk\n";
+      float rc_jk = model->rc_3b(0) * 2.0f;
+      out << std::fixed << rc_jk << " " << model->rc_3b(1) << " " << model->rc_3b(0)
+          << " " << model->nknots_3b(0) << " " << model->nknots_3b(1) << " " << model->nknots_3b(2) << "\n";
+      auto& k0 = model->knots_3b(0), &k1 = model->knots_3b(1), &k2 = model->knots_3b(2);
+      for (size_t i = 0; i < k0.size(); i++) out << k0[i] << (i<k0.size()-1?" ":"\n");
+      for (size_t i = 0; i < k1.size(); i++) out << k1[i] << (i<k1.size()-1?" ":"\n");
+      for (size_t i = 0; i < k2.size(); i++) out << k2[i] << (i<k2.size()-1?" ":"\n");
+      out << model->ncoeff_3b(0) << " " << model->ncoeff_3b(1) << " " << model->ncoeff_3b(2) << "\n";
+      int nc0 = model->ncoeff_3b(0), nc1 = model->ncoeff_3b(1), nc2 = model->ncoeff_3b(2);
+      int t_off = t * nc0 * nc1 * nc2;
+      for (int i = 0; i < nc0; i++) {
+        for (int j = 0; j < nc1; j++) {
+          for (int k = 0; k < nc2; k++) {
+            out << coeffs[num_2b + t_off + i + j * nc0 + k * nc0 * nc1] << (k<nc2-1?" ":"");
+          }
+          out << "\n";
+        }
+      }
+      out << "#\n";
+    }
+  }
+
   out.close();
   printf("Wrote %s\n", outfile.c_str());
 }
@@ -109,7 +138,7 @@ int main(int argc, char* argv[])
   Uf3Fitness fitness(para, &model, train_frames);
 
   printf("Model: %d params, %d pairs, %d coeffs/pair\n",
-         model.num_parameters(), model.num_pairs(), model.ncoeff());
+         model.num_parameters(), model.num_pairs(), model.ncoeff_2b());
 
   // Dispatch optimizer
   auto t0 = std::chrono::high_resolution_clock::now();

@@ -1,6 +1,7 @@
-replicate 3 3 3
+replicate 4 4 4
 potential   ./Nb.uf3
+
 time_step   1
 ensemble    nve
 dump_thermo 10
-run         10
+run         20

@@ -14,8 +14,9 @@
 */
 
 /*----------------------------------------------------------------------------80
-UF3 training model: manages B-spline coefficients, builds pre-computed cubic
-polynomial tables, and launches GPU kernels for batch energy evaluation.
+UF3 training model: manages 2-body and 3-body B-spline coefficients,
+pre-computes cubic polynomial tables, and launches GPU kernels for batch
+energy evaluation.
 ------------------------------------------------------------------------------*/
 
 #pragma once
@@ -29,38 +30,65 @@ class Uf3Model
 public:
   Uf3Model(UF3_Parameters& para);
 
-  int num_parameters() const { return num_pairs_ * ncoeff_; }
+  int num_parameters() const { return num_params_total_; }
   void get_parameters(float* params) const;
   void set_parameters(const float* params);
 
-  // GPU batch energy evaluation: return per-frame energies in d_energy
+  // GPU batch energy evaluation (2B + 3B)
   void evaluate(
     const std::vector<Uf3Frame>& frames,
     const std::vector<int>& batch_indices,
     GPU_Vector<float>& d_energy);
 
-  // Access to knot info for file writing
-  int ncoeff() const { return ncoeff_; }
-  int nknots() const { return nknots_; }
-  int num_pairs() const { return num_pairs_; }
+  // 2B accessors
+  int ncoeff_2b() const { return ncoeff_2b_; }
+  int nknots_2b() const { return nknots_2b_; }
+  int num_pairs() const { return num_types_ * num_types_; }
   int num_types() const { return num_types_; }
-  const std::vector<float>& knots() const { return knots_; }
-  const std::vector<std::string>& elements() const { return elements_; }
-  float rc() const { return rc_; }
 
-  // Pre-allocated GPU buffers (reused across evaluate() calls)
+  // 3B accessors
+  bool has_3b() const { return has_3b_; }
+  int ncoeff_3b(int d) const { return nc_3b_[d]; }
+  int nknots_3b(int d) const { return nk_3b_[d]; }
+  int num_triplets() const { return num_trips_; }
+
+  const std::vector<float>& knots_2b() const { return knots_2b_; }
+  const std::vector<float>& knots_3b(int d) const { return knots_3b_[d]; }
+  const std::vector<std::string>& elements() const { return elements_; }
+  float rc_2b() const { return rc_2b_; }
+  float rc_3b(int d) const { return rc_3b_[d]; }
+
+  // Pre-allocated GPU buffers
   GPU_Vector<int> d_types, d_batch_idx, d_bnatoms, d_boffsets, d_type_map;
   GPU_Vector<float> d_x, d_y, d_z;
-  GPU_Vector<float4> d_coeff_gpu;
+  GPU_Vector<float4> d_coeff_2b;
+  GPU_Vector<float> d_tensor_3b;       // [num_trips * nc0 * nc1 * nc2]
+  GPU_Vector<float4> d_basis_3b[3];    // per-interval basis polynomials
+  GPU_Vector<int> d_trip_map;          // trip type mapping
 
 private:
   void build_knots();
-  void upload_coeffs_to_gpu();
+  void upload_2b_coeffs();
+  void upload_3b_coeffs();
+  void init_3b_basis();
 
-  int ncoeff_, nknots_, nint_;
-  int num_pairs_, num_types_;
-  float rc_;
+  // 2B
+  int ncoeff_2b_, nknots_2b_, nint_2b_;
+  int num_types_;
+  float rc_2b_;
   std::vector<std::string> elements_;
-  std::vector<float> knots_;
-  std::vector<std::vector<float>> coeffs_;
+  std::vector<float> knots_2b_;
+  std::vector<std::vector<float>> coeffs_2b_;
+  int num_params_2b_;
+
+  // 3B
+  bool has_3b_ = false;
+  int nc_3b_[3];           // coefficient dimensions
+  int nk_3b_[3], nint_3b_[3];
+  int num_trips_;           // num_types^3
+  float rc_3b_[3];
+  std::vector<float> knots_3b_[3];
+  std::vector<float> coeffs_3b_; // flattened tensor per triplet
+  int num_params_3b_;
+  int num_params_total_;
 };

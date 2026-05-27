@@ -21,7 +21,7 @@ struct UF3_Parameters {
   int n_max_2b = 10;         // number of 2B basis functions per pair
   int n_max_3b[3] = {0,0,0}; // 3B basis dimensions (optional)
   double rc_2b = 6.0;
-  double rc_3b[2] = {0,0};   // 3B cutoffs (ij, ik)
+  double rc_3b[2] = {0,0};   // 3B cutoffs (ij, ik). rc_jk = 2 * rc_ij assumed
   int knot_type = 1;         // 0=non-uniform, 1=uniform
   int num_types = 1;
   std::string knot_type_str = "uk";
