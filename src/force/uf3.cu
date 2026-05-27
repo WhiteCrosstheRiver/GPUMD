@@ -40,9 +40,39 @@ cubic polynomial: V(u) = A + u*(B + u*(C + u*D)).
 // B-spline pre-computation helpers (host-side)
 // ---------------------------------------------------------------------------
 
-// Expand uniform cubic B-spline: combined polynomial V(u) = A+Bu+Cu^2+Du^3
-// on interval m, from coefficients co[m-3..m].  (Boundary intervals are
-// clamped: coeffs beyond range use the nearest valid coefficient.)
+// de Boor evaluation: value of cubic B-spline at r on interval m
+static float deboor_eval(float r, int m, const std::vector<float>& knots,
+                          const std::vector<float>& coeffs)
+{
+  int nc = (int)coeffs.size(), nk = (int)knots.size();
+  float d[4];
+  for (int i = 0; i < 4; i++) {
+    int idx = m - 3 + i;
+    if (idx < 0) idx = 0; if (idx >= nc) idx = nc - 1;
+    d[i] = coeffs[idx];
+  }
+  float t[8];
+  for (int i = 0; i < 8; i++) {
+    int ki = m - 3 + i;
+    t[i] = knots[ki < 0 ? 0 : (ki >= nk ? nk-1 : ki)];
+  }
+  float d1[3], d2[2];
+  for (int i = 0; i < 3; i++) {
+    float den = t[i+4] - t[i+3];
+    if (den < 1e-10f) d1[i] = 0; // repeated knot → 0/0 = 0
+    else d1[i] = ((r - t[i+3]) * d[i] + (t[i+4] - r) * d[i+1]) / den;
+  }
+  for (int i = 0; i < 2; i++) {
+    float den = t[i+5] - t[i+3];
+    if (den < 1e-10f) d2[i] = 0;
+    else d2[i] = ((r - t[i+3]) * d1[i] + (t[i+5] - r) * d1[i+1]) / den;
+  }
+  float den = t[6] - t[3];
+  if (den < 1e-10f) return 0;
+  return ((r - t[3]) * d2[0] + (t[6] - r) * d2[1]) / den;
+}
+
+// Uniform: combined cubic from 4 adjacent coefficients
 static void precompute_2b_uniform(
   const std::vector<float>& knots,
   const std::vector<float>& coeffs,
@@ -67,6 +97,28 @@ static void precompute_2b_uniform(
     float B = (-3.0f * c0 + 3.0f * c2) / 6.0f;
     float C = (3.0f * c0 - 6.0f * c1 + 3.0f * c2) / 6.0f;
     float D = (-c0 + 3.0f * c1 - 3.0f * c2 + c3) / 6.0f;
+    h_coeff[m] = make_float4(A, B, C, D);
+  }
+}
+
+// Non-uniform: fit cubic through 4 de Boor points on each interval
+static void precompute_2b_nonuniform(
+  const std::vector<float>& knots, const std::vector<float>& coeffs,
+  std::vector<float4>& h_coeff)
+{
+  int nint = (int)knots.size() - 1;
+  h_coeff.resize(nint);
+  for (int m = 0; m < nint; m++) {
+    float tm = knots[m], h = knots[m+1] - tm;
+    if (h < 1e-10f) h = 1e-10f;
+    float v[4];
+    for (int s = 0; s < 4; s++) {
+      v[s] = deboor_eval(tm + (s/3.0f)*h, m, knots, coeffs);
+    }
+    float A = v[0];
+    float B = -5.5f*v[0] + 9.0f*v[1] - 4.5f*v[2] + v[3];
+    float C = 9.0f*v[0] - 22.5f*v[1] + 18.0f*v[2] - 4.5f*v[3];
+    float D = -4.5f*v[0] + 13.5f*v[1] - 13.5f*v[2] + 4.5f*v[3];
     h_coeff[m] = make_float4(A, B, C, D);
   }
 }
@@ -116,15 +168,25 @@ __device__ inline float eval_cubic_deriv(float4 c, float u)
 }
 
 // ---------------------------------------------------------------------------
-// Device helper: find knot interval (uniform)
+// Device helper: find knot interval
 // ---------------------------------------------------------------------------
 __device__ inline int find_interval(float r, float knot_min, float knot_delta, int nint)
 {
   float t = (r - knot_min) / knot_delta;
   int i = (int)t;
-  if (i < 0) i = 0;
-  if (i >= nint) i = nint - 1;
+  if (i < 0) i = 0; if (i >= nint) i = nint - 1;
   return i;
+}
+
+// Non-uniform: binary search
+__device__ inline int find_interval_nu(float r, const float* knots, int nk)
+{
+  int lo = 0, hi = nk - 2;
+  while (lo < hi) {
+    int mid = (lo + hi + 1) >> 1;
+    if (r < knots[mid]) hi = mid - 1; else lo = mid;
+  }
+  return lo;
 }
 
 // ---------------------------------------------------------------------------
@@ -134,8 +196,9 @@ static __global__ void find_force_uf3_2b(
   const int N, const int N1, const int N2,
   const Box box,
   const float4* __restrict__ d_coeff,
-  int nint,
+  int nint, int knot_type,
   float knot_min, float knot_delta,
+  const float* __restrict__ d_knots,
   double rc,
   const int* __restrict__ g_NN,
   const int* __restrict__ g_NL,
@@ -164,9 +227,17 @@ static __global__ void find_force_uf3_2b(
     float r = sqrtf(x12 * x12 + y12 * y12 + z12 * z12);
     if (r >= rc) continue;
 
-    int m = find_interval(r, knot_min, knot_delta, nint);
-    float h = knot_delta;
-    float u = (r - (knot_min + m * h)) / h;
+    int m; float h, u;
+    if (knot_type == 1) {
+      m = find_interval(r, knot_min, knot_delta, nint);
+      h = knot_delta;
+      u = (r - (knot_min + m * h)) / h;
+    } else {
+      m = find_interval_nu(r, d_knots, nint + 1);
+      h = d_knots[m+1] - d_knots[m];
+      if (h < 1e-10f) h = 1e-10f;
+      u = (r - d_knots[m]) / h;
+    }
     float4 c = __ldg(&d_coeff[m]);
     float val = eval_cubic(c, u);
     float deriv = eval_cubic_deriv(c, u) / h;
@@ -433,7 +504,10 @@ void UF3::initialize(const char* filename, const int number_of_atoms)
       // Pre-compute per-interval combined cubic polynomials
       {
         std::vector<float4> h_coeff;
-        precompute_2b_uniform(knots, coeffs, leading_trim, h_coeff);
+        if (knot_type == 1)
+          precompute_2b_uniform(knots, coeffs, leading_trim, h_coeff);
+        else
+          precompute_2b_nonuniform(knots, coeffs, h_coeff);
         two_body.d_coeff.resize(h_coeff.size());
         two_body.d_coeff.copy_from_host(h_coeff.data());
       }
@@ -587,8 +661,8 @@ void UF3::compute(
   if (has_2b) {
     find_force_uf3_2b<<<grid_size, BLOCK_SIZE>>>(
       N, N1, N2, box,
-      two_body.d_coeff.data(), two_body.nint,
-      two_body.knot_min, two_body.knot_delta, two_body.rc,
+      two_body.d_coeff.data(), two_body.nint, two_body.knot_type,
+      two_body.knot_min, two_body.knot_delta, two_body.d_knots.data(), two_body.rc,
       neighbor.NN.data(), neighbor.NL.data(),
       position_per_atom.data(),
       position_per_atom.data() + N,
