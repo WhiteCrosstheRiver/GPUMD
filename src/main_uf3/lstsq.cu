@@ -128,22 +128,24 @@ static __global__ void lstsq_accumulate(
   }
   __syncthreads();
 
-  // Thread 0: atomically accumulate basis_sum ⊗ basis_sum into ATA/ATb
-  if (tid == 0) {
-    float* g_basis = basis_out + b * nparam;
-    for (int k = 0; k < nparam; k++) g_basis[k] = s_basis[k];
-    // Atomic ATA accumulation (direct on GPU, no download needed)
-    if (d_ATA && d_ATb) {
-      float targ = d_target[fid];
-      for (int k = 0; k < nparam; k++) {
-        float bk = s_basis[k]; if (bk == 0) continue;
-        atomicAdd(&d_ATb[k], (double)bk * (double)targ);
-        for (int m = 0; m < nparam; m++) {
-          float bm = s_basis[m]; if (bm == 0) continue;
-          atomicAdd(&d_ATA[k * nparam + m], (double)bk * (double)bm);
-        }
+  // All threads: atomically accumulate basis into ATA/ATb (distributed)
+  // Thread k handles rows k, k+stride, ... of the ATA matrix
+  if (d_ATA && d_ATb) {
+    float targ = d_target[fid];
+    for (int k = tid; k < nparam; k += stride) {
+      float bk = s_basis[k]; if (bk == 0) continue;
+      atomicAdd(&d_ATb[k], (double)bk * (double)targ);
+      for (int m = 0; m < nparam; m++) {
+        float bm = s_basis[m]; if (bm == 0) continue;
+        atomicAdd(&d_ATA[k * nparam + m], (double)bk * (double)bm);
       }
     }
+  }
+
+  // Also write basis to global output (for debug/download)
+  if (tid == 0) {
+    float* g_basis = basis_out + b * nparam;
+    for (int kk = 0; kk < nparam; kk++) g_basis[kk] = s_basis[kk];
   }
 }
 
