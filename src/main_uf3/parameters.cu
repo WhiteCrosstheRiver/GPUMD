@@ -70,6 +70,8 @@ void parse_uf3_parameters(const char* input_file, UF3_Parameters& para)
       para.lambda_f = get_double_from_token(tokens[1], __FILE__, __LINE__);
     } else if (tokens[0] == "lambda_v") {
       para.lambda_v = get_double_from_token(tokens[1], __FILE__, __LINE__);
+    } else if (tokens[0] == "optimizer") {
+      para.optimizer = tokens[1];
     } else if (tokens[0] == "train_data") {
       para.train_data = tokens[1];
     } else if (tokens[0] == "test_data") {
@@ -87,6 +89,7 @@ void parse_uf3_parameters(const char* input_file, UF3_Parameters& para)
     printf("%s%s", para.elements[n].c_str(), n < para.num_types - 1 ? " " : "");
   }
   printf(")\n");
+  printf("  optimizer = %s\n", para.optimizer.c_str());
   printf("  training data = %s\n", para.train_data.c_str());
   printf("  test data = %s\n", para.test_data.c_str());
 }

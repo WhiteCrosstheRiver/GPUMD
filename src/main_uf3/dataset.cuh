@@ -17,25 +17,12 @@
 #include <string>
 #include <vector>
 
-struct UF3_Parameters {
-  int n_max_2b = 10;         // number of 2B basis functions per pair
-  int n_max_3b[3] = {0,0,0}; // 3B basis dimensions (optional)
-  double rc_2b = 6.0;
-  double rc_3b[2] = {0,0};   // 3B cutoffs (ij, ik)
-  int knot_type = 1;         // 0=non-uniform, 1=uniform
-  int num_types = 1;
-  std::string knot_type_str = "uk";
-
-  int batch = 1000;
-  int population = 50;
-  std::string optimizer = "es"; // es, adam, snes
-  int generation = 5000;
-  double lambda_e = 1.0;
-  double lambda_f = 1.0;
-  double lambda_v = 0.1;
-  std::string train_data = "train.xyz";
-  std::string test_data = "test.xyz";
-  std::vector<std::string> elements;
+struct Uf3Frame {
+  int num_atoms = 0;
+  std::vector<int> types;
+  std::vector<float> x, y, z;
+  std::vector<float> fx, fy, fz;
+  float energy = 0.0f;
 };
 
-void parse_uf3_parameters(const char* input_file, UF3_Parameters& para);
+std::vector<Uf3Frame> load_uf3_frames(const char* filename);
