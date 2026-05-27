@@ -23,6 +23,7 @@ GPU-accelerated B-spline coefficient optimization with selectable optimizer.
 #include "es.cuh"
 #include "fitness.cuh"
 #include "lbfgs.cuh"
+#include "lstsq.cuh"
 #include "parameters.cuh"
 #include "snes.cuh"
 #include "uf3.cuh"
@@ -148,6 +149,9 @@ int main(int argc, char* argv[])
   if (para.optimizer == "adam") {
     printf("\n=== Adam (analytical gradient) ===\n");
     run_adam(para, fitness);
+  } else if (para.optimizer == "lstsq") {
+    printf("\n=== Direct Least Squares ===\n");
+    run_lstsq(para, fitness);
   } else if (para.optimizer == "lbfgs") {
     printf("\n=== L-BFGS ===\n");
     run_lbfgs(para, fitness);

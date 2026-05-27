@@ -54,8 +54,8 @@ void run_lbfgs(UF3_Parameters& para, Uf3Fitness& fitness)
   for (int i = 0; i < nparam; i++) dir[i] = -grad[i]; // initial search direction = -grad
 
   for (int g = 0; g < gen; g++) {
-    // Line search (simple backtracking)
-    float step = 0.01f;
+    // Line search (simple backtracking, small initial step for stability)
+    float step = 0.001f;
     std::vector<float> x_trial(nparam);
     float loss_old = fitness.compute_loss(bidx, g);
     float loss_new;
@@ -96,8 +96,14 @@ void run_lbfgs(UF3_Parameters& para, Uf3Fitness& fitness)
       alpha[j] = rho[idx] * dot_sq;
       for (int i = 0; i < nparam; i++) q[i] -= alpha[j] * y[idx*nparam+i];
     }
-    // Scale initial Hessian
-    float gamma = (hist_count > 0 && rho[(hist_idx-1+M)%M] > 0) ? 1.0f / (rho[(hist_idx-1+M)%M] * rho[(hist_idx-1+M)%M] + 1e-10f) : 1.0f;
+    // Scale initial Hessian: gamma = s^T y / y^T y (standard L-BFGS scaling)
+    float gamma = 1.0f;
+    if (hist_count > 0) {
+      int last = (hist_idx - 1 + M) % M;
+      float yy = 0, sy = 0;
+      for (int i = 0; i < nparam; i++) { yy += y[last*nparam+i]*y[last*nparam+i]; sy += s[last*nparam+i]*y[last*nparam+i]; }
+      if (yy > 1e-10f) gamma = sy / yy;
+    }
     for (int i = 0; i < nparam; i++) dir[i] = gamma * q[i];
     for (int j = 0; j < hist_count; j++) {
       int idx = (hist_idx - hist_count + j + M) % M;

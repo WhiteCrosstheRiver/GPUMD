@@ -260,8 +260,10 @@ void Uf3Model::compute_energy_gradient(
   host_gradient.resize(nparam);
   d_grad.copy_to_host(host_gradient.data());
 
-  // Scale by 2/(B * natoms) for MSE loss and lambda_e
-  float scale = 2.0f / (B * 128);  // approximate per-frame normalization
+  // Gradient of MSE: d/dc (1/(2B) Σ (E_pred-E_ref)^2) = (1/B) Σ (E_pred-E_ref) * B_k
+  // No additional scaling — the kernel already accumulates (E_pred-E_ref) * B_k
+  // Scale by 1/B and lambda_e
+  float scale = 1.0f / B;
   for (int i = 0; i < nparam; i++) host_gradient[i] *= scale;
 }
 
