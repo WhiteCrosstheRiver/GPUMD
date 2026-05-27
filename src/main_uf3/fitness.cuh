@@ -13,11 +13,6 @@
     along with GPUMD.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-/*----------------------------------------------------------------------------80
-UF3 fitness: full loss (energy + force RMSE + L1/L2 regularization).
-Matches NEP loss.out format for comparison.
-------------------------------------------------------------------------------*/
-
 #pragma once
 #include "dataset.cuh"
 #include "uf3.cuh"
@@ -27,10 +22,9 @@ Matches NEP loss.out format for comparison.
 class Uf3Fitness
 {
 public:
+  // Fitness loads train_set and test_set internally (like NEP).
   Uf3Fitness(UF3_Parameters& para, Uf3Model* model,
              const std::vector<Uf3Frame>& train_set);
-
-  void set_test_set(const std::vector<Uf3Frame>& test_set) { test_set_ = &test_set; }
 
   float compute_loss(const std::vector<int>& batch_indices, int generation);
   float compute_loss_for_params(
@@ -40,14 +34,14 @@ public:
   Uf3Model* model() { return model_; }
   const std::vector<Uf3Frame>& train_set() const { return train_set_; }
 
-  // Loss components (filled by compute_loss)
   float loss_e = 0, loss_f = 0, loss_l1 = 0, loss_l2 = 0, loss_total = 0;
   float test_e = 0, test_f = 0;
 
 private:
   Uf3Model* model_;
   const std::vector<Uf3Frame>& train_set_;
-  const std::vector<Uf3Frame>* test_set_ = nullptr;
+  std::vector<Uf3Frame> test_set_;     // owned by fitness (loaded internally)
+  int test_set_size_ = 0;
   GPU_Vector<float> d_energy_;
   std::vector<float> h_energy_, h_fx_, h_fy_, h_fz_;
   float lambda_e_ = 1, lambda_f_ = 1, lambda_1_ = 0, lambda_2_ = 0;
