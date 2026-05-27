@@ -176,12 +176,9 @@ Uf3Model::Uf3Model(UF3_Parameters& para)
 
 void Uf3Model::prealloc_gpu(const UF3_Parameters& para)
 {
-  int max_atoms = para.batch * 128;
+  int max_atoms = para.batch * 200;  // generous per-frame estimate
+  if (max_atoms < 5000) max_atoms = 5000; // floor for small batches
   gpu_max_atoms_ = max_atoms; gpu_max_batch_ = para.batch;
-
-  // Use explicit allocation to avoid any GPU_Vector resize double-free
-  float* dummy = nullptr;
-  cudaMalloc(&dummy, 1); cudaFree(dummy); // force CUDA init
 
   d_types.resize(max_atoms);
   d_x.resize(max_atoms); d_y.resize(max_atoms); d_z.resize(max_atoms);
@@ -210,18 +207,19 @@ void Uf3Model::prealloc_gpu(const UF3_Parameters& para)
 
 void Uf3Model::ensure_batch_buffers(int batch_atoms, int batch_size)
 {
-  if (batch_atoms > gpu_max_atoms_) {
-    gpu_max_atoms_ = batch_atoms;
-    d_types.resize(gpu_max_atoms_);
-    d_x.resize(gpu_max_atoms_); d_y.resize(gpu_max_atoms_); d_z.resize(gpu_max_atoms_);
-  }
-  if (batch_size > gpu_max_batch_) {
-    gpu_max_batch_ = batch_size;
-    d_batch_idx.resize(batch_size);
-    d_bnatoms.resize(batch_size);
-    d_boffsets.resize(batch_size+1);
-    d_energy_buf.resize(batch_size);
-  }
+  // Always resize to current batch size (simplest, avoids subtle sizing bugs)
+  d_types.resize(batch_atoms);
+  d_x.resize(batch_atoms); d_y.resize(batch_atoms); d_z.resize(batch_atoms);
+  d_batch_idx.resize(batch_size);
+  d_bnatoms.resize(batch_size);
+  d_boffsets.resize(batch_size+1);
+  d_energy_buf.resize(batch_size);
+}
+
+// Only resize GPU vector when growing (avoids repeated cudaFree/cudaMalloc)
+template<typename T>
+static void grow_only(GPU_Vector<T>& gv, size_t new_size) {
+  if (gv.size() < (int)new_size) gv.resize(new_size);
 }
 
 void Uf3Model::build_knots() {
@@ -321,9 +319,12 @@ void Uf3Model::evaluate(
 
   // 3B: neighbor-list-based, multi-threaded
   if(has_3b_ && h_nn_frame_off.size() > 1){
-    d_nn_off.resize(h_nn_offset.size()); d_nn_off.copy_from_host(h_nn_offset.data());
-    d_nn_lst.resize(h_nn_list.size());   d_nn_lst.copy_from_host(h_nn_list.data());
-    d_nn_frame_off.resize(h_nn_frame_off.size()); d_nn_frame_off.copy_from_host(h_nn_frame_off.data());
+    grow_only(d_nn_off, h_nn_offset.size());
+    cudaMemcpy(d_nn_off.data(), h_nn_offset.data(), h_nn_offset.size()*sizeof(int), cudaMemcpyHostToDevice);
+    grow_only(d_nn_lst, h_nn_list.size());
+    cudaMemcpy(d_nn_lst.data(), h_nn_list.data(), h_nn_list.size()*sizeof(int), cudaMemcpyHostToDevice);
+    grow_only(d_nn_frame_off, h_nn_frame_off.size());
+    cudaMemcpy(d_nn_frame_off.data(), h_nn_frame_off.data(), h_nn_frame_off.size()*sizeof(int), cudaMemcpyHostToDevice);
     uf3_eval_3b<<<B, BLK>>>(B,d_batch_idx.data(),d_bnatoms.data(),d_boffsets.data(),
       d_types.data(),d_x.data(),d_y.data(),d_z.data(),
       d_tensor_3b.data(),nc_3b_[0],nc_3b_[1],nc_3b_[2],
