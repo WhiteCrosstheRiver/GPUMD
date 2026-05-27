@@ -160,6 +160,7 @@ phonon/%.o: phonon/%.cu $(HEADERS)
 main_nep/%.o: main_nep/%.cu $(HEADERS)
 	$(CC) $(CFLAGS) $(INC) -c $< -o $@
 main_gnep/%.o: main_gnep/%.cu $(HEADERS)
+	$(CC) $(CFLAGS) $(INC) -c $< -o $@
 main_uf3/%.o: main_uf3/%.cu $(HEADERS)
 	$(CC) $(CFLAGS) $(INC) -c $< -o $@
 endif

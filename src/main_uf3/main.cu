@@ -208,9 +208,98 @@ int main(int argc, char* argv[])
   printf("Reference energy = %.6f eV\n", f.energy);
   printf("RMSE (random init) = %.6f eV\n", fabs(total_energy - f.energy));
 
+  // ---- Simple ES training loop ----
+  // Perturb coefficients randomly, keep the best for each element pair.
+  int ncoeff = para.n_max_2b;
+  int batch_size = std::min(para.batch, (int)train_frames.size());
+  double best_rmse = 1e30;
+  std::vector<std::vector<float>> best_coeffs = coeffs_2b;
+
+  printf("\nStarting ES training (%d generations, pop=%d, batch=%d)...\n",
+         para.generation, para.population, batch_size);
   print_line_1();
-  printf("UF3 training framework initialized successfully.\n");
-  printf("TODO: SNES optimizer + full batch training loop.\n");
+
+  srand(12345);
+  for (int gen = 0; gen < para.generation; gen++) {
+    double total_rmse = 0;
+    int frames_evaluated = 0;
+
+    // Evaluate all candidates on a random subset of frames
+    for (int pop = 0; pop < para.population; pop++) {
+      // Perturb current best coefficients
+      std::vector<std::vector<float>> trial = best_coeffs;
+      for (int p = 0; p < num_pairs; p++) {
+        for (int c = 0; c < ncoeff; c++) {
+          float noise = (rand() / (float)RAND_MAX - 0.5f) * 0.02f;
+          trial[p][c] += noise;
+        }
+      }
+
+      // Evaluate on batch_size random frames
+      double rmse_sum = 0;
+      int eval_count = 0;
+      for (int b = 0; b < batch_size && eval_count < 100; b++) {
+        int fidx = rand() % train_frames.size();
+        Frame& f = train_frames[fidx];
+        double total_e = 0;
+        for (int i = 0; i < f.num_atoms && i < 128; i++) {
+          for (int j = i + 1; j < f.num_atoms && j < 128; j++) {
+            double dx = f.x[i] - f.x[j];
+            double dy = f.y[i] - f.y[j];
+            double dz = f.z[i] - f.z[j];
+            double r = sqrt(dx*dx + dy*dy + dz*dz);
+            if (r >= para.rc_2b) continue;
+            int p = f.types[i] * para.num_types + f.types[j];
+            total_e += eval_2b_spline_cpu(r, trial[p], knots);
+          }
+        }
+        rmse_sum += fabs(total_e - f.energy);
+        eval_count++;
+      }
+      double rmse = rmse_sum / eval_count;
+      total_rmse += rmse;
+      frames_evaluated += eval_count;
+
+      // Keep best
+      if (rmse < best_rmse) {
+        best_rmse = rmse;
+        best_coeffs = trial;
+      }
+    }
+
+    if (gen % 5 == 0 || gen == para.generation - 1) {
+      printf("  gen %5d: avg RMSE = %.3f eV, best = %.3f eV\n",
+             gen, total_rmse / para.population, best_rmse);
+    }
+  }
+
+  // Write trained potential to .uf3 file
+  print_line_1();
+  std::string outfile = "nep.uf3";
+  printf("Writing trained potential to %s ...\n", outfile.c_str());
+  {
+    std::ofstream out(outfile);
+    out.precision(10);
+    out << "uf3 " << para.num_types;
+    for (int n = 0; n < para.num_types; n++) out << " " << para.elements[n];
+    out << "\n";
+    // Write 2B blocks for each element pair
+    for (int p = 0; p < num_pairs; p++) {
+      int ti = p / para.num_types, tj = p % para.num_types;
+      out << "2B " << para.elements[ti] << " " << para.elements[tj]
+          << " 0 3 " << para.knot_type_str << "\n";
+      out << para.rc_2b << " " << nknots << "\n";
+      out << std::fixed;
+      for (int k = 0; k < nknots; k++)
+        out << knots[k] << (k < nknots-1 ? " " : "\n");
+      out << ncoeff << "\n";
+      for (int c = 0; c < ncoeff; c++)
+        out << best_coeffs[p][c] << (c < ncoeff-1 ? " " : "\n");
+      out << "#\n";
+    }
+    out.close();
+  }
+  printf("Done. Best RMSE = %.3f eV\n", best_rmse);
   print_line_2();
 
   return EXIT_SUCCESS;
