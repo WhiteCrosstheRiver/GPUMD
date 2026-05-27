@@ -225,50 +225,17 @@ int main(int argc, char* argv[])
   // Build knot vectors
   auto knots = make_uniform_knots(nknots, 0.0f, (float)para.rc_2b);
 
-  // ---- Upload training data to GPU ----
-  int total_atoms = 0;
-  for (auto& f : train_frames) total_atoms += f.num_atoms;
-
-  GPU_Vector<int> d_natoms(train_frames.size());
-  GPU_Vector<int> d_offsets(train_frames.size() + 1);
-  GPU_Vector<int> d_types(total_atoms);
-  GPU_Vector<float> d_x(total_atoms), d_y(total_atoms), d_z(total_atoms);
-
-  {
-    std::vector<int> h_natoms, h_offsets, h_types;
-    std::vector<float> h_x, h_y, h_z;
-    h_offsets.push_back(0);
-    for (auto& f : train_frames) {
-      h_natoms.push_back(f.num_atoms);
-      h_offsets.push_back(h_offsets.back() + f.num_atoms);
-      for (int i = 0; i < f.num_atoms; i++) {
-        h_types.push_back(f.types[i]);
-        h_x.push_back(f.x[i]); h_y.push_back(f.y[i]); h_z.push_back(f.z[i]);
-      }
-    }
-    d_natoms.copy_from_host(h_natoms.data());
-    d_offsets.copy_from_host(h_offsets.data());
-    d_types.copy_from_host(h_types.data());
-    d_x.copy_from_host(h_x.data());
-    d_y.copy_from_host(h_y.data());
-    d_z.copy_from_host(h_z.data());
-  }
-
   // Type map: for Si=0, Ge=1: pair (0,0)=0, (0,1)=1, (1,0)=2, (1,1)=3
-  GPU_Vector<int> d_type_map(num_pairs);
   std::vector<int> h_type_map(num_pairs);
   for (int p = 0; p < num_pairs; p++) h_type_map[p] = p;
-  d_type_map.copy_from_host(h_type_map.data());
 
-  GPU_Vector<float> d_energy(train_frames.size());
-
-  printf("GPU data uploaded: %d frames, %d total atoms\n",
-         (int)train_frames.size(), total_atoms);
-
-  // ---- ES training loop (GPU-accelerated) ----
+  // ---- ES training loop (GPU-accelerated, per-batch upload) ----
   int batch_size = std::min(para.batch, (int)train_frames.size());
   double best_rmse = 1e30;
   std::vector<std::vector<float>> best_coeffs = coeffs_2b;
+  int max_atoms_per_frame = 0;
+  for (auto& f : train_frames)
+    if (f.num_atoms > max_atoms_per_frame) max_atoms_per_frame = f.num_atoms;
 
   printf("\nStarting GPU-ES training (%d gen, pop=%d, batch=%d)...\n",
          para.generation, para.population, batch_size);
@@ -278,8 +245,15 @@ int main(int argc, char* argv[])
   srand(12345);
 
   // Pre-allocate reusable GPU buffers
+  GPU_Vector<int> d_type_map(num_pairs);
+  d_type_map.copy_from_host(h_type_map.data());
   GPU_Vector<int> d_batch_idx(batch_size);
+  GPU_Vector<int> d_bnatoms(batch_size);
+  GPU_Vector<int> d_boffsets(batch_size + 1);
+  GPU_Vector<int> d_types;
+  GPU_Vector<float> d_x, d_y, d_z;
   GPU_Vector<float4> d_coeff(num_pairs * nint);
+  GPU_Vector<float> d_energy(batch_size);
   std::vector<float> h_energy(batch_size);
 
   auto time_start = std::chrono::high_resolution_clock::now();
@@ -305,17 +279,64 @@ int main(int argc, char* argv[])
       d_coeff.resize(all_coeff.size());
       d_coeff.copy_from_host(all_coeff.data());
 
-      // Select random batch and upload frame indices to GPU
+      // Select random batch
       std::vector<int> batch_frames(batch_size);
       for (int b = 0; b < batch_size; b++)
         batch_frames[b] = rand() % train_frames.size();
-      d_batch_idx.copy_from_host(batch_frames.data());
 
-      // GPU evaluation
+      // Per-batch GPU upload: build batch data on host, copy to GPU
+      int batch_atoms = 0;
+      for (int b = 0; b < batch_size; b++)
+        batch_atoms += train_frames[batch_frames[b]].num_atoms;
+
+      std::vector<int>   h_btypes(batch_atoms);
+      std::vector<float> h_bx(batch_atoms), h_by(batch_atoms), h_bz(batch_atoms);
+      {
+        int off = 0;
+        for (int b = 0; b < batch_size; b++) {
+          Frame& f = train_frames[batch_frames[b]];
+          for (int i = 0; i < f.num_atoms; i++) {
+            h_btypes[off + i] = f.types[i];
+            h_bx[off + i] = f.x[i]; h_by[off + i] = f.y[i]; h_bz[off + i] = f.z[i];
+          }
+          off += f.num_atoms;
+        }
+      }
+      d_types.resize(batch_atoms);
+      d_types.copy_from_host(h_btypes.data());
+      d_x.resize(batch_atoms);
+      d_x.copy_from_host(h_bx.data());
+      d_y.resize(batch_atoms);
+      d_y.copy_from_host(h_by.data());
+      d_z.resize(batch_atoms);
+      d_z.copy_from_host(h_bz.data());
+
+      // GPU evaluation: simple CPU-iterated per-frame (avoids complex indexing kernel)
+      // We launch one block per frame, using flat batch arrays with offset tracking
+      std::vector<int> h_batch_idx(batch_size);
+      std::vector<int> h_batch_natoms(batch_size);
+      for (int b = 0; b < batch_size; b++) {
+        h_batch_idx[b] = b;  // local batch index
+        h_batch_natoms[b] = train_frames[batch_frames[b]].num_atoms;
+      }
+      d_batch_idx.copy_from_host(h_batch_idx.data());
+
+      // Simplified: use direct frame-indexed GPU arrays instead of offsets
+      // Build natoms + offsets for this batch
+      std::vector<int> h_bnatoms(batch_size), h_boffsets(batch_size + 1);
+      h_boffsets[0] = 0;
+      for (int b = 0; b < batch_size; b++) {
+        h_bnatoms[b] = train_frames[batch_frames[b]].num_atoms;
+        h_boffsets[b + 1] = h_boffsets[b] + h_bnatoms[b];
+      }
+      d_bnatoms.copy_from_host(h_bnatoms.data());
+      d_boffsets.copy_from_host(h_boffsets.data());
+      d_batch_idx.copy_from_host(h_batch_idx.data());
+
       int grid_size = batch_size;
       eval_2b_batch<<<grid_size, 1>>>(
         batch_size, d_batch_idx.data(),
-        d_natoms.data(), d_offsets.data(),
+        d_bnatoms.data(), d_boffsets.data(),
         d_types.data(), d_x.data(), d_y.data(), d_z.data(),
         d_coeff.data(), num_pairs, nint,
         knots[0], (knots.back() - knots[0]) / nint, (float)para.rc_2b,
