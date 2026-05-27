@@ -37,6 +37,7 @@ The driver class calculating force and related quantities.
 #include "tersoff1988.cuh"
 #include "tersoff1989.cuh"
 #include "tersoff_mini.cuh"
+#include "uf3.cuh"
 #include "utilities/common.cuh"
 #include "utilities/error.cuh"
 #include "utilities/gpu_macro.cuh"
@@ -181,6 +182,17 @@ void Force::parse_potential(
 #endif
   } else if (strcmp(potential_name, "lj") == 0) {
     potential.reset(new LJ(fid_potential, num_types, number_of_atoms));
+  } else if (
+      strcmp(potential_name, "uf3") == 0 ||
+      potential_name[0] == '#' && strstr(param[1], ".uf3") != nullptr) {
+    // UF3 files start with "#UF3" comment; detect by extension or explicit "uf3" keyword
+    int max_neigh = 400;
+    if (num_param == 3) {
+      if (!is_valid_int(param[2], &max_neigh) || max_neigh <= 0 || max_neigh > 1024) {
+        PRINT_INPUT_ERROR("max_neighbor for uf3 must be a positive integer in (0, 1024].");
+      }
+    }
+    potential.reset(new UF3(param[1], number_of_atoms, max_neigh));
   } else if (strcmp(potential_name, "nep_ilp") == 0) {
     if (num_param != 3) {
       PRINT_INPUT_ERROR("potential should contain an ILP potential file and a NEP map file.\n");
