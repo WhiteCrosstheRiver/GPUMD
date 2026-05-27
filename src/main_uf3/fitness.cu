@@ -29,6 +29,9 @@ Uf3Fitness::Uf3Fitness(
   lambda_2_ = (float)para.lambda_2;
   d_energy_.resize(para.batch);
   h_energy_.resize(para.batch);
+  // Pre-allocate host force & energy scratch to batch maximum (avoids per-call realloc)
+  int max_batch_atoms = para.batch * 200;
+  h_fx_.reserve(max_batch_atoms); h_fy_.reserve(max_batch_atoms); h_fz_.reserve(max_batch_atoms);
 
   // Load test set internally (like NEP)
   if (!para.test_data.empty()) {
