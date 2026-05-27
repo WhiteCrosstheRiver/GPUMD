@@ -70,6 +70,10 @@ void parse_uf3_parameters(const char* input_file, UF3_Parameters& para)
       para.lambda_f = get_double_from_token(tokens[1], __FILE__, __LINE__);
     } else if (tokens[0] == "lambda_v") {
       para.lambda_v = get_double_from_token(tokens[1], __FILE__, __LINE__);
+    } else if (tokens[0] == "lambda_1") {
+      para.lambda_1 = get_double_from_token(tokens[1], __FILE__, __LINE__);
+    } else if (tokens[0] == "lambda_2") {
+      para.lambda_2 = get_double_from_token(tokens[1], __FILE__, __LINE__);
     } else if (tokens[0] == "optimizer") {
       para.optimizer = tokens[1];
     } else if (tokens[0] == "train_data") {

@@ -33,6 +33,8 @@ struct UF3_Parameters {
   double lambda_e = 1.0;
   double lambda_f = 1.0;
   double lambda_v = 0.1;
+  double lambda_1 = 0.0;   // L1 regularization coefficient
+  double lambda_2 = 0.0;   // L2 regularization coefficient
   std::string train_data = "train.xyz";
   std::string test_data = "test.xyz";
   std::vector<std::string> elements;

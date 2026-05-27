@@ -14,7 +14,7 @@
 */
 
 /*----------------------------------------------------------------------------80
-UF3 fitness: computes full loss (energy + force RMSE + L1/L2 regularization).
+UF3 fitness: full loss (energy + force RMSE + L1/L2 regularization).
 Matches NEP loss.out format for comparison.
 ------------------------------------------------------------------------------*/
 
@@ -32,10 +32,7 @@ public:
 
   void set_test_set(const std::vector<Uf3Frame>& test_set) { test_set_ = &test_set; }
 
-  // Evaluate loss for given parameters. Returns energy RMSE (eV/atom).
-  // Populates loss struct for optimizer use.
   float compute_loss(const std::vector<int>& batch_indices, int generation);
-
   float compute_loss_for_params(
     const float* params, const std::vector<int>& batch_indices, int generation);
 
@@ -45,14 +42,14 @@ public:
 
   // Loss components (filled by compute_loss)
   float loss_e = 0, loss_f = 0, loss_l1 = 0, loss_l2 = 0, loss_total = 0;
+  float test_e = 0, test_f = 0;
 
 private:
   Uf3Model* model_;
   const std::vector<Uf3Frame>& train_set_;
   const std::vector<Uf3Frame>* test_set_ = nullptr;
-  GPU_Vector<float> d_energy_, d_fx_, d_fy_, d_fz_;
+  GPU_Vector<float> d_energy_;
   std::vector<float> h_energy_, h_fx_, h_fy_, h_fz_;
   float lambda_e_ = 1, lambda_f_ = 1, lambda_1_ = 0, lambda_2_ = 0;
   FILE* floss_ = nullptr;
-  int max_batch_atoms_ = 0;
 };
