@@ -59,7 +59,7 @@ static void solve_cholesky(const std::vector<float>& L, int n,
   }
 }
 
-// ---- Evaluate 2B basis value for coefficient k at distance r ----
+// ---- Evaluate 2B basis VALUE for coefficient k at distance r ----
 static float eval_basis(int coeff_idx, int nint, float r, float kmin, float kd, float rc)
 {
   if (r >= rc) return 0;
@@ -72,6 +72,25 @@ static float eval_basis(int coeff_idx, int nint, float r, float kmin, float kd, 
   if (crel == 1) return (3*u*u*u - 6*u*u + 4)/6;
   if (crel == 2) return (-3*u*u*u + 3*u*u + 3*u + 1)/6;
   return u*u*u/6;
+}
+
+// ---- Evaluate 2B basis DERIVATIVE d/dr for coefficient k at distance r ----
+static float eval_basis_deriv(int coeff_idx, int nint, float r,
+                               float kmin, float kd, float rc)
+{
+  if (r >= rc) return 0;
+  int m = (int)((r - kmin) / kd);
+  if (m < 0) m = 0; if (m >= nint) m = nint - 1;
+  float u = (r - (kmin + m*kd)) / kd;
+  int crel = coeff_idx - m + 3;
+  if (crel < 0 || crel > 3) return 0;
+  // dB/du / kd
+  float ddu = 0;
+  if (crel == 0) ddu = -3*(1-u)*(1-u)/6;         // d/du (1-u)^3
+  else if (crel == 1) ddu = (9*u*u - 12*u)/6;     // d/du (3u^3-6u^2+4)
+  else if (crel == 2) ddu = (-9*u*u + 6*u + 3)/6; // d/du (-3u^3+3u^2+3u+1)
+  else ddu = 3*u*u/6;
+  return ddu / kd; // chain rule: dB/dr = dB/du * du/dr = dB/du / kd
 }
 
 void run_lstsq(UF3_Parameters& para, Uf3Fitness& fitness)
@@ -117,12 +136,52 @@ void run_lstsq(UF3_Parameters& para, Uf3Fitness& fitness)
       }
     }
 
+    // Energy contribution
     double target = (double)fr.energy;
     for (int k = 0; k < nparam; k++) {
       double ak = (double)basis_sum[k];
       ATb[k] += ak * target;
       for (int m = 0; m < nparam; m++)
         ATA[k*nparam + m] += ak * (double)basis_sum[m];
+    }
+
+    // Force contribution (weighted by lambda_f, normalized by force components)
+    float lf = (float)para.lambda_f;
+    if (lf > 0 && n > 0) {
+      float force_norm = 1.0f / (3.0f * n); // normalize by number of force components per frame
+      for (int i = 0; i < n; i++) {
+        int ti = fr.types[i];
+        // Force basis vector for atom i: G_k,iα = -Σ_j B'_k(r_ij) * (r_iα - r_jα) / r_ij
+        std::vector<double> force_basis_x(nparam, 0), force_basis_y(nparam, 0), force_basis_z(nparam, 0);
+        for (int j = 0; j < n; j++) {
+          if (i == j) continue;
+          int tj = fr.types[j];
+          float dx = fr.x[i]-fr.x[j], dy = fr.y[i]-fr.y[j], dz = fr.z[i]-fr.z[j];
+          float r = sqrtf(dx*dx+dy*dy+dz*dz);
+          if (r >= rc) continue;
+          int pair_idx = ti * fitness.model()->num_types() + tj;
+          float inv_r = 1.0f / r;
+          for (int c = 0; c < ncoeff; c++) {
+            float dbdr = eval_basis_deriv(c, nint, r, kmin, kd, rc);
+            float factor = -dbdr * inv_r;
+            int kk = pair_idx * ncoeff + c;
+            force_basis_x[kk] += factor * dx;
+            force_basis_y[kk] += factor * dy;
+            force_basis_z[kk] += factor * dz;
+          }
+        }
+        // Add force equations: ATA += lf * force_norm * G·G^T, ATb += lf * force_norm * G·F_ref
+        float wf = lf * force_norm;
+        for (int k = 0; k < nparam; k++) {
+          double gkx = force_basis_x[k], gky = force_basis_y[k], gkz = force_basis_z[k];
+          if (fabs(gkx) < 1e-10 && fabs(gky) < 1e-10 && fabs(gkz) < 1e-10) continue;
+          ATb[k] += wf * (gkx * (double)fr.fx[i] + gky * (double)fr.fy[i] + gkz * (double)fr.fz[i]);
+          for (int m = 0; m < nparam; m++) {
+            double gk_gm = gkx*force_basis_x[m] + gky*force_basis_y[m] + gkz*force_basis_z[m];
+            if (gk_gm != 0) ATA[k*nparam + m] += wf * gk_gm;
+          }
+        }
+      }
     }
   }
 
@@ -148,15 +207,17 @@ void run_lstsq(UF3_Parameters& para, Uf3Fitness& fitness)
   auto t1 = std::chrono::high_resolution_clock::now();
   double dt = std::chrono::duration<double>(t1 - t0).count();
 
-  // Evaluate RMS
+  // Evaluate with full loss (energy + force) to match other optimizers
   std::vector<int> bidx(1);
-  float rmse = 0;
-  for (int f = 0; f < std::min(100, nframes); f++) {
+  float total_loss = 0;
+  int eval_frames = std::min(50, nframes);
+  for (int f = 0; f < eval_frames; f++) {
     bidx[0] = f;
-    rmse += fitness.compute_loss(bidx, 0);
+    total_loss += fitness.compute_loss(bidx, 0);
   }
-  rmse /= std::min(100, nframes);
+  total_loss /= eval_frames;
 
   printf("  lstsq solution: %d params, %d frames, %.2f s\n", nparam, use_frames, dt);
-  printf("  Energy RMSE = %.3f eV/frame\n", rmse);
+  printf("  Loss (E+F) = %.3f eV [E=%.3f F=%.3f eV/A]\n",
+         total_loss, fitness.loss_e, fitness.loss_f);
 }
