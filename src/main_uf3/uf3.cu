@@ -158,6 +158,107 @@ static __global__ void uf3_eval_3b(
   if (tid == 0) atomicAdd(&ene[b], s_pe[0]);
 }
 
+// ---- 3B force kernel -----------------------------------------------------
+static __global__ void uf3_eval_3b_force(
+  int nf, const int* __restrict__ fidx, const int* __restrict__ nat,
+  const int* __restrict__ off, const int* __restrict__ typ,
+  const float* __restrict__ x, const float* __restrict__ y, const float* __restrict__ z,
+  const float* __restrict__ tensor, int nc0,int nc1,int nc2,
+  const float4* __restrict__ b0, int ni0, const float4* __restrict__ b1, int ni1,
+  const float4* __restrict__ b2, int ni2,
+  float km0,float kd0,float rc0, float km1,float kd1,float rc1,
+  float km2,float kd2,float rc2, const int* __restrict__ tmap, int ntr,int nt,
+  const int* __restrict__ nn_off, const int* __restrict__ nn_lst,
+  const int* __restrict__ nn_frame_off,
+  float* __restrict__ fx, float* __restrict__ fy, float* __restrict__ fz)
+{
+  int b = blockIdx.x; if (b >= nf) return;
+  int tid = threadIdx.x, stride = blockDim.x;
+  int fid = fidx[b], n = nat[fid], o = off[fid];
+  int nn_base = nn_frame_off[fid];
+
+  for (int i = tid; i < n; i += stride) {
+    int nni = nn_off[nn_base + i + 1] - nn_off[nn_base + i];
+    int nn_start = nn_off[nn_base + i];
+    int ti = typ[o+i];
+
+    for (int jj = 0; jj < nni; jj++) {
+      int j = nn_lst[nn_start + jj];
+      if (j <= i) continue;
+      float dx12=x[o+j]-x[o+i], dy12=y[o+j]-y[o+i], dz12=z[o+j]-z[o+i];
+      float r12=sqrtf(dx12*dx12+dy12*dy12+dz12*dz12); if (r12>=rc0) continue;
+      int tj=typ[o+j];
+      float inv12 = 1.0f/r12;
+
+      for (int kk = jj+1; kk < nni; kk++) {
+        int k = nn_lst[nn_start + kk];
+        if (k <= j) continue;
+        float dx13=x[o+k]-x[o+i], dy13=y[o+k]-y[o+i], dz13=z[o+k]-z[o+i];
+        float r13=sqrtf(dx13*dx13+dy13*dy13+dz13*dz13); if (r13>=rc1) continue;
+        float dx23=x[o+k]-x[o+j], dy23=y[o+k]-y[o+j], dz23=z[o+k]-z[o+j];
+        float r23=sqrtf(dx23*dx23+dy23*dy23+dz23*dz23); if (r23>=rc2) continue;
+        int tk=typ[o+k];
+        float inv13=1.0f/r13, inv23=1.0f/r23;
+
+        int m0=uf3_find_interval(r12,km0,kd0,ni0), m1=uf3_find_interval(r13,km1,kd1,ni1), m2=uf3_find_interval(r23,km2,kd2,ni2);
+        float u0=(r12-(km0+m0*kd0))/kd0, u1=(r13-(km1+m1*kd1))/kd1, u2=(r23-(km2+m2*kd2))/kd2;
+
+        // Basis values for energy
+        float vb0[4],vb1[4],vb2[4];
+        // Derivative basis for each dimension
+        float db0[4],db1[4],db2[4];
+        for(int p=0;p<4;p++){
+          float4 cb = __ldg(&b0[m0*4+p]); vb0[p]=uf3_eval_cubic(cb,u0);
+          db0[p] = (cb.y + u0*(2.0f*cb.z + u0*3.0f*cb.w)) / kd0;
+        }
+        for(int p=0;p<4;p++){
+          float4 cb = __ldg(&b1[m1*4+p]); vb1[p]=uf3_eval_cubic(cb,u1);
+          db1[p] = (cb.y + u1*(2.0f*cb.z + u1*3.0f*cb.w)) / kd1;
+        }
+        for(int p=0;p<4;p++){
+          float4 cb = __ldg(&b2[m2*4+p]); vb2[p]=uf3_eval_cubic(cb,u2);
+          db2[p] = (cb.y + u2*(2.0f*cb.z + u2*3.0f*cb.w)) / kd2;
+        }
+
+        int p0=m0-3;if(p0<0)p0=0; int p1=m1-3;if(p1<0)p1=0; int p2=m2-3;if(p2<0)p2=0;
+        const float* C=&tensor[tmap[(ti*nt+tj)*nt+tk]*nc0*nc1*nc2];
+
+        // Tensor contractions: dV/dr12, dV/dr13, dV/dr23
+        float dv12=0, dv13=0, dv23=0;
+        for(int dp=0;dp<4;dp++){int q=p0+dp;if(q>=nc0)continue;
+        for(int dq=0;dq<4;dq++){int r=p1+dq;if(r>=nc1)continue;
+        for(int dr=0;dr<4;dr++){int s=p2+dr;if(s>=nc2)continue;
+          float Cv = C[q+r*nc0+s*nc0*nc1];
+          dv12 += Cv * db0[dp] * vb1[dq] * vb2[dr];
+          dv13 += Cv * vb0[dp] * db1[dq] * vb2[dr];
+          dv23 += Cv * vb0[dp] * vb1[dq] * db2[dr];
+        }}}
+
+        // Convert to Cartesian forces (negative gradient convention)
+        float f12 = -dv12 * inv12, f13 = -dv13 * inv13, f23 = -dv23 * inv23;
+
+        // Force on i: -dV/dri = -(d12*r̂12 + d13*r̂13) where d12 = dV/dr12
+        float fix = -(dv12*inv12*dx12 + dv13*inv13*dx13);
+        float fiy = -(dv12*inv12*dy12 + dv13*inv13*dy13);
+        float fiz = -(dv12*inv12*dz12 + dv13*inv13*dz13);
+        atomicAdd(&fx[o+i], fix); atomicAdd(&fy[o+i], fiy); atomicAdd(&fz[o+i], fiz);
+
+        // Force on j: -dV/drj = d12*r̂12 - d23*r̂23
+        float fjx = dv12*inv12*dx12 - dv23*inv23*dx23;
+        float fjy = dv12*inv12*dy12 - dv23*inv23*dy23;
+        float fjz = dv12*inv12*dz12 - dv23*inv23*dz23;
+        atomicAdd(&fx[o+j], fjx); atomicAdd(&fy[o+j], fjy); atomicAdd(&fz[o+j], fjz);
+
+        // Force on k: -dV/drk = d13*r̂13 + d23*r̂23
+        float fkx = dv13*inv13*dx13 + dv23*inv23*dx23;
+        float fky = dv13*inv13*dy13 + dv23*inv23*dy23;
+        float fkz = dv13*inv13*dz13 + dv23*inv23*dz23;
+        atomicAdd(&fx[o+k], fkx); atomicAdd(&fy[o+k], fky); atomicAdd(&fz[o+k], fkz);
+      }
+    }
+  }
+}
+
 // ---- Analytical gradient kernel (2B energy) ------------------------------
 // For each frame: accumulates B_k(r_ij) values per coefficient, then
 // gradient[k] += (E_pred - E_ref) * Σ B_k.  One block per coefficient.
@@ -482,6 +583,21 @@ void Uf3Model::evaluate(
       d_trip_map.data(),num_trips_,num_types_,
       d_nn_off.data(),d_nn_lst.data(),d_nn_frame_off.data(),
       d_energy_buf.data());
+    GPU_CHECK_KERNEL
+
+    // 3B forces
+    uf3_eval_3b_force<<<B, BLK>>>(B, d_batch_idx.data(), d_bnatoms.data(), d_boffsets.data(),
+      d_types.data(), d_x.data(), d_y.data(), d_z.data(),
+      d_tensor_3b.data(), nc_3b_[0], nc_3b_[1], nc_3b_[2],
+      d_basis_3b_all.data()+basis_offsets_[0], nint_3b_[0],
+      d_basis_3b_all.data()+basis_offsets_[1], nint_3b_[1],
+      d_basis_3b_all.data()+basis_offsets_[2], nint_3b_[2],
+      knots_3b_[0][0], (knots_3b_[0].back()-knots_3b_[0][0])/nint_3b_[0], rc_3b_[0],
+      knots_3b_[1][0], (knots_3b_[1].back()-knots_3b_[1][0])/nint_3b_[1], rc_3b_[1],
+      knots_3b_[2][0], (knots_3b_[2].back()-knots_3b_[2][0])/nint_3b_[2], rc_3b_[2],
+      d_trip_map.data(), num_trips_, num_types_,
+      d_nn_off.data(), d_nn_lst.data(), d_nn_frame_off.data(),
+      d_fx.data(), d_fy.data(), d_fz.data());
     GPU_CHECK_KERNEL
   }
 
