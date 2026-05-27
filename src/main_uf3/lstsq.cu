@@ -94,6 +94,22 @@ static float eval_basis_deriv(int coeff_idx, int nint, float r,
 }
 
 void run_lstsq(UF3_Parameters& para, Uf3Fitness& fitness)
+  // 3B info
+  bool has_3b = fitness.model()->has_3b();
+  int ncoeff_3b[3] = {0}, nknots_3b[3] = {0}, nt_3b = 0;
+  int num_params_2b = nparam;
+  if (has_3b) {
+    for (int d=0;d<3;d++) { ncoeff_3b[d] = fitness.model()->ncoeff_3b(d); nknots_3b[d] = ncoeff_3b[d] + 4; }
+    nt_3b = fitness.model()->num_triplets();
+    num_params_2b = npairs * ncoeff;
+    nparam = fitness.model()->num_parameters();
+  }
+  int nint_3b[3]; float kmin_3b[3], kd_3b[3], rc_3b[3];
+  if (has_3b) for (int d=0;d<3;d++) {
+    nint_3b[d] = nknots_3b[d]-1; rc_3b[d] = fitness.model()->rc_3b(d);
+    kmin_3b[d] = fitness.model()->knots_3b(d)[0];
+    kd_3b[d] = (fitness.model()->knots_3b(d).back() - kmin_3b[d]) / nint_3b[d];
+  }
 {
   int nparam = fitness.num_parameters();
   int ncoeff = fitness.model()->ncoeff_2b();
