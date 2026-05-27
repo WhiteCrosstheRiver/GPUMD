@@ -1,0 +1,5 @@
+potential   /home/zemengfeng/software/github/GPUMD/test-dev/uf3_test/Nb.uf3
+time_step   1
+ensemble    nve
+dump_thermo 2
+run         10
