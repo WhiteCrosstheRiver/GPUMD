@@ -21,7 +21,7 @@
 #include <vector>
 
 // Finite-difference gradient (central difference, O(h^2))
-static void compute_gradient(
+static void compute_gradient(int gen,
   Uf3Fitness& fitness,
   const std::vector<float>& x,
   const std::vector<int>& batch_indices,
@@ -33,8 +33,8 @@ static void compute_gradient(
   for (int i = 0; i < nparam; i++) {
     xp[i] = x[i] + h;
     xm[i] = x[i] - h;
-    float fp = fitness.compute_loss_for_params(xp.data(), batch_indices);
-    float fm = fitness.compute_loss_for_params(xm.data(), batch_indices);
+    float fp = fitness.compute_loss_for_params(xp.data(), batch_indices, gen);
+    float fm = fitness.compute_loss_for_params(xm.data(), batch_indices, gen);
     grad[i] = (fp - fm) / (2.0f * h);
     // Restore for next iteration (compute_loss_for_params modifies model params)
     xp[i] = x[i]; xm[i] = x[i];
@@ -70,7 +70,7 @@ void run_adam(UF3_Parameters& para, Uf3Fitness& fitness)
     std::vector<int> bidx(batch);
     for (int b = 0; b < batch; b++) bidx[b] = rand() % nframes;
 
-    compute_gradient(fitness, x, bidx, grad, nparam);
+    compute_gradient(g, fitness, x, bidx, grad, nparam);
 
     // Adam update
     for (int i = 0; i < nparam; i++) {
@@ -82,7 +82,7 @@ void run_adam(UF3_Parameters& para, Uf3Fitness& fitness)
     }
 
     fitness.model()->set_parameters(x.data());
-    float rmse = fitness.compute_loss(bidx);
+    float rmse = fitness.compute_loss(bidx, g);
 
     if (rmse < best_rmse) best_rmse = rmse;
 

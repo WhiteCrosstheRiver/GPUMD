@@ -42,6 +42,15 @@ public:
     const std::vector<int>& batch_indices,
     GPU_Vector<float>& d_energy);
 
+  // Evaluate energy + forces for training loss
+  void evaluate_forces(
+    const std::vector<Uf3Frame>& frames,
+    const std::vector<int>& batch_indices,
+    GPU_Vector<float>& d_energy,
+    GPU_Vector<float>& d_force_x,
+    GPU_Vector<float>& d_force_y,
+    GPU_Vector<float>& d_force_z);
+
   // 2B accessors
   int ncoeff_2b() const { return ncoeff_2b_; }
   int nknots_2b() const { return nknots_2b_; }
@@ -97,6 +106,7 @@ private:
 public:  // (optimizers access these directly)
   GPU_Vector<int>    d_types, d_batch_idx, d_bnatoms, d_boffsets;
   GPU_Vector<float>  d_x, d_y, d_z, d_energy_buf;
+  GPU_Vector<float>  d_fx, d_fy, d_fz;         // per-atom forces
   GPU_Vector<float4> d_coeff_2b;
   GPU_Vector<float>  d_tensor_3b;
   GPU_Vector<float4> d_basis_3b_all;

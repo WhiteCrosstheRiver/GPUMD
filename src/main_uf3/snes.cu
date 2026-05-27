@@ -87,7 +87,7 @@ void run_snes(UF3_Parameters& para, Uf3Fitness& fitness)
         population[p * nparam + i] = s;
         trial[i] = mu[i] + sigma[i] * s;
       }
-      fitness_vals[p] = fitness.compute_loss_for_params(trial.data(), bidx);
+      fitness_vals[p] = fitness.compute_loss_for_params(trial.data(), bidx, g);
       indices[p] = p;
     }
 

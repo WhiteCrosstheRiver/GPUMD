@@ -1,0 +1,8 @@
+replicate 10 10 1
+potential   ./SiGe.uf3
+time_step   1
+fix 1
+dump_thermo 500
+dump_exyz   500 1 1
+ensemble    nvt_ber 400 400 10
+run         500

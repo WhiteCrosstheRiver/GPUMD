@@ -60,6 +60,36 @@ static __global__ void uf3_eval_2b(
   if (tid == 0) ene[b] = s_pe[0];
 }
 
+// ---- 2B force kernel (multi-threaded) -----------------------------------
+static __global__ void uf3_eval_2b_force(
+  int nf, const int* __restrict__ fidx, const int* __restrict__ nat,
+  const int* __restrict__ off, const int* __restrict__ typ,
+  const float* __restrict__ x, const float* __restrict__ y, const float* __restrict__ z,
+  const float4* __restrict__ coeff, int np, int nint, float kmin, float kd, float rc,
+  const int* __restrict__ tmap, int nt,
+  float* __restrict__ fx, float* __restrict__ fy, float* __restrict__ fz)
+{
+  int b = blockIdx.x; if (b >= nf) return;
+  int tid = threadIdx.x, stride = blockDim.x;
+  int fid = fidx[b], n = nat[fid], o = off[fid];
+
+  for (int i = tid; i < n; i += stride) {
+    float fxi = 0, fyi = 0, fzi = 0;
+    for (int j = 0; j < n; j++) {
+      if (i == j) continue;
+      float dx = x[o+i]-x[o+j], dy = y[o+i]-y[o+j], dz = z[o+i]-z[o+j];
+      float r = sqrtf(dx*dx+dy*dy+dz*dz); if (r >= rc) continue;
+      int m = uf3_find_interval(r, kmin, kd, nint);
+      float u = (r - (kmin + m*kd)) / kd;
+      float4 c = __ldg(&coeff[tmap[typ[o+i]*nt+typ[o+j]] * nint + m]);
+      float deriv = (c.y + u * (2.0f*c.z + u * 3.0f*c.w)) / kd;
+      float f = deriv / r;
+      fxi += f * dx; fyi += f * dy; fzi += f * dz;
+    }
+    fx[o+i] = fxi; fy[o+i] = fyi; fz[o+i] = fzi;
+  }
+}
+
 // ---- 3B kernel (neighbor-list-based, multi-threaded) ---------------------
 static __global__ void uf3_eval_3b(
   int nf, const int* __restrict__ fidx, const int* __restrict__ nat,
@@ -182,6 +212,7 @@ void Uf3Model::prealloc_gpu(const UF3_Parameters& para)
 
   d_types.resize(max_atoms);
   d_x.resize(max_atoms); d_y.resize(max_atoms); d_z.resize(max_atoms);
+  d_fx.resize(max_atoms); d_fy.resize(max_atoms); d_fz.resize(max_atoms);
   d_batch_idx.resize(para.batch);
   d_bnatoms.resize(para.batch);
   d_boffsets.resize(para.batch+1);
@@ -207,19 +238,22 @@ void Uf3Model::prealloc_gpu(const UF3_Parameters& para)
 
 void Uf3Model::ensure_batch_buffers(int batch_atoms, int batch_size)
 {
-  // Always resize to current batch size (simplest, avoids subtle sizing bugs)
-  d_types.resize(batch_atoms);
-  d_x.resize(batch_atoms); d_y.resize(batch_atoms); d_z.resize(batch_atoms);
-  d_batch_idx.resize(batch_size);
-  d_bnatoms.resize(batch_size);
-  d_boffsets.resize(batch_size+1);
-  d_energy_buf.resize(batch_size);
+  if (batch_atoms > gpu_max_atoms_) {
+    gpu_max_atoms_ = batch_atoms;
+    d_types.resize(batch_atoms); d_x.resize(batch_atoms); d_y.resize(batch_atoms); d_z.resize(batch_atoms);
+    d_fx.resize(batch_atoms); d_fy.resize(batch_atoms); d_fz.resize(batch_atoms);
+  }
+  if (batch_size > gpu_max_batch_) {
+    gpu_max_batch_ = batch_size;
+    d_batch_idx.resize(batch_size); d_bnatoms.resize(batch_size); d_boffsets.resize(batch_size+1);
+    d_energy_buf.resize(batch_size);
+  }
 }
 
-// Only resize GPU vector when growing (avoids repeated cudaFree/cudaMalloc)
 template<typename T>
-static void grow_only(GPU_Vector<T>& gv, size_t new_size) {
-  if (gv.size() < (int)new_size) gv.resize(new_size);
+static void grow_copy(GPU_Vector<T>& gv, size_t n, const T* host_data) {
+  if (gv.size() < (int)n) gv.resize(n);
+  cudaMemcpy(gv.data(), host_data, n * sizeof(T), cudaMemcpyHostToDevice);
 }
 
 void Uf3Model::build_knots() {
@@ -300,13 +334,13 @@ void Uf3Model::evaluate(
     off+=f.num_atoms;}}
   if(has_3b_) h_nn_frame_off.push_back((int)h_nn_offset.size()); // trailing
 
-  // Upload
-  d_types.copy_from_host(h_btypes.data());
-  d_x.copy_from_host(h_bx.data()); d_y.copy_from_host(h_by.data()); d_z.copy_from_host(h_bz.data());
+  // Upload using grow_copy (only reallocate when growing, raw cudaMemcpy)
+  grow_copy(d_types, total, h_btypes.data());
+  grow_copy(d_x, total, h_bx.data()); grow_copy(d_y, total, h_by.data()); grow_copy(d_z, total, h_bz.data());
   std::vector<int> h_bidx(B); for(int b=0;b<B;b++)h_bidx[b]=b;
-  d_batch_idx.copy_from_host(h_bidx.data());
-  d_bnatoms.copy_from_host(h_bnatoms.data());
-  d_boffsets.copy_from_host(h_boffsets.data());
+  grow_copy(d_batch_idx, B, h_bidx.data());
+  grow_copy(d_bnatoms, B, h_bnatoms.data());
+  grow_copy(d_boffsets, B+1, h_boffsets.data());
 
   // 2B: multi-threaded (BLOCK_SIZE threads per frame, each handles some atoms)
   const int BLK = 64;
@@ -317,14 +351,18 @@ void Uf3Model::evaluate(
     d_type_map.data(),num_types_,d_energy_buf.data());
   GPU_CHECK_KERNEL
 
+  // 2B forces
+  uf3_eval_2b_force<<<B, BLK>>>(B,d_batch_idx.data(),d_bnatoms.data(),d_boffsets.data(),
+    d_types.data(),d_x.data(),d_y.data(),d_z.data(),
+    d_coeff_2b.data(),num_types_*num_types_,nint_2b_,kmin2,kd2,rc_2b_,
+    d_type_map.data(),num_types_,d_fx.data(),d_fy.data(),d_fz.data());
+  GPU_CHECK_KERNEL
+
   // 3B: neighbor-list-based, multi-threaded
   if(has_3b_ && h_nn_frame_off.size() > 1){
-    grow_only(d_nn_off, h_nn_offset.size());
-    cudaMemcpy(d_nn_off.data(), h_nn_offset.data(), h_nn_offset.size()*sizeof(int), cudaMemcpyHostToDevice);
-    grow_only(d_nn_lst, h_nn_list.size());
-    cudaMemcpy(d_nn_lst.data(), h_nn_list.data(), h_nn_list.size()*sizeof(int), cudaMemcpyHostToDevice);
-    grow_only(d_nn_frame_off, h_nn_frame_off.size());
-    cudaMemcpy(d_nn_frame_off.data(), h_nn_frame_off.data(), h_nn_frame_off.size()*sizeof(int), cudaMemcpyHostToDevice);
+    grow_copy(d_nn_off, h_nn_offset.size(), h_nn_offset.data());
+    grow_copy(d_nn_lst, h_nn_list.size(), h_nn_list.data());
+    grow_copy(d_nn_frame_off, h_nn_frame_off.size(), h_nn_frame_off.data());
     uf3_eval_3b<<<B, BLK>>>(B,d_batch_idx.data(),d_bnatoms.data(),d_boffsets.data(),
       d_types.data(),d_x.data(),d_y.data(),d_z.data(),
       d_tensor_3b.data(),nc_3b_[0],nc_3b_[1],nc_3b_[2],

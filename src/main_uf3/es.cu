@@ -53,7 +53,7 @@ void run_es(UF3_Parameters& para, Uf3Fitness& fitness)
       std::vector<int> bidx(batch);
       for (int b = 0; b < batch; b++) bidx[b] = rand() % nframes;
 
-      float rmse = fitness.compute_loss_for_params(trial.data(), bidx);
+      float rmse = fitness.compute_loss_for_params(trial.data(), bidx, g);
       total_rmse += rmse;
 
       if (rmse < best_rmse) {
