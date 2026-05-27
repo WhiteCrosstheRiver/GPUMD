@@ -15,13 +15,13 @@
 
 /*----------------------------------------------------------------------------80
 UF3 (Ultra-Fast Force Field) training — main entry point.
-Reads uf3.in, loads training data, and trains a B-spline based potential
-using the SNES optimizer (shared with main_nep).
+GPU-accelerated evolutionary-strategy optimizer for B-spline coefficients.
 ------------------------------------------------------------------------------*/
 
 #include "parameters.cuh"
 #include "utilities/error.cuh"
 #include "utilities/gpu_macro.cuh"
+#include "utilities/gpu_vector.cuh"
 #include "utilities/main_common.cuh"
 #include <chrono>
 #include <cmath>
@@ -33,18 +33,80 @@ using the SNES optimizer (shared with main_nep).
 #include <sstream>
 #include <vector>
 
-// Simple structure to hold one training frame
+// ---------------------------------------------------------------------------
+// GPU: combined cubic coefficients + knot metadata (matches force/uf3.cu)
+// ---------------------------------------------------------------------------
+__device__ inline float eval_cubic(float4 c, float u)
+{
+  return c.x + u * (c.y + u * (c.z + u * c.w));
+}
+
+__device__ inline int find_interval(float r, float knot_min, float knot_delta, int nint)
+{
+  float t = (r - knot_min) / knot_delta;
+  int i = (int)t;
+  if (i < 0) i = 0;
+  if (i >= nint) i = nint - 1;
+  return i;
+}
+
+// GPU kernel: evaluate 2-body energy for a batch of frames
+// One block per frame, single-thread per block (enough for ~128-atom frames)
+static __global__ void eval_2b_batch(
+  int num_frames,
+  const int* __restrict__ d_frame_idx,   // [num_frames] which global frame to use
+  const int* __restrict__ d_natoms,      // [total_frames] atom count per frame
+  const int* __restrict__ d_offsets,     // [total_frames+1] atom offset in flat arrays
+  const int* __restrict__ d_types,       // flat types array
+  const float* __restrict__ d_x,         // flat position arrays
+  const float* __restrict__ d_y,
+  const float* __restrict__ d_z,
+  const float4* __restrict__ d_coeff,    // [num_pairs * nint] combined cubic
+  int num_pairs, int nint,
+  float knot_min, float knot_delta, float rc,
+  const int* __restrict__ d_type_map,    // [num_pairs] maps pair index to coeff offset
+  float* __restrict__ d_energy)          // [num_frames] output energy
+{
+  int b = blockIdx.x;
+  if (b >= num_frames) return;
+
+  int fidx = d_frame_idx[b];
+  int n = d_natoms[fidx];
+  int off = d_offsets[fidx];
+  float pe = 0.0f;
+
+  // Single-thread per frame: iterate all pairs within cutoff
+  for (int i = 0; i < n; i++) {
+    for (int j = i + 1; j < n; j++) {
+      float dx = d_x[off + i] - d_x[off + j];
+      float dy = d_y[off + i] - d_y[off + j];
+      float dz = d_z[off + i] - d_z[off + j];
+      float r = sqrtf(dx * dx + dy * dy + dz * dz);
+      if (r >= rc) continue;
+      int ti = d_types[off + i], tj = d_types[off + j];
+      // type_map: (ti, tj) -> pair coefficient offset
+      int num_types = (int)sqrtf((float)num_pairs + 0.5f);
+      int pair_idx = d_type_map[ti * num_types + tj];
+      int m = find_interval(r, knot_min, knot_delta, nint);
+      float h = knot_delta;
+      float u = (r - (knot_min + m * h)) / h;
+      float4 c = __ldg(&d_coeff[pair_idx * nint + m]);
+      pe += eval_cubic(c, u);
+    }
+  }
+  d_energy[fidx] = pe;
+}
+
+// ---------------------------------------------------------------------------
+// CPU: file loading
+// ---------------------------------------------------------------------------
 struct Frame {
   int num_atoms;
   std::vector<int> types;
-  std::vector<double> x, y, z;
-  std::vector<double> fx, fy, fz;
-  double energy;
-  double virial[9];
-  double lattice[9];
+  std::vector<float> x, y, z;
+  float energy;
 };
 
-// Parse GPUMD extended XYZ format
 static std::vector<Frame> load_xyz(const char* filename)
 {
   std::vector<Frame> frames;
@@ -53,34 +115,23 @@ static std::vector<Frame> load_xyz(const char* filename)
     printf("Error: cannot open %s\n", filename);
     exit(1);
   }
-
   std::string line;
   while (std::getline(input, line)) {
     if (line.empty()) continue;
     int natoms = std::stoi(line);
-
     Frame f;
     f.num_atoms = natoms;
-
-    // read comment line with lattice, energy, etc.
     std::getline(input, line);
-    {
-      // Extract energy=
-      size_t pos = line.find("energy=");
-      if (pos != std::string::npos) {
-        f.energy = std::stod(line.substr(pos + 7));
-      }
-    }
-
+    size_t pos = line.find("energy=");
+    if (pos != std::string::npos) f.energy = std::stof(line.substr(pos + 7));
     f.types.resize(natoms);
     f.x.resize(natoms); f.y.resize(natoms); f.z.resize(natoms);
-    f.fx.resize(natoms); f.fy.resize(natoms); f.fz.resize(natoms);
-
     for (int i = 0; i < natoms; i++) {
       std::getline(input, line);
       std::istringstream iss(line);
       std::string elem;
-      iss >> elem >> f.x[i] >> f.y[i] >> f.z[i] >> f.fx[i] >> f.fy[i] >> f.fz[i];
+      float fx, fy, fz;
+      iss >> elem >> f.x[i] >> f.y[i] >> f.z[i] >> fx >> fy >> fz;
       if (elem == "Si") f.types[i] = 0;
       else if (elem == "Ge") f.types[i] = 1;
       else f.types[i] = 0;
@@ -91,45 +142,41 @@ static std::vector<Frame> load_xyz(const char* filename)
   return frames;
 }
 
-// Build a uniform knot vector from r_min to rc with n knots
-static std::vector<float> make_uniform_knots(int n, double r_min, double rc)
+// ---------------------------------------------------------------------------
+// CPU: make uniform knots
+// ---------------------------------------------------------------------------
+static std::vector<float> make_uniform_knots(int n, float r_min, float rc)
 {
   std::vector<float> knots(n);
-  double delta = (rc - r_min) / (n - 1);
+  float delta = (rc - r_min) / (n - 1);
   for (int i = 0; i < n; i++) knots[i] = r_min + i * delta;
   return knots;
 }
 
-// Evaluate a single 2-body cubic B-spline energy for a pair at distance r
-// Uses pre-computed per-interval coefficients
-static double eval_2b_spline_cpu(
-  double r, const std::vector<float>& coeffs, const std::vector<float>& knots)
+// CPU: precompute combined cubic coefficients from B-spline coeffs
+static void precompute_2b_uniform(
+  const std::vector<float>& coeffs, std::vector<float4>& h_coeff)
 {
-  int nk = knots.size(), nint = nk - 1;
-  // find interval
-  double knot_min = knots[0], knot_delta = (knots[nk-1] - knots[0]) / nint;
-  int m = (r - knot_min) / knot_delta;
-  if (m < 0) m = 0;
-  if (m >= nint) m = nint - 1;
-  double h = knot_delta;
-  double u = (r - (knot_min + m * h)) / h;
-
-  // Pre-compute combined poly (same as GPU version)
-  int nc = coeffs.size();
-  int i0 = m - 3, i1 = m - 2, i2 = m - 1, i3 = m;
-  if (i0 < 0) i0 = 0;
-  if (i1 < 0) i1 = 0;
-  if (i2 < 0) i2 = 0;
-  if (i2 >= nc) i2 = nc - 1;
-  if (i3 >= nc) i3 = nc - 1;
-  float c0 = coeffs[i0], c1 = coeffs[i1], c2 = coeffs[i2], c3 = coeffs[i3];
-  float A = (c0 + 4*c1 + c2) / 6.0f;
-  float B = (-3*c0 + 3*c2) / 6.0f;
-  float C = (3*c0 - 6*c1 + 3*c2) / 6.0f;
-  float D = (-c0 + 3*c1 - 3*c2 + c3) / 6.0f;
-  return A + u * (B + u * (C + u * D));
+  int nc = (int)coeffs.size();
+  int nint = nc + 3;  // nknots = nc + 4, nint = nknots - 1 = nc + 3
+  h_coeff.resize(nint);
+  for (int m = 0; m < nint; m++) {
+    int i0 = m - 3, i1 = m - 2, i2 = m - 1, i3 = m;
+    if (i0 < 0) i0 = 0;
+    if (i1 < 0) i1 = 0;
+    if (i2 < 0) i2 = 0;
+    if (i2 >= nc) i2 = nc - 1;
+    if (i3 >= nc) i3 = nc - 1;
+    float c0 = coeffs[i0], c1 = coeffs[i1], c2 = coeffs[i2], c3 = coeffs[i3];
+    float A = (c0 + 4.0f*c1 + c2) / 6.0f;
+    float B = (-3.0f*c0 + 3.0f*c2) / 6.0f;
+    float C = (3.0f*c0 - 6.0f*c1 + 3.0f*c2) / 6.0f;
+    float D = (-c0 + 3.0f*c1 - 3.0f*c2 + c3) / 6.0f;
+    h_coeff[m] = make_float4(A, B, C, D);
+  }
 }
 
+// ---------------------------------------------------------------------------
 static void print_welcome_information(void)
 {
   printf("\n");
@@ -142,125 +189,151 @@ static void print_welcome_information(void)
   printf("\n");
 }
 
+// ---------------------------------------------------------------------------
 int main(int argc, char* argv[])
 {
   print_welcome_information();
   print_gpu_information();
 
   print_line_1();
-  printf("Started running UF3 training.\n");
+  printf("Started running UF3 training (GPU-accelerated).\n");
   print_line_2();
 
   UF3_Parameters para;
-  if (argc < 2) {
-    printf("Usage: uf3 <uf3.in>\n");
-    return EXIT_FAILURE;
-  }
-  const char* input_file = argv[1];
-  parse_uf3_parameters(input_file, para);
+  if (argc < 2) { printf("Usage: uf3 <uf3.in>\n"); return EXIT_FAILURE; }
+  parse_uf3_parameters(argv[1], para);
 
   // Load training data
   printf("Loading training data from %s ...\n", para.train_data.c_str());
   auto train_frames = load_xyz(para.train_data.c_str());
   printf("Loaded %zu training frames.\n", train_frames.size());
 
-  printf("Loading test data from %s ...\n", para.test_data.c_str());
-  auto test_frames = load_xyz(para.test_data.c_str());
-  printf("Loaded %zu test frames.\n", test_frames.size());
-
-  // Initialize random coefficients for each element pair
-  // n_max_2b coefficients per pair, num_types * num_types pairs
   int num_pairs = para.num_types * para.num_types;
-  int ncoeff_2b = para.n_max_2b;
+  int ncoeff = para.n_max_2b;
+  int nknots = ncoeff + 4;
+  int nint = nknots - 1;
+
+  // Initialize random coefficients
   std::vector<std::vector<float>> coeffs_2b(num_pairs);
   srand(42);
   for (int p = 0; p < num_pairs; p++) {
-    coeffs_2b[p].resize(ncoeff_2b);
-    for (int c = 0; c < ncoeff_2b; c++) {
-      coeffs_2b[p][c] = (rand() / (float)RAND_MAX - 0.5f) * 0.1f; // small random
-    }
+    coeffs_2b[p].resize(ncoeff);
+    for (int c = 0; c < ncoeff; c++)
+      coeffs_2b[p][c] = (rand() / (float)RAND_MAX - 0.5f) * 0.1f;
   }
 
   // Build knot vectors
-  int nknots = ncoeff_2b + 4; // cubic B-spline: nknots = ncoeffs + degree
-  auto knots = make_uniform_knots(nknots, 0.0, para.rc_2b);
+  auto knots = make_uniform_knots(nknots, 0.0f, (float)para.rc_2b);
 
-  // Evaluate energy for first frame
-  Frame& f = train_frames[0];
-  double total_energy = 0;
-  int count = 0;
-  for (int i = 0; i < f.num_atoms; i++) {
-    for (int j = i + 1; j < f.num_atoms; j++) {
-      double dx = f.x[i] - f.x[j];
-      double dy = f.y[i] - f.y[j];
-      double dz = f.z[i] - f.z[j];
-      double r = sqrt(dx*dx + dy*dy + dz*dz);
-      if (r >= para.rc_2b) continue;
-      int p = f.types[i] * para.num_types + f.types[j];
-      double e = eval_2b_spline_cpu(r, coeffs_2b[p], knots);
-      total_energy += e;
-      count++;
+  // ---- Upload training data to GPU ----
+  int total_atoms = 0;
+  for (auto& f : train_frames) total_atoms += f.num_atoms;
+
+  GPU_Vector<int> d_natoms(train_frames.size());
+  GPU_Vector<int> d_offsets(train_frames.size() + 1);
+  GPU_Vector<int> d_types(total_atoms);
+  GPU_Vector<float> d_x(total_atoms), d_y(total_atoms), d_z(total_atoms);
+
+  {
+    std::vector<int> h_natoms, h_offsets, h_types;
+    std::vector<float> h_x, h_y, h_z;
+    h_offsets.push_back(0);
+    for (auto& f : train_frames) {
+      h_natoms.push_back(f.num_atoms);
+      h_offsets.push_back(h_offsets.back() + f.num_atoms);
+      for (int i = 0; i < f.num_atoms; i++) {
+        h_types.push_back(f.types[i]);
+        h_x.push_back(f.x[i]); h_y.push_back(f.y[i]); h_z.push_back(f.z[i]);
+      }
     }
+    d_natoms.copy_from_host(h_natoms.data());
+    d_offsets.copy_from_host(h_offsets.data());
+    d_types.copy_from_host(h_types.data());
+    d_x.copy_from_host(h_x.data());
+    d_y.copy_from_host(h_y.data());
+    d_z.copy_from_host(h_z.data());
   }
 
-  printf("\nFirst frame: %d atoms, %d pairs within cutoff, energy = %.6f eV\n",
-         f.num_atoms, count, total_energy);
-  printf("Reference energy = %.6f eV\n", f.energy);
-  printf("RMSE (random init) = %.6f eV\n", fabs(total_energy - f.energy));
+  // Type map: for Si=0, Ge=1: pair (0,0)=0, (0,1)=1, (1,0)=2, (1,1)=3
+  GPU_Vector<int> d_type_map(num_pairs);
+  std::vector<int> h_type_map(num_pairs);
+  for (int p = 0; p < num_pairs; p++) h_type_map[p] = p;
+  d_type_map.copy_from_host(h_type_map.data());
 
-  // ---- Simple ES training loop ----
-  // Perturb coefficients randomly, keep the best for each element pair.
-  int ncoeff = para.n_max_2b;
+  GPU_Vector<float> d_energy(train_frames.size());
+
+  printf("GPU data uploaded: %d frames, %d total atoms\n",
+         (int)train_frames.size(), total_atoms);
+
+  // ---- ES training loop (GPU-accelerated) ----
   int batch_size = std::min(para.batch, (int)train_frames.size());
   double best_rmse = 1e30;
   std::vector<std::vector<float>> best_coeffs = coeffs_2b;
 
-  printf("\nStarting ES training (%d generations, pop=%d, batch=%d)...\n",
+  printf("\nStarting GPU-ES training (%d gen, pop=%d, batch=%d)...\n",
          para.generation, para.population, batch_size);
   print_line_1();
 
+  const int BLOCK_SIZE = 64;
   srand(12345);
+
+  // Pre-allocate reusable GPU buffers
+  GPU_Vector<int> d_batch_idx(batch_size);
+  GPU_Vector<float4> d_coeff(num_pairs * nint);
+  std::vector<float> h_energy(batch_size);
+
+  auto time_start = std::chrono::high_resolution_clock::now();
+
   for (int gen = 0; gen < para.generation; gen++) {
     double total_rmse = 0;
-    int frames_evaluated = 0;
+    int frames_used = 0;
 
-    // Evaluate all candidates on a random subset of frames
     for (int pop = 0; pop < para.population; pop++) {
-      // Perturb current best coefficients
+      // Perturb coefficients
       std::vector<std::vector<float>> trial = best_coeffs;
+      for (int p = 0; p < num_pairs; p++)
+        for (int c = 0; c < ncoeff; c++)
+          trial[p][c] += (rand() / (float)RAND_MAX - 0.5f) * 0.02f;
+
+      // Precompute GPU coefficients from trial
+      std::vector<float4> all_coeff;
       for (int p = 0; p < num_pairs; p++) {
-        for (int c = 0; c < ncoeff; c++) {
-          float noise = (rand() / (float)RAND_MAX - 0.5f) * 0.02f;
-          trial[p][c] += noise;
-        }
+        std::vector<float4> hc;
+        precompute_2b_uniform(trial[p], hc);
+        for (auto& c : hc) all_coeff.push_back(c);
       }
+      d_coeff.resize(all_coeff.size());
+      d_coeff.copy_from_host(all_coeff.data());
 
-      // Evaluate on batch_size random frames
+      // Select random batch and upload frame indices to GPU
+      std::vector<int> batch_frames(batch_size);
+      for (int b = 0; b < batch_size; b++)
+        batch_frames[b] = rand() % train_frames.size();
+      d_batch_idx.copy_from_host(batch_frames.data());
+
+      // GPU evaluation
+      int grid_size = batch_size;
+      eval_2b_batch<<<grid_size, 1>>>(
+        batch_size, d_batch_idx.data(),
+        d_natoms.data(), d_offsets.data(),
+        d_types.data(), d_x.data(), d_y.data(), d_z.data(),
+        d_coeff.data(), num_pairs, nint,
+        knots[0], (knots.back() - knots[0]) / nint, (float)para.rc_2b,
+        d_type_map.data(), d_energy.data());
+      GPU_CHECK_KERNEL
+
+      // Download energies
+      d_energy.copy_to_host(h_energy.data());
+
+      // Compute RMSE
       double rmse_sum = 0;
-      int eval_count = 0;
-      for (int b = 0; b < batch_size && eval_count < 100; b++) {
-        int fidx = rand() % train_frames.size();
-        Frame& f = train_frames[fidx];
-        double total_e = 0;
-        for (int i = 0; i < f.num_atoms && i < 128; i++) {
-          for (int j = i + 1; j < f.num_atoms && j < 128; j++) {
-            double dx = f.x[i] - f.x[j];
-            double dy = f.y[i] - f.y[j];
-            double dz = f.z[i] - f.z[j];
-            double r = sqrt(dx*dx + dy*dy + dz*dz);
-            if (r >= para.rc_2b) continue;
-            int p = f.types[i] * para.num_types + f.types[j];
-            total_e += eval_2b_spline_cpu(r, trial[p], knots);
-          }
-        }
-        rmse_sum += fabs(total_e - f.energy);
-        eval_count++;
+      for (int b = 0; b < batch_size; b++) {
+        int fidx = batch_frames[b];
+        rmse_sum += fabs(h_energy[b] - train_frames[fidx].energy);
       }
-      double rmse = rmse_sum / eval_count;
+      double rmse = rmse_sum / batch_size;
       total_rmse += rmse;
-      frames_evaluated += eval_count;
 
-      // Keep best
       if (rmse < best_rmse) {
         best_rmse = rmse;
         best_coeffs = trial;
@@ -268,14 +341,22 @@ int main(int argc, char* argv[])
     }
 
     if (gen % 5 == 0 || gen == para.generation - 1) {
-      printf("  gen %5d: avg RMSE = %.3f eV, best = %.3f eV\n",
-             gen, total_rmse / para.population, best_rmse);
+      auto tnow = std::chrono::high_resolution_clock::now();
+      double elapsed = std::chrono::duration<double>(tnow - time_start).count();
+      printf("  gen %5d: avg RMSE = %.3f eV, best = %.3f eV (%.1fs)\n",
+             gen, total_rmse / para.population, best_rmse, elapsed);
     }
   }
 
-  // Write trained potential to .uf3 file
+  auto time_end = std::chrono::high_resolution_clock::now();
+  double total_time = std::chrono::duration<double>(time_end - time_start).count();
+
+  // Write trained potential
   print_line_1();
-  std::string outfile = "nep.uf3";
+  std::string outfile;
+  for (int n = 0; n < para.num_types; n++) outfile += para.elements[n];
+  outfile += ".uf3";
+
   printf("Writing trained potential to %s ...\n", outfile.c_str());
   {
     std::ofstream out(outfile);
@@ -283,11 +364,10 @@ int main(int argc, char* argv[])
     out << "uf3 " << para.num_types;
     for (int n = 0; n < para.num_types; n++) out << " " << para.elements[n];
     out << "\n";
-    // Write 2B blocks for each element pair
     for (int p = 0; p < num_pairs; p++) {
       int ti = p / para.num_types, tj = p % para.num_types;
       out << "2B " << para.elements[ti] << " " << para.elements[tj]
-          << " 0 3 " << para.knot_type_str << "\n";
+          << " 0 3 uk\n";
       out << para.rc_2b << " " << nknots << "\n";
       out << std::fixed;
       for (int k = 0; k < nknots; k++)
@@ -299,7 +379,7 @@ int main(int argc, char* argv[])
     }
     out.close();
   }
-  printf("Done. Best RMSE = %.3f eV\n", best_rmse);
+  printf("Done. Best RMSE = %.3f eV, total time = %.1f s\n", best_rmse, total_time);
   print_line_2();
 
   return EXIT_SUCCESS;
