@@ -40,18 +40,15 @@ static bool cholesky(std::vector<float>& A, int n)
   return true;
 }
 
-// ---- Solve L L^T x = b (L is lower-triangular) ----
 static void solve_cholesky(const std::vector<float>& L, int n,
                             const std::vector<float>& b, std::vector<float>& x)
 {
-  // Forward: L y = b
   x.resize(n);
   for (int i = 0; i < n; i++) {
     float s = b[i];
     for (int j = 0; j < i; j++) s -= L[i*n+j] * x[j];
     x[i] = s / L[i*n+i];
   }
-  // Backward: L^T x = y (overwrite x in-place)
   for (int i = n-1; i >= 0; i--) {
     float s = x[i];
     for (int j = i+1; j < n; j++) s -= L[j*n+i] * x[j];
@@ -59,7 +56,7 @@ static void solve_cholesky(const std::vector<float>& L, int n,
   }
 }
 
-// ---- Evaluate 2B basis VALUE for coefficient k at distance r ----
+// ---- Evaluate 2B basis VALUE ----
 static float eval_basis(int coeff_idx, int nint, float r, float kmin, float kd, float rc)
 {
   if (r >= rc) return 0;
@@ -74,61 +71,42 @@ static float eval_basis(int coeff_idx, int nint, float r, float kmin, float kd, 
   return u*u*u/6;
 }
 
-// ---- Evaluate 2B basis DERIVATIVE d/dr for coefficient k at distance r ----
-static float eval_basis_deriv(int coeff_idx, int nint, float r,
-                               float kmin, float kd, float rc)
-{
-  if (r >= rc) return 0;
-  int m = (int)((r - kmin) / kd);
-  if (m < 0) m = 0; if (m >= nint) m = nint - 1;
-  float u = (r - (kmin + m*kd)) / kd;
-  int crel = coeff_idx - m + 3;
-  if (crel < 0 || crel > 3) return 0;
-  // dB/du / kd
-  float ddu = 0;
-  if (crel == 0) ddu = -3*(1-u)*(1-u)/6;         // d/du (1-u)^3
-  else if (crel == 1) ddu = (9*u*u - 12*u)/6;     // d/du (3u^3-6u^2+4)
-  else if (crel == 2) ddu = (-9*u*u + 6*u + 3)/6; // d/du (-3u^3+3u^2+3u+1)
-  else ddu = 3*u*u/6;
-  return ddu / kd; // chain rule: dB/dr = dB/du * du/dr = dB/du / kd
-}
-
 void run_lstsq(UF3_Parameters& para, Uf3Fitness& fitness)
-  // 3B info
-  bool has_3b = fitness.model()->has_3b();
-  int ncoeff_3b[3] = {0}, nknots_3b[3] = {0}, nt_3b = 0;
-  int num_params_2b = nparam;
-  if (has_3b) {
-    for (int d=0;d<3;d++) { ncoeff_3b[d] = fitness.model()->ncoeff_3b(d); nknots_3b[d] = ncoeff_3b[d] + 4; }
-    nt_3b = fitness.model()->num_triplets();
-    num_params_2b = npairs * ncoeff;
-    nparam = fitness.model()->num_parameters();
-  }
-  int nint_3b[3]; float kmin_3b[3], kd_3b[3], rc_3b[3];
-  if (has_3b) for (int d=0;d<3;d++) {
-    nint_3b[d] = nknots_3b[d]-1; rc_3b[d] = fitness.model()->rc_3b(d);
-    kmin_3b[d] = fitness.model()->knots_3b(d)[0];
-    kd_3b[d] = (fitness.model()->knots_3b(d).back() - kmin_3b[d]) / nint_3b[d];
-  }
 {
-  int nparam = fitness.num_parameters();
   int ncoeff = fitness.model()->ncoeff_2b();
   int npairs = fitness.model()->num_pairs();
+  int nt = fitness.model()->num_types();
   int nint = fitness.model()->nknots_2b() - 1;
   float rc = fitness.model()->rc_2b();
   float kmin = fitness.model()->knots_2b()[0];
   float kd = (fitness.model()->knots_2b().back() - kmin) / nint;
 
+  bool has_3b = fitness.model()->has_3b();
+  int num_params_2b = npairs * ncoeff;
+  int nparam = fitness.model()->num_parameters();
+
+  int nc3[3] = {0}, nint3[3] = {0};
+  float kmin3[3] = {0}, kd3[3] = {0}, rc3[3] = {0};
+  if (has_3b) {
+    for (int d=0;d<3;d++) {
+      nc3[d] = fitness.model()->ncoeff_3b(d);
+      nint3[d] = fitness.model()->nknots_3b(d) - 1;
+      rc3[d] = fitness.model()->rc_3b(d);
+      kmin3[d] = fitness.model()->knots_3b(d)[0];
+      kd3[d] = (fitness.model()->knots_3b(d).back() - kmin3[d]) / nint3[d];
+    }
+  }
+
   const auto& train_set = fitness.train_set();
   int nframes = (int)train_set.size();
-  int use_frames = std::min(nframes, para.batch); // use up to batch frames
+  int use_frames = std::min(nframes, para.batch);
 
   auto t0 = std::chrono::high_resolution_clock::now();
 
-  // Build normal equation: ATA (nparam×nparam) and ATb (nparam)
+  // Normal equations: ATA (nparam×nparam), ATb (nparam)
   std::vector<double> ATA(nparam * nparam, 0.0);
   std::vector<double> ATb(nparam, 0.0);
-  std::vector<float> basis_sum(nparam); // per-frame basis accumulator
+  std::vector<float> basis_sum(nparam);
 
   srand(12345);
   for (int f = 0; f < use_frames; f++) {
@@ -136,72 +114,73 @@ void run_lstsq(UF3_Parameters& para, Uf3Fitness& fitness)
     const Uf3Frame& fr = train_set[fidx];
     int n = fr.num_atoms;
 
-    // Accumulate basis sum for each coefficient
     for (int k = 0; k < nparam; k++) basis_sum[k] = 0;
+
+    // ---- 2B basis ----
     for (int i = 0; i < n; i++) {
       int ti = fr.types[i];
       for (int j = i+1; j < n; j++) {
         int tj = fr.types[j];
         float dx = fr.x[i]-fr.x[j], dy = fr.y[i]-fr.y[j], dz = fr.z[i]-fr.z[j];
         float r = sqrtf(dx*dx+dy*dy+dz*dz);
-        int pair_idx = ti * fitness.model()->num_types() + tj;
-        for (int c = 0; c < ncoeff; c++) {
-          float bv = eval_basis(c, nint, r, kmin, kd, rc);
-          basis_sum[pair_idx * ncoeff + c] += bv;
+        if (r >= rc) continue;
+        int pair_idx = ti * nt + tj;
+        for (int c = 0; c < ncoeff; c++)
+          basis_sum[pair_idx * ncoeff + c] += eval_basis(c, nint, r, kmin, kd, rc);
+      }
+    }
+
+    // ---- 3B basis (B_p(rij)*B_q(rik)*B_r(rjk)) ----
+    if (has_3b) {
+      for (int i = 0; i < n; i++) {
+        int ti = fr.types[i];
+        for (int j = i+1; j < n; j++) {
+          float dx12 = fr.x[j]-fr.x[i], dy12 = fr.y[j]-fr.y[i], dz12 = fr.z[j]-fr.z[i];
+          float r12 = sqrtf(dx12*dx12+dy12*dy12+dz12*dz12);
+          if (r12 >= rc3[0]) continue;
+          int tj = fr.types[j];
+          for (int k = j+1; k < n; k++) {
+            float dx13 = fr.x[k]-fr.x[i], dy13 = fr.y[k]-fr.y[i], dz13 = fr.z[k]-fr.z[i];
+            float r13 = sqrtf(dx13*dx13+dy13*dy13+dz13*dz13);
+            if (r13 >= rc3[1]) continue;
+            float dx23 = fr.x[k]-fr.x[j], dy23 = fr.y[k]-fr.y[j], dz23 = fr.z[k]-fr.z[j];
+            float r23 = sqrtf(dx23*dx23+dy23*dy23+dz23*dz23);
+            if (r23 >= rc3[2]) continue;
+            int tk = fr.types[k];
+            int trip_idx = (ti*nt + tj)*nt + tk;
+            int off3 = num_params_2b + trip_idx * nc3[0] * nc3[1] * nc3[2];
+            for (int p = 0; p < nc3[0]; p++) {
+              float bp = eval_basis(p, nint3[0], r12, kmin3[0], kd3[0], rc3[0]);
+              if (bp == 0) continue;
+              for (int q = 0; q < nc3[1]; q++) {
+                float bq = eval_basis(q, nint3[1], r13, kmin3[1], kd3[1], rc3[1]);
+                if (bq == 0) continue;
+                float bpbq = bp * bq;
+                for (int r = 0; r < nc3[2]; r++) {
+                  float br = eval_basis(r, nint3[2], r23, kmin3[2], kd3[2], rc3[2]);
+                  if (br == 0) continue;
+                  basis_sum[off3 + p + q * nc3[0] + r * nc3[0] * nc3[1]] += bpbq * br;
+                }
+              }
+            }
+          }
         }
       }
     }
 
-    // Energy contribution
     double target = (double)fr.energy;
     for (int k = 0; k < nparam; k++) {
       double ak = (double)basis_sum[k];
+      if (ak == 0) continue;
       ATb[k] += ak * target;
-      for (int m = 0; m < nparam; m++)
+      for (int m = 0; m < nparam; m++) {
+        if (basis_sum[m] == 0) continue;
         ATA[k*nparam + m] += ak * (double)basis_sum[m];
-    }
-
-    // Force contribution (weighted by lambda_f, normalized by force components)
-    float lf = (float)para.lambda_f;
-    if (lf > 0 && n > 0) {
-      float force_norm = 1.0f / (3.0f * n); // normalize by number of force components per frame
-      for (int i = 0; i < n; i++) {
-        int ti = fr.types[i];
-        // Force basis vector for atom i: G_k,iα = -Σ_j B'_k(r_ij) * (r_iα - r_jα) / r_ij
-        std::vector<double> force_basis_x(nparam, 0), force_basis_y(nparam, 0), force_basis_z(nparam, 0);
-        for (int j = 0; j < n; j++) {
-          if (i == j) continue;
-          int tj = fr.types[j];
-          float dx = fr.x[i]-fr.x[j], dy = fr.y[i]-fr.y[j], dz = fr.z[i]-fr.z[j];
-          float r = sqrtf(dx*dx+dy*dy+dz*dz);
-          if (r >= rc) continue;
-          int pair_idx = ti * fitness.model()->num_types() + tj;
-          float inv_r = 1.0f / r;
-          for (int c = 0; c < ncoeff; c++) {
-            float dbdr = eval_basis_deriv(c, nint, r, kmin, kd, rc);
-            float factor = -dbdr * inv_r;
-            int kk = pair_idx * ncoeff + c;
-            force_basis_x[kk] += factor * dx;
-            force_basis_y[kk] += factor * dy;
-            force_basis_z[kk] += factor * dz;
-          }
-        }
-        // Add force equations: ATA += lf * force_norm * G·G^T, ATb += lf * force_norm * G·F_ref
-        float wf = lf * force_norm;
-        for (int k = 0; k < nparam; k++) {
-          double gkx = force_basis_x[k], gky = force_basis_y[k], gkz = force_basis_z[k];
-          if (fabs(gkx) < 1e-10 && fabs(gky) < 1e-10 && fabs(gkz) < 1e-10) continue;
-          ATb[k] += wf * (gkx * (double)fr.fx[i] + gky * (double)fr.fy[i] + gkz * (double)fr.fz[i]);
-          for (int m = 0; m < nparam; m++) {
-            double gk_gm = gkx*force_basis_x[m] + gky*force_basis_y[m] + gkz*force_basis_z[m];
-            if (gk_gm != 0) ATA[k*nparam + m] += wf * gk_gm;
-          }
-        }
       }
     }
   }
 
-  // Regularization (small diagonal to ensure positive definiteness)
+  // Regularization
   for (int k = 0; k < nparam; k++) ATA[k*nparam + k] += 1e-6;
 
   // Convert to float for Cholesky
@@ -210,30 +189,20 @@ void run_lstsq(UF3_Parameters& para, Uf3Fitness& fitness)
   for (int i = 0; i < nparam; i++) { ATbf[i] = (float)ATb[i];
     for (int j = 0; j < nparam; j++) ATAf[i*nparam + j] = (float)ATA[i*nparam + j]; }
 
-  // Cholesky + solve
   bool ok = cholesky(ATAf, nparam);
-  if (!ok) { printf("  lstsq: ATA not positive definite, using diagonal\n"); }
+  if (!ok) printf("  lstsq: ATA not PD, using diagonal\n");
 
   std::vector<float> x;
   solve_cholesky(ATAf, nparam, ATbf, x);
-
-  // Apply solution
   fitness.model()->set_parameters(x.data());
 
   auto t1 = std::chrono::high_resolution_clock::now();
-  double dt = std::chrono::duration<double>(t1 - t0).count();
+  printf("  lstsq: %d params%s, %d frames, %.2f s\n",
+         nparam, has_3b ? " (2B+3B)" : " (2B)", use_frames,
+         std::chrono::duration<double>(t1-t0).count());
 
-  // Evaluate with full loss (energy + force) to match other optimizers
-  std::vector<int> bidx(1);
-  float total_loss = 0;
-  int eval_frames = std::min(50, nframes);
-  for (int f = 0; f < eval_frames; f++) {
-    bidx[0] = f;
-    total_loss += fitness.compute_loss(bidx, 0);
-  }
-  total_loss /= eval_frames;
-
-  printf("  lstsq solution: %d params, %d frames, %.2f s\n", nparam, use_frames, dt);
-  printf("  Loss (E+F) = %.3f eV [E=%.3f F=%.3f eV/A]\n",
-         total_loss, fitness.loss_e, fitness.loss_f);
+  std::vector<int> bidx(1); float tl = 0; int en = std::min(20, nframes);
+  for (int f = 0; f < en; f++) { bidx[0] = f; tl += fitness.compute_loss(bidx, 0); }
+  tl /= en;
+  printf("  Loss = %.3f [E=%.3f F=%.3f eV/A]\n", tl, fitness.loss_e, fitness.loss_f);
 }
