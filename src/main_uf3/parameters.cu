@@ -110,6 +110,73 @@ void finalize_uf3_optimizer_stages(UF3_Parameters& para)
   para.stages.push_back(stage);
 }
 
+static void print_optimizer_stage_line(
+  size_t index, const UF3_OptimizerStage& stage, int global_batch)
+{
+  printf("  [%zu] %s: generation=%d population=%d",
+         index, stage.name.c_str(), stage.generation, stage.population);
+  if (stage.full_batch) {
+    printf(" batch=full");
+  } else if (stage.batch >= 0) {
+    printf(" batch=%d", stage.batch);
+  } else {
+    printf(" batch=global(%d)", global_batch);
+  }
+  printf("\n");
+}
+
+static void print_optimizer_stages(const char* title, const UF3_Parameters& para)
+{
+  printf("%s\n", title);
+  for (size_t s = 0; s < para.stages.size(); s++) {
+    print_optimizer_stage_line(s, para.stages[s], para.batch);
+  }
+}
+
+void normalize_uf3_optimizer_stages(UF3_Parameters& para)
+{
+  if (para.stages.empty()) {
+    return;
+  }
+
+  int first_lstsq = -1;
+  for (size_t i = 0; i < para.stages.size(); i++) {
+    if (para.stages[i].name == "lstsq") {
+      if (first_lstsq < 0) {
+        first_lstsq = (int)i;
+      }
+    }
+  }
+  if (first_lstsq < 0) {
+    return;
+  }
+
+  const bool was_first = (first_lstsq == 0);
+  bool dropped_duplicate = false;
+  UF3_OptimizerStage lstsq_stage = para.stages[first_lstsq];
+  std::vector<UF3_OptimizerStage> ordered;
+  ordered.reserve(para.stages.size());
+  ordered.push_back(lstsq_stage);
+
+  for (size_t i = 0; i < para.stages.size(); i++) {
+    if (para.stages[i].name == "lstsq") {
+      if ((int)i != first_lstsq) {
+        dropped_duplicate = true;
+      }
+      continue;
+    }
+    ordered.push_back(para.stages[i]);
+  }
+  para.stages = std::move(ordered);
+
+  if (!was_first) {
+    printf("Note: lstsq moved to stage 0 (UF3 runs lstsq first when configured).\n");
+  }
+  if (dropped_duplicate) {
+    printf("Warning: duplicate lstsq blocks ignored; using the first lstsq block.\n");
+  }
+}
+
 void parse_uf3_parameters(const char* input_file, UF3_Parameters& para)
 {
   std::ifstream input(input_file);
@@ -170,6 +237,7 @@ void parse_uf3_parameters(const char* input_file, UF3_Parameters& para)
   }
 
   finalize_uf3_optimizer_stages(para);
+  normalize_uf3_optimizer_stages(para);
 
   printf("UF3 training parameters:\n");
   printf("  n_max_2b = %d\n", para.n_max_2b);
@@ -183,18 +251,5 @@ void parse_uf3_parameters(const char* input_file, UF3_Parameters& para)
   printf("  global batch = %d\n", para.batch);
   printf("  training data = %s\n", para.train_data.c_str());
   printf("  test data = %s\n", para.test_data.c_str());
-  printf("  optimizer stages = %zu\n", para.stages.size());
-  for (size_t s = 0; s < para.stages.size(); s++) {
-    const auto& st = para.stages[s];
-    printf("    [%zu] %s: generation=%d population=%d",
-           s, st.name.c_str(), st.generation, st.population);
-    if (st.full_batch) {
-      printf(" batch=full");
-    } else if (st.batch >= 0) {
-      printf(" batch=%d", st.batch);
-    } else {
-      printf(" batch=global(%d)", para.batch);
-    }
-    printf("\n");
-  }
+  print_optimizer_stages("  optimizer stages (execution order):", para);
 }

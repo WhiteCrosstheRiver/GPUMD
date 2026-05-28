@@ -32,6 +32,26 @@ public:
   float compute_loss_for_params(const float* params, int batch_id, int generation, int stage_id = 0);
   void compute_gradient(int batch_id, int generation, std::vector<float>& grad);
 
+  // Whole-generation loss evaluation: builds and reduces `pop` parameter sets
+  // in one launch chain.  out_loss_total[p] receives the unified loss for
+  // individual p (energy + force + L1/L2 regularization).
+  //
+  // Falls back to a per-individual loop when has_3b is true (no pop kernel for
+  // 3B yet).  generation/stage_id are forwarded for floss_ logging exactly
+  // like compute_loss_for_params would do.
+  void compute_loss_population(
+    const float* host_pop_params,
+    int pop,
+    int batch_id,
+    int generation,
+    int stage_id,
+    float* out_loss_total);
+
+  // Train-only loss (no test-set side-effects).  Leaves d_fx/fy/fz and
+  // d_energy_buf populated for the batch, so the caller may follow it with
+  // compute_loss_gradient(...) without re-running the forward pass.
+  float compute_loss_train_only(int batch_id);
+
   int num_parameters() const { return model_->num_parameters(); }
   Uf3Model* model() { return model_; }
   const Uf3DatasetGPU& dataset() const { return dataset_; }
@@ -39,24 +59,38 @@ public:
   float loss_e = 0, loss_f = 0, loss_l1 = 0, loss_l2 = 0, loss_total = 0;
   float test_e = 0, test_f = 0;
 
-  ~Uf3Fitness()
-  {
-    if (floss_) {
-      fclose(floss_);
-      floss_ = nullptr;
-    }
-  }
+  ~Uf3Fitness();
 
 private:
   void accumulate_regularization_gradient(std::vector<float>& grad);
+  void compute_l1_l2_host(float& l1, float& l2);
+  void evaluate_test_set(int generation, int stage_id);
 
   Uf3Model* model_;
   const Uf3DatasetGPU& dataset_;
   const std::vector<Uf3Frame>& train_set_;
   std::vector<Uf3Frame> test_set_;
   int test_set_size_ = 0;
-  GPU_Vector<float> d_energy_;
-  std::vector<float> h_energy_, h_fx_, h_fy_, h_fz_;
+
+  // Train-path GPU buffers (pre-allocated; never resized on the hot path).
+  GPU_Vector<float> d_energy_;     // per-batch predicted energies
+  GPU_Vector<float> d_loss_sum_;   // [2]: e_sum2, f_sum2 (GPU-side RMSE numerators)
+  GPU_Vector<float> d_grad_;       // [nparam] workspace for loss-gradient kernel
+  GPU_Vector<float> d_ediff_;      // [batch] workspace for per-frame energy residuals
+  // Pinned host mirror so the D2H of the loss reduction can be Async on the
+  // model's compute stream — lets host-side L1/L2 work overlap the scalar copy.
+  float* h_loss_sum_pinned_ = nullptr;  // size 2
+
+  // Population-mode buffers (lazy-grown in compute_loss_population).
+  GPU_Vector<float> d_loss_sum_pop_;       // [2 * pop]
+  GPU_Vector<float> d_energy_pop_;         // [pop * batch]
+  float* h_loss_sum_pop_pinned_ = nullptr; // [2 * pop_capacity_h_]
+  int pop_capacity_h_ = 0;
+
+  // Test-path host buffers (used only every 100 generations).
+  std::vector<float> h_energy_test_, h_fx_test_, h_fy_test_, h_fz_test_;
+  GPU_Vector<float> d_energy_test_;
+
   float lambda_e_ = 1, lambda_f_ = 1, lambda_1_ = 0, lambda_2_ = 0;
   FILE* floss_ = nullptr;
 };

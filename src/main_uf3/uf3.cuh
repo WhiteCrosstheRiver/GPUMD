@@ -25,45 +25,97 @@ resize to avoid heap fragmentation.
 #include "dataset_gpu.cuh"
 #include "parameters.cuh"
 #include "utilities/gpu_vector.cuh"
+#include <cuda_runtime.h>
 #include <vector>
 
 class Uf3Model
 {
 public:
   Uf3Model(UF3_Parameters& para);
+  ~Uf3Model();
 
   int num_parameters() const { return num_params_total_; }
   void get_parameters(float* params) const;
+
+  // Async path: copies raw coeffs H2D and runs the float4 spline build on
+  // the GPU using `stream`.  Caller must synchronize the stream (or use
+  // events) before launching any kernel that consumes d_coeff_2b/d_tensor_3b.
+  void set_parameters_async(const float* params, cudaStream_t stream);
+
+  // Synchronous wrapper around set_parameters_async on stream_ (the model's
+  // default compute stream).  Blocks until the GPU build kernel finishes.
   void set_parameters(const float* params);
 
+  // Compute stream used for the training hot path (forward + loss reduction).
+  cudaStream_t stream() const { return stream_; }
+
+  // ---- Population (multi-individual) hot path -----------------------------
+  // Evaluates `pop` parameter sets in a single launch chain.  Used by SNES to
+  // amortize launch overhead and global memory traffic across an entire
+  // generation.  Currently supports 2B-only; 3B falls back to the
+  // per-individual loop in the caller (Uf3Fitness::compute_loss_population).
+  //
+  // host_pop_params: pop * nparam, row-major (individual p at offset p*nparam).
+  // All launches go on `stream`.
+  void set_population_parameters_async(
+    const float* host_pop_params, int pop, cudaStream_t stream);
+
+  // Forward pass for the entire population on one batch.
+  //   d_energy_pop[p * B + b] = predicted energy for individual p on slot b.
+  // Forces are stored in d_fx_pop / d_fy_pop / d_fz_pop in layout
+  //   [pop * dataset_total_atoms], indexed by (p * total_atoms + global_atom).
+  void evaluate_batch_population(
+    const Uf3DatasetGPU& ds, int batch_id, int pop,
+    GPU_Vector<float>& d_energy_pop);
+
+  // GPU reduction of the loss for an entire population.
+  //   d_loss_sum_pop[p*2 + 0] = sum_b (E_pred/na - E_ref/na)^2
+  //   d_loss_sum_pop[p*2 + 1] = sum_a ||f_pred - f_ref||^2
+  void compute_loss_reduction_population(
+    const Uf3DatasetGPU& ds, int batch_id, int pop,
+    GPU_Vector<float>& d_loss_sum_pop);    // size >= 2 * pop
+
+  // Lazy-allocate the population-side buffers to fit (pop, total_atoms).
+  void ensure_pop_buffers(int pop, int dataset_total_atoms);
+
   // ---- Fast path: evaluate using pre-loaded GPU dataset (NO H2D transfers) ---
-  // d_energy receives per-frame energies; must be pre-sized to batch_indices.size().
-  void evaluate(
+  // Uses dataset-cached GPU frame indices for batch_id — zero host->device traffic
+  // on the hot path.  d_energy is auto-resized.
+  void evaluate_batch(
     const Uf3DatasetGPU& ds,
-    const std::vector<int>& batch_indices,
+    int batch_id,
     GPU_Vector<float>& d_energy);
 
+  // GPU-side reduction of the loss: writes
+  //   d_loss_sum[0] = sum_b (E_pred[b]/na_b - E_ref[fid]/na_b)^2          (energy MSE numerator)
+  //   d_loss_sum[1] = sum_a ((Fx-Fx_ref)^2 + (Fy-Fy_ref)^2 + (Fz-Fz_ref)^2)  (force MSE numerator)
+  // Must be called AFTER evaluate_batch(...) with the same batch_id.
+  void compute_loss_reduction(
+    const Uf3DatasetGPU& ds,
+    int batch_id,
+    GPU_Vector<float>& d_loss_sum);     // size >= 2
+
   // Gradient of the unified training loss (matches Uf3Fitness::compute_loss).
+  // d_grad_ws (>= nparam) and d_ediff_ws (>= batch_size) are workspaces.
   void compute_loss_gradient(
     const Uf3DatasetGPU& ds,
-    const std::vector<int>& batch_indices,
+    int batch_id,
     float loss_e,
     float loss_f,
     float lambda_e,
     float lambda_f,
+    GPU_Vector<float>& d_grad_ws,
+    GPU_Vector<float>& d_ediff_ws,
     std::vector<float>& host_gradient);
+
+  // Ensure d_fx/fy/fz can hold every atom in the dataset (global-offset writes).
+  void ensure_global_force_buffer(int dataset_total_atoms);
 
   // ---- Legacy: evaluate using host-side frames (per-call H2D upload) ---
   void evaluate(
     const std::vector<Uf3Frame>& frames,
     const std::vector<int>& batch_indices,
     GPU_Vector<float>& d_energy);
-
-  void compute_energy_gradient(
-    const std::vector<Uf3Frame>& frames,
-    const std::vector<int>& batch_indices,
-    GPU_Vector<float>& d_energy_diff,
-    std::vector<float>& host_gradient);
 
   void evaluate_forces(
     const std::vector<Uf3Frame>& frames,
@@ -94,10 +146,15 @@ public:
 private:
   void build_knots();
   void prealloc_gpu(const UF3_Parameters& para);
-  void upload_2b_coeffs();
+  // Build float4 spline table on the GPU from the raw 2B coeffs already on
+  // device (d_raw_coeffs_2b_).  Async on `stream`.
+  void upload_2b_coeffs_gpu(cudaStream_t stream);
+  // Host helper: copies coeffs_2b_ into a contiguous host array.
+  void pack_2b_coeffs_host(std::vector<float>& flat) const;
   void upload_3b_coeffs();
   void init_3b_basis();
   void ensure_batch_buffers(int batch_atoms, int batch_size);
+  cudaStream_t stream_ = 0;  // default compute stream; created in prealloc_gpu
 
   // 2B
   int ncoeff_2b_, nknots_2b_, nint_2b_;
@@ -120,19 +177,31 @@ private:
   int num_params_total_;
 
   // ---- Pre-allocated GPU buffers (never resized after init) ----
-  int gpu_max_atoms_ = 0;       // current capacity
+  int gpu_max_atoms_ = 0;        // capacity for d_types/x/y/z (batch-local layout)
+  int gpu_max_force_atoms_ = 0;  // capacity for d_fx/fy/fz (dataset-global layout)
   int gpu_max_batch_ = 0;
   int gpu_max_tensor_ = 0;
   int gpu_max_coeff_2b_ = 0;
+
+  // ---- Population-mode capacity tracking ----
+  int pop_capacity_ = 0;             // # individuals currently fit
+  int pop_force_atoms_capacity_ = 0; // per-individual force atoms count
 
 public:  // (optimizers access these directly)
   GPU_Vector<int>    d_types, d_batch_idx, d_bnatoms, d_boffsets;
   GPU_Vector<float>  d_x, d_y, d_z, d_energy_buf;
   GPU_Vector<float>  d_fx, d_fy, d_fz;         // per-atom forces
+  GPU_Vector<float>  d_raw_coeffs_2b;          // [num_types_*num_types_ * ncoeff_2b_]
   GPU_Vector<float4> d_coeff_2b;
   GPU_Vector<float>  d_tensor_3b;
   GPU_Vector<float4> d_basis_3b_all;
   int basis_offsets_[3];
   GPU_Vector<int>    d_trip_map, d_type_map;
   GPU_Vector<int>    d_nn_off, d_nn_lst, d_nn_frame_off; // 3B neighbor lists
+
+  // ---- Population-mode buffers (lazy alloc'd in ensure_pop_buffers) ----
+  GPU_Vector<float>  d_raw_coeffs_2b_pop;  // [pop * np2 * ncoeff_2b_]
+  GPU_Vector<float4> d_coeff_2b_pop;       // [pop * np2 * nint_2b_]
+  GPU_Vector<float>  d_energy_buf_pop;     // [pop * batch_size]
+  GPU_Vector<float>  d_fx_pop, d_fy_pop, d_fz_pop;  // [pop * total_atoms]
 };

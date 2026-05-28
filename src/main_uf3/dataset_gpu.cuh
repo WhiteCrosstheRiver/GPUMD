@@ -29,6 +29,8 @@ struct Uf3DatasetGPU
   int num_frames = 0;
   int total_atoms = 0;
   int num_batches = 0;
+  int max_batch_size = 0;   // max number of frames in any batch
+  int max_batch_atoms = 0;  // max sum-of-atoms across all batches
 
   // --- Per-frame metadata (GPU, size = num_frames) ---
   GPU_Vector<int> d_natoms;
@@ -54,14 +56,27 @@ struct Uf3DatasetGPU
 
   // --- Round-robin batches (pre-sorted by energy, interleaved) ---
   std::vector<std::vector<int>> batches;  // batches[b][k] = global frame index
+  std::vector<int> batch_total_atoms;     // [num_batches] sum of atoms per batch
+
+  // --- GPU-cached batch frame-index lists (avoid per-step H2D) ---
+  // d_batch_fidx_all[i] is the global frame index of slot i across all batches,
+  // laid out as [batch0_size frames | batch1_size frames | ...].
+  GPU_Vector<int> d_batch_fidx_all;
+  std::vector<int> batch_fidx_off;        // [num_batches+1] offsets into d_batch_fidx_all
 
   // Load all frames to GPU, energy-sort, partition into batches
   void load(const std::vector<Uf3Frame>& frames, bool has_3b_flag, int batch_size);
 
-  // Build per-batch metadata arrays for kernel launch.
-  // Fills d_fidx, d_bnatoms, d_boffsets with virtual-indexed data
-  // where d_boffsets points into the global atom arrays.
+  // Build per-batch metadata arrays for kernel launch (legacy host-build path).
   void build_batch_meta(int batch_id,
                         GPU_Vector<int>& d_fidx, GPU_Vector<int>& d_bnatoms,
                         GPU_Vector<int>& d_boffsets) const;
+
+  // Fast accessor: device pointer to frame indices of a given batch (no copy).
+  const int* batch_fidx_device_ptr(int batch_id) const {
+    return d_batch_fidx_all.data() + batch_fidx_off[batch_id % num_batches];
+  }
+  int batch_size(int batch_id) const {
+    return (int)batches[batch_id % num_batches].size();
+  }
 };

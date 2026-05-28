@@ -59,8 +59,8 @@ void run_snes(
   compute_utilities(pop, utility);
 
   std::vector<float> population(nparam * pop);
+  std::vector<float> trial_pop(nparam * pop);   // P trial parameter sets
   std::vector<float> fitness_vals(pop);
-  std::vector<float> trial(nparam);
   std::vector<int> indices(pop);
 
   std::mt19937 rng(12345);
@@ -76,15 +76,19 @@ void run_snes(
     int batch_id = g % ds.num_batches;
     int global_gen = gen_offset + g;
 
+    // Build all P trial parameter sets at once so the GPU can fuse-evaluate
+    // them in a single launch chain.
     for (int p = 0; p < pop; p++) {
       for (int i = 0; i < nparam; i++) {
         float s = normal(rng);
         population[p * nparam + i] = s;
-        trial[i] = mu[i] + sigma[i] * s;
+        trial_pop[p * nparam + i] = mu[i] + sigma[i] * s;
       }
-      fitness_vals[p] = fitness.compute_loss_for_params(trial.data(), batch_id, global_gen, stage_id);
       indices[p] = p;
     }
+    fitness.compute_loss_population(
+      trial_pop.data(), pop, batch_id, global_gen, stage_id,
+      fitness_vals.data());
 
     std::sort(indices.begin(), indices.end(),
               [&](int a, int b) { return fitness_vals[a] < fitness_vals[b]; });

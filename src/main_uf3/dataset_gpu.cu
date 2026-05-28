@@ -119,8 +119,33 @@ void Uf3DatasetGPU::load(const std::vector<Uf3Frame>& frames, bool has_3b_flag,
   for (int i = 0; i < num_frames; i++)
     batches[i % num_batches].push_back(order[i]);
 
-  printf("GPU dataset: %d frames, %d atoms, %d batches (size=%d), 3B=%s\n",
-         num_frames, total_atoms, num_batches, batch_size, has_3b ? "yes" : "no");
+  // Pre-compute per-batch atom totals and cache batch frame indices on GPU
+  // so optimizer hot-paths never need a per-step H2D for batch metadata.
+  batch_total_atoms.assign(num_batches, 0);
+  batch_fidx_off.assign(num_batches + 1, 0);
+  max_batch_size = 0;
+  max_batch_atoms = 0;
+  for (int b = 0; b < num_batches; b++) {
+    int sz = (int)batches[b].size();
+    int sum_atoms = 0;
+    for (int k = 0; k < sz; k++) sum_atoms += h_natoms[batches[b][k]];
+    batch_total_atoms[b] = sum_atoms;
+    batch_fidx_off[b + 1] = batch_fidx_off[b] + sz;
+    if (sz > max_batch_size) max_batch_size = sz;
+    if (sum_atoms > max_batch_atoms) max_batch_atoms = sum_atoms;
+  }
+  std::vector<int> h_batch_fidx_all(batch_fidx_off.back());
+  for (int b = 0; b < num_batches; b++) {
+    int base = batch_fidx_off[b];
+    for (int k = 0; k < (int)batches[b].size(); k++)
+      h_batch_fidx_all[base + k] = batches[b][k];
+  }
+  d_batch_fidx_all.resize(h_batch_fidx_all.size());
+  d_batch_fidx_all.copy_from_host(h_batch_fidx_all.data());
+
+  printf("GPU dataset: %d frames, %d atoms, %d batches (size=%d, max=%d frames / %d atoms), 3B=%s\n",
+         num_frames, total_atoms, num_batches, batch_size,
+         max_batch_size, max_batch_atoms, has_3b ? "yes" : "no");
 }
 
 void Uf3DatasetGPU::build_batch_meta(int batch_id,

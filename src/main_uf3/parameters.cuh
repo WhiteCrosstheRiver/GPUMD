@@ -52,3 +52,4 @@ struct UF3_Parameters {
 
 void parse_uf3_parameters(const char* input_file, UF3_Parameters& para);
 void finalize_uf3_optimizer_stages(UF3_Parameters& para);
+void normalize_uf3_optimizer_stages(UF3_Parameters& para);

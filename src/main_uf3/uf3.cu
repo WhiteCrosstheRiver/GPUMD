@@ -90,6 +90,143 @@ static __global__ void uf3_eval_2b_force(
   }
 }
 
+// ---- 2B population energy/force kernels ---------------------------------
+// grid = (B, P), block = BLK. ene_pop[p * B + b], forces in [P * total_atoms].
+static __global__ void uf3_eval_2b_pop(
+  int B, int P, int total_atoms,
+  const int* __restrict__ fidx, const int* __restrict__ nat,
+  const int* __restrict__ off, const int* __restrict__ typ,
+  const float* __restrict__ x, const float* __restrict__ y, const float* __restrict__ z,
+  const float4* __restrict__ coeff,     // [P * coeff_stride]
+  int coeff_stride,                     // = np2 * nint
+  int np2, int nint, float kmin, float kd, float rc,
+  const int* __restrict__ tmap, int nt,
+  float* __restrict__ ene)              // [P * B]
+{
+  int b = blockIdx.x; if (b >= B) return;
+  int p = blockIdx.y; if (p >= P) return;
+  int tid = threadIdx.x, stride = blockDim.x;
+  int fid = fidx[b], n = nat[fid], o = off[fid];
+  const float4* coeff_p = coeff + p * coeff_stride;
+  float pe = 0;
+  for (int i = tid; i < n; i += stride) {
+    for (int j = i + 1; j < n; j++) {
+      float dx = x[o+i]-x[o+j], dy = y[o+i]-y[o+j], dz = z[o+i]-z[o+j];
+      float r = sqrtf(dx*dx + dy*dy + dz*dz); if (r >= rc) continue;
+      int m = uf3_find_interval(r, kmin, kd, nint);
+      float u = (r - (kmin + m*kd)) / kd;
+      float4 c = __ldg(&coeff_p[tmap[typ[o+i]*nt + typ[o+j]] * nint + m]);
+      pe += uf3_eval_cubic(c, u);
+    }
+  }
+  __shared__ float s_pe[64];
+  s_pe[tid] = pe; __syncthreads();
+  for (int s = stride/2; s > 0; s >>= 1) {
+    if (tid < s) s_pe[tid] += s_pe[tid + s];
+    __syncthreads();
+  }
+  if (tid == 0) {
+    ene[p * B + b] = s_pe[0];
+  }
+}
+
+static __global__ void uf3_eval_2b_force_pop(
+  int B, int P, int total_atoms,
+  const int* __restrict__ fidx, const int* __restrict__ nat,
+  const int* __restrict__ off, const int* __restrict__ typ,
+  const float* __restrict__ x, const float* __restrict__ y, const float* __restrict__ z,
+  const float4* __restrict__ coeff, int coeff_stride,
+  int np2, int nint, float kmin, float kd, float rc,
+  const int* __restrict__ tmap, int nt,
+  float* __restrict__ fx, float* __restrict__ fy, float* __restrict__ fz)
+{
+  int b = blockIdx.x; if (b >= B) return;
+  int p = blockIdx.y; if (p >= P) return;
+  int tid = threadIdx.x, stride = blockDim.x;
+  int fid = fidx[b], n = nat[fid], o = off[fid];
+  const float4* coeff_p = coeff + p * coeff_stride;
+  float* fx_p = fx + p * total_atoms;
+  float* fy_p = fy + p * total_atoms;
+  float* fz_p = fz + p * total_atoms;
+  for (int i = tid; i < n; i += stride) {
+    float fxi = 0, fyi = 0, fzi = 0;
+    for (int j = 0; j < n; j++) {
+      if (i == j) continue;
+      float dx = x[o+i]-x[o+j], dy = y[o+i]-y[o+j], dz = z[o+i]-z[o+j];
+      float r = sqrtf(dx*dx + dy*dy + dz*dz); if (r >= rc) continue;
+      int m = uf3_find_interval(r, kmin, kd, nint);
+      float u = (r - (kmin + m*kd)) / kd;
+      float4 c = __ldg(&coeff_p[tmap[typ[o+i]*nt + typ[o+j]] * nint + m]);
+      float deriv = (c.y + u * (2.0f*c.z + u * 3.0f*c.w)) / kd;
+      float f = deriv / r;
+      fxi += f * dx; fyi += f * dy; fzi += f * dz;
+    }
+    fx_p[o+i] = fxi; fy_p[o+i] = fyi; fz_p[o+i] = fzi;
+  }
+}
+
+// Population energy MSE reduction.
+// grid = (ceil(B/256), P), block = 256.  Output [p*2 + 0] for each p.
+static __global__ void uf3_reduce_energy_sq_pop(
+  int B, int P,
+  const float* __restrict__ d_energy_pop,   // [P * B]
+  const float* __restrict__ d_energy_ref,
+  const int* __restrict__ d_fidx,
+  const int* __restrict__ d_natoms,
+  float* __restrict__ d_loss_sum_pop)       // [2 * P]
+{
+  int p = blockIdx.y;
+  int b = blockIdx.x * blockDim.x + threadIdx.x;
+  float v = 0.0f;
+  if (b < B) {
+    int fid = d_fidx[b];
+    float na = (float)d_natoms[fid]; if (na < 1.0f) na = 1.0f;
+    float diff = d_energy_pop[p * B + b] / na - d_energy_ref[fid] / na;
+    v = diff * diff;
+  }
+  __shared__ float s[256];
+  int tid = threadIdx.x;
+  s[tid] = v; __syncthreads();
+  for (int st = blockDim.x / 2; st > 0; st >>= 1) {
+    if (tid < st) s[tid] += s[tid + st];
+    __syncthreads();
+  }
+  if (tid == 0) atomicAdd(&d_loss_sum_pop[p * 2 + 0], s[0]);
+}
+
+// Population force MSE reduction.  grid = (B, P), block = 128.
+static __global__ void uf3_reduce_force_sq_pop(
+  int B, int P, int total_atoms,
+  const int* __restrict__ d_fidx,
+  const int* __restrict__ d_natoms,
+  const int* __restrict__ d_offsets,
+  const float* __restrict__ fx, const float* __restrict__ fy, const float* __restrict__ fz,
+  const float* __restrict__ fx_ref, const float* __restrict__ fy_ref, const float* __restrict__ fz_ref,
+  float* __restrict__ d_loss_sum_pop)
+{
+  int b = blockIdx.x; if (b >= B) return;
+  int p = blockIdx.y; if (p >= P) return;
+  int fid = d_fidx[b], n = d_natoms[fid], o = d_offsets[fid];
+  const float* fx_p = fx + p * total_atoms;
+  const float* fy_p = fy + p * total_atoms;
+  const float* fz_p = fz + p * total_atoms;
+  int tid = threadIdx.x, stride = blockDim.x;
+  float acc = 0.0f;
+  for (int i = tid; i < n; i += stride) {
+    float dx = fx_p[o+i] - fx_ref[o+i];
+    float dy = fy_p[o+i] - fy_ref[o+i];
+    float dz = fz_p[o+i] - fz_ref[o+i];
+    acc += dx*dx + dy*dy + dz*dz;
+  }
+  __shared__ float s[128];
+  s[tid] = acc; __syncthreads();
+  for (int st = blockDim.x / 2; st > 0; st >>= 1) {
+    if (tid < st) s[tid] += s[tid + st];
+    __syncthreads();
+  }
+  if (tid == 0) atomicAdd(&d_loss_sum_pop[p * 2 + 1], s[0]);
+}
+
 // ---- 3B kernel (neighbor-list-based, multi-threaded) ---------------------
 static __global__ void uf3_eval_3b(
   int nf, const int* __restrict__ fidx, const int* __restrict__ nat,
@@ -326,15 +463,61 @@ static __global__ void uf3_grad_2b(
 }
 
 // ---- pre-computation -----------------------------------------------------
-static void precompute_2b(const std::vector<float>& cf, std::vector<float4>& out) {
-  int nc=(int)cf.size(), ni=nc+3; out.resize(ni);
-  for(int m=0;m<ni;m++){
-    int i0=m-3,i1=m-2,i2=m-1,i3=m;
-    if(i0<0)i0=0;if(i1<0)i1=0;if(i2<0)i2=0;if(i2>=nc)i2=nc-1;if(i3>=nc)i3=nc-1;
-    float c0=cf[i0],c1=cf[i1],c2=cf[i2],c3=cf[i3];
-    out[m]=make_float4((c0+4*c1+c2)/6,(-3*c0+3*c2)/6,(3*c0-6*c1+3*c2)/6,(-c0+3*c1-3*c2+c3)/6);
-  }
+// GPU spline build: each block.y = one knot interval, block.x = one type pair.
+// Replaces the host precompute_2b() / per-set_parameters H2D-of-float4-table.
+static __global__ void uf3_build_coeff_2b_kernel(
+  int npairs, int ncoeff, int nint,
+  const float* __restrict__ raw,     // [npairs * ncoeff]
+  float4* __restrict__ out)          // [npairs * nint]
+{
+  int pair = blockIdx.x;
+  int m    = blockIdx.y * blockDim.x + threadIdx.x;
+  if (pair >= npairs || m >= nint) return;
+  const float* cf = raw + pair * ncoeff;
+  // Clamp all four indices to [0, ncoeff-1].  (The original host
+  // precompute_2b() was missing upper clamps on i0/i1 — fine in single-pop
+  // mode where the OOB read landed in the next pair's slot of the same
+  // individual, but in population mode this crossed into another individual's
+  // coefficients and produced wildly wrong spline values for the last
+  // interval m=nint-1.)
+  int i0 = m - 3; if (i0 < 0) i0 = 0; if (i0 >= ncoeff) i0 = ncoeff - 1;
+  int i1 = m - 2; if (i1 < 0) i1 = 0; if (i1 >= ncoeff) i1 = ncoeff - 1;
+  int i2 = m - 1; if (i2 < 0) i2 = 0; if (i2 >= ncoeff) i2 = ncoeff - 1;
+  int i3 = m;                          if (i3 >= ncoeff) i3 = ncoeff - 1;
+  float c0 = cf[i0], c1 = cf[i1], c2 = cf[i2], c3 = cf[i3];
+  float4 v;
+  v.x = (c0 + 4.0f * c1 + c2) / 6.0f;
+  v.y = (-3.0f * c0 + 3.0f * c2) / 6.0f;
+  v.z = (3.0f * c0 - 6.0f * c1 + 3.0f * c2) / 6.0f;
+  v.w = (-c0 + 3.0f * c1 - 3.0f * c2 + c3) / 6.0f;
+  out[pair * nint + m] = v;
 }
+
+// Population variant: P sets of raw coeffs -> P float4 spline tables.
+// grid = (npairs, ceil(nint/64), pop), block = 64.
+static __global__ void uf3_build_coeff_2b_pop_kernel(
+  int P, int npairs, int ncoeff, int nint,
+  const float* __restrict__ raw,     // [P * npairs * ncoeff]
+  float4* __restrict__ out)          // [P * npairs * nint]
+{
+  int p    = blockIdx.z;
+  int pair = blockIdx.x;
+  int m    = blockIdx.y * blockDim.x + threadIdx.x;
+  if (p >= P || pair >= npairs || m >= nint) return;
+  const float* cf = raw + (p * npairs + pair) * ncoeff;
+  int i0 = m - 3; if (i0 < 0) i0 = 0; if (i0 >= ncoeff) i0 = ncoeff - 1;
+  int i1 = m - 2; if (i1 < 0) i1 = 0; if (i1 >= ncoeff) i1 = ncoeff - 1;
+  int i2 = m - 1; if (i2 < 0) i2 = 0; if (i2 >= ncoeff) i2 = ncoeff - 1;
+  int i3 = m;                          if (i3 >= ncoeff) i3 = ncoeff - 1;
+  float c0 = cf[i0], c1 = cf[i1], c2 = cf[i2], c3 = cf[i3];
+  float4 v;
+  v.x = (c0 + 4.0f * c1 + c2) / 6.0f;
+  v.y = (-3.0f * c0 + 3.0f * c2) / 6.0f;
+  v.z = (3.0f * c0 - 6.0f * c1 + 3.0f * c2) / 6.0f;
+  v.w = (-c0 + 3.0f * c1 - 3.0f * c2 + c3) / 6.0f;
+  out[(p * npairs + pair) * nint + m] = v;
+}
+
 static void precompute_3b_basis(int ni, std::vector<float4>& out) {
   out.resize(ni*4);
   float b[4][4]={{1.0f/6,-3.0f/6,3.0f/6,-1.0f/6},{4.0f/6,0,-6.0f/6,3.0f/6},{1.0f/6,3.0f/6,3.0f/6,-3.0f/6},{0,0,0,1.0f/6}};
@@ -373,13 +556,19 @@ Uf3Model::Uf3Model(UF3_Parameters& para)
 
 void Uf3Model::prealloc_gpu(const UF3_Parameters& para)
 {
+  // Dedicated compute stream — lets us issue async H2D + build + forward + D2H
+  // without serializing on the legacy default stream that the rest of GPUMD
+  // uses.
+  CHECK(cudaStreamCreate(&stream_));
+
   int max_atoms = para.batch * 200;  // generous per-frame estimate
   if (max_atoms < 5000) max_atoms = 5000; // floor for small batches
   gpu_max_atoms_ = max_atoms; gpu_max_batch_ = para.batch;
 
   d_types.resize(max_atoms);
   d_x.resize(max_atoms); d_y.resize(max_atoms); d_z.resize(max_atoms);
-  d_fx.resize(max_atoms); d_fy.resize(max_atoms); d_fz.resize(max_atoms);
+  // d_fx/fy/fz live in dataset-global layout; allocated lazily in
+  // ensure_global_force_buffer() once the dataset size is known.
   d_batch_idx.resize(para.batch);
   d_bnatoms.resize(para.batch);
   d_boffsets.resize(para.batch+1);
@@ -391,7 +580,11 @@ void Uf3Model::prealloc_gpu(const UF3_Parameters& para)
 
   gpu_max_coeff_2b_ = np2 * nint_2b_;
   d_coeff_2b.resize(gpu_max_coeff_2b_);
-  upload_2b_coeffs();
+  d_raw_coeffs_2b.resize(np2 * ncoeff_2b_);
+  upload_2b_coeffs_gpu(stream_);
+  // First upload sees the random init — synchronize so subsequent legacy
+  // callers (e.g. lstsq evaluate) see a fully built table.
+  CHECK(cudaStreamSynchronize(stream_));
 
   if (has_3b_) {
     init_3b_basis();
@@ -403,17 +596,36 @@ void Uf3Model::prealloc_gpu(const UF3_Parameters& para)
   }
 }
 
+Uf3Model::~Uf3Model()
+{
+  if (stream_) {
+    cudaStreamDestroy(stream_);
+    stream_ = 0;
+  }
+}
+
 void Uf3Model::ensure_batch_buffers(int batch_atoms, int batch_size)
 {
   if (batch_atoms > gpu_max_atoms_) {
     gpu_max_atoms_ = batch_atoms;
     d_types.resize(batch_atoms); d_x.resize(batch_atoms); d_y.resize(batch_atoms); d_z.resize(batch_atoms);
-    d_fx.resize(batch_atoms); d_fy.resize(batch_atoms); d_fz.resize(batch_atoms);
   }
+  // For the legacy host-frame evaluate() path forces are written into batch-local
+  // positions (offset starts at 0), so the global-force buffer must also cover
+  // batch_atoms.  ensure_global_force_buffer handles both paths.
+  ensure_global_force_buffer(batch_atoms);
   if (batch_size > gpu_max_batch_) {
     gpu_max_batch_ = batch_size;
     d_batch_idx.resize(batch_size); d_bnatoms.resize(batch_size); d_boffsets.resize(batch_size+1);
     d_energy_buf.resize(batch_size);
+  }
+}
+
+void Uf3Model::ensure_global_force_buffer(int n)
+{
+  if (n > gpu_max_force_atoms_) {
+    gpu_max_force_atoms_ = n;
+    d_fx.resize(n); d_fy.resize(n); d_fz.resize(n);
   }
 }
 
@@ -440,11 +652,30 @@ void Uf3Model::init_3b_basis() {
   d_basis_3b_all.resize(all.size());
   d_basis_3b_all.copy_from_host(all.data());
 }
-void Uf3Model::upload_2b_coeffs() {
-  std::vector<float4> all; all.reserve(gpu_max_coeff_2b_);
-  for(size_t p=0;p<coeffs_2b_.size();p++){std::vector<float4> hc;precompute_2b(coeffs_2b_[p],hc);
-    for(auto& c:hc)all.push_back(c);}
-  d_coeff_2b.copy_from_host(all.data());  // no resize — already pre-alloc'd
+void Uf3Model::pack_2b_coeffs_host(std::vector<float>& flat) const {
+  int np2 = (int)coeffs_2b_.size();
+  flat.resize(np2 * ncoeff_2b_);
+  for (int p = 0; p < np2; p++) {
+    for (int c = 0; c < ncoeff_2b_; c++) {
+      flat[p * ncoeff_2b_ + c] = coeffs_2b_[p][c];
+    }
+  }
+}
+
+void Uf3Model::upload_2b_coeffs_gpu(cudaStream_t stream) {
+  // 1) Host -> Device of raw coefficients (small: ~np2*ncoeff floats).
+  std::vector<float> flat;
+  pack_2b_coeffs_host(flat);
+  CHECK(cudaMemcpyAsync(d_raw_coeffs_2b.data(), flat.data(),
+                        flat.size() * sizeof(float),
+                        cudaMemcpyHostToDevice, stream));
+  // 2) GPU spline build: writes the full float4 cubic table.
+  int npairs = (int)coeffs_2b_.size();
+  int nint   = nint_2b_;
+  dim3 grid(npairs, (nint + 63) / 64);
+  uf3_build_coeff_2b_kernel<<<grid, 64, 0, stream>>>(
+    npairs, ncoeff_2b_, nint, d_raw_coeffs_2b.data(), d_coeff_2b.data());
+  GPU_CHECK_KERNEL
 }
 void Uf3Model::upload_3b_coeffs() {
   d_tensor_3b.copy_from_host(coeffs_3b_.data());  // no resize
@@ -455,11 +686,23 @@ void Uf3Model::get_parameters(float* params) const {
   for(size_t p=0;p<coeffs_2b_.size();p++)for(int c=0;c<ncoeff_2b_;c++)params[idx++]=coeffs_2b_[p][c];
   for(size_t i=0;i<coeffs_3b_.size();i++)params[idx++]=coeffs_3b_[i];
 }
-void Uf3Model::set_parameters(const float* params) {
+
+void Uf3Model::set_parameters_async(const float* params, cudaStream_t stream) {
   int idx=0;
   for(size_t p=0;p<coeffs_2b_.size();p++)for(int c=0;c<ncoeff_2b_;c++)coeffs_2b_[p][c]=params[idx++];
   for(size_t i=0;i<coeffs_3b_.size();i++)coeffs_3b_[i]=params[idx++];
-  upload_2b_coeffs(); if(has_3b_)upload_3b_coeffs();
+  upload_2b_coeffs_gpu(stream);
+  if (has_3b_) {
+    // 3B coeffs are already in raw form on host; just async-H2D into d_tensor_3b.
+    CHECK(cudaMemcpyAsync(d_tensor_3b.data(), coeffs_3b_.data(),
+                          coeffs_3b_.size() * sizeof(float),
+                          cudaMemcpyHostToDevice, stream));
+  }
+}
+
+void Uf3Model::set_parameters(const float* params) {
+  set_parameters_async(params, stream_);
+  CHECK(cudaStreamSynchronize(stream_));
 }
 
 void Uf3Model::evaluate(
@@ -824,33 +1067,35 @@ static __global__ void uf3_grad_3b_energy(
 }
 
 // ---- Fast evaluate using pre-loaded GPU dataset (NO H2D data upload) ---------
-void Uf3Model::evaluate(
+// Launches on stream_ so it chains naturally after set_parameters_async(stream_).
+void Uf3Model::evaluate_batch(
   const Uf3DatasetGPU& ds,
-  const std::vector<int>& batch_indices,
+  int batch_id,
   GPU_Vector<float>& d_energy)
 {
-  int B = (int)batch_indices.size();
-  int total = 0;
-  for (int b = 0; b < B; b++) total += ds.h_natoms[batch_indices[b]];
-  ensure_batch_buffers(total, B);
-
-  // Upload batch frame indices (global) — ONLY H2D, ~4KB
-  std::vector<int> h_fidx(B);
-  for (int b = 0; b < B; b++) h_fidx[b] = batch_indices[b];
-  d_batch_idx.copy_from_host(h_fidx.data());
+  int B = ds.batch_size(batch_id);
+  // Force buffer lives in dataset-global layout; size to the WHOLE dataset
+  // because kernels index via ds.d_offsets[fid] (global offsets).
+  ensure_global_force_buffer(ds.total_atoms);
+  if (B > gpu_max_batch_) {
+    gpu_max_batch_ = B;
+    d_energy_buf.resize(B);
+  }
+  const int* d_fidx = ds.batch_fidx_device_ptr(batch_id);
 
   const int BLK = 64;
   float kmin2 = knots_2b_[0], kd2 = (knots_2b_.back() - knots_2b_[0]) / nint_2b_;
+  cudaStream_t s = stream_;
 
   // 2B energy
-  uf3_eval_2b<<<B, BLK>>>(B, d_batch_idx.data(), ds.d_natoms.data(), ds.d_offsets.data(),
+  uf3_eval_2b<<<B, BLK, 0, s>>>(B, d_fidx, ds.d_natoms.data(), ds.d_offsets.data(),
     ds.d_types.data(), ds.d_x.data(), ds.d_y.data(), ds.d_z.data(),
     d_coeff_2b.data(), num_types_ * num_types_, nint_2b_, kmin2, kd2, rc_2b_,
     d_type_map.data(), num_types_, d_energy_buf.data());
   GPU_CHECK_KERNEL
 
   // 2B forces
-  uf3_eval_2b_force<<<B, BLK>>>(B, d_batch_idx.data(), ds.d_natoms.data(), ds.d_offsets.data(),
+  uf3_eval_2b_force<<<B, BLK, 0, s>>>(B, d_fidx, ds.d_natoms.data(), ds.d_offsets.data(),
     ds.d_types.data(), ds.d_x.data(), ds.d_y.data(), ds.d_z.data(),
     d_coeff_2b.data(), num_types_ * num_types_, nint_2b_, kmin2, kd2, rc_2b_,
     d_type_map.data(), num_types_, d_fx.data(), d_fy.data(), d_fz.data());
@@ -858,7 +1103,7 @@ void Uf3Model::evaluate(
 
   // 3B energy + forces (use global neighbor lists already on GPU)
   if (has_3b_ && ds.has_3b) {
-    uf3_eval_3b<<<B, BLK>>>(B, d_batch_idx.data(), ds.d_natoms.data(), ds.d_offsets.data(),
+    uf3_eval_3b<<<B, BLK, 0, s>>>(B, d_fidx, ds.d_natoms.data(), ds.d_offsets.data(),
       ds.d_types.data(), ds.d_x.data(), ds.d_y.data(), ds.d_z.data(),
       d_tensor_3b.data(), nc_3b_[0], nc_3b_[1], nc_3b_[2],
       d_basis_3b_all.data() + basis_offsets_[0], nint_3b_[0],
@@ -872,7 +1117,7 @@ void Uf3Model::evaluate(
       d_energy_buf.data());
     GPU_CHECK_KERNEL
 
-    uf3_eval_3b_force<<<B, BLK>>>(B, d_batch_idx.data(), ds.d_natoms.data(), ds.d_offsets.data(),
+    uf3_eval_3b_force<<<B, BLK, 0, s>>>(B, d_fidx, ds.d_natoms.data(), ds.d_offsets.data(),
       ds.d_types.data(), ds.d_x.data(), ds.d_y.data(), ds.d_z.data(),
       d_tensor_3b.data(), nc_3b_[0], nc_3b_[1], nc_3b_[2],
       d_basis_3b_all.data() + basis_offsets_[0], nint_3b_[0],
@@ -888,33 +1133,120 @@ void Uf3Model::evaluate(
   }
 
   d_energy.resize(B);
-  cudaMemcpy(d_energy.data(), d_energy_buf.data(), B * sizeof(float), cudaMemcpyDeviceToDevice);
+  cudaMemcpyAsync(d_energy.data(), d_energy_buf.data(), B * sizeof(float),
+                  cudaMemcpyDeviceToDevice, s);
+}
+
+// ---- GPU-side RMSE reduction kernels (avoid per-step D2H of forces) -------
+// One block per frame.  Accumulates (E_pred/na - E_ref/na)^2 into d_out[0]
+// using shared-mem reduction + grid-wide atomicAdd.
+static __global__ void uf3_reduce_energy_sq(
+  int B,
+  const float* __restrict__ d_energy,
+  const float* __restrict__ d_energy_ref,
+  const int* __restrict__ d_fidx,
+  const int* __restrict__ d_natoms,
+  float* __restrict__ d_out)
+{
+  int b = blockIdx.x * blockDim.x + threadIdx.x;
+  float v = 0.0f;
+  if (b < B) {
+    int fid = d_fidx[b];
+    float na = (float)d_natoms[fid];
+    if (na < 1.0f) na = 1.0f;
+    float diff = d_energy[b] / na - d_energy_ref[fid] / na;
+    v = diff * diff;
+  }
+  __shared__ float s[256];
+  int tid = threadIdx.x;
+  s[tid] = v;
+  __syncthreads();
+  for (int st = blockDim.x / 2; st > 0; st >>= 1) {
+    if (tid < st) s[tid] += s[tid + st];
+    __syncthreads();
+  }
+  if (tid == 0) atomicAdd(d_out, s[0]);
+}
+
+// One block per frame, threads stride across the frame's atoms.
+// Accumulates squared force residuals from the dataset-global force buffers.
+static __global__ void uf3_reduce_force_sq(
+  int B,
+  const int* __restrict__ d_fidx,
+  const int* __restrict__ d_natoms,
+  const int* __restrict__ d_offsets,
+  const float* __restrict__ fx, const float* __restrict__ fy, const float* __restrict__ fz,
+  const float* __restrict__ fx_ref, const float* __restrict__ fy_ref, const float* __restrict__ fz_ref,
+  float* __restrict__ d_out)
+{
+  int b = blockIdx.x;
+  if (b >= B) return;
+  int fid = d_fidx[b];
+  int n = d_natoms[fid];
+  int o = d_offsets[fid];
+  int tid = threadIdx.x, stride = blockDim.x;
+  float acc = 0.0f;
+  for (int i = tid; i < n; i += stride) {
+    float dx = fx[o + i] - fx_ref[o + i];
+    float dy = fy[o + i] - fy_ref[o + i];
+    float dz = fz[o + i] - fz_ref[o + i];
+    acc += dx * dx + dy * dy + dz * dz;
+  }
+  __shared__ float s[128];
+  s[tid] = acc;
+  __syncthreads();
+  for (int st = blockDim.x / 2; st > 0; st >>= 1) {
+    if (tid < st) s[tid] += s[tid + st];
+    __syncthreads();
+  }
+  if (tid == 0) atomicAdd(d_out, s[0]);
+}
+
+void Uf3Model::compute_loss_reduction(
+  const Uf3DatasetGPU& ds,
+  int batch_id,
+  GPU_Vector<float>& d_loss_sum)
+{
+  int B = ds.batch_size(batch_id);
+  const int* d_fidx = ds.batch_fidx_device_ptr(batch_id);
+  cudaStream_t s = stream_;
+  cudaMemsetAsync(d_loss_sum.data(), 0, 2 * sizeof(float), s);
+  uf3_reduce_energy_sq<<<(B + 255) / 256, 256, 0, s>>>(
+    B, d_energy_buf.data(), ds.d_energy_ref.data(), d_fidx, ds.d_natoms.data(),
+    d_loss_sum.data() + 0);
+  GPU_CHECK_KERNEL
+  uf3_reduce_force_sq<<<B, 128, 0, s>>>(
+    B, d_fidx, ds.d_natoms.data(), ds.d_offsets.data(),
+    d_fx.data(), d_fy.data(), d_fz.data(),
+    ds.d_fx_ref.data(), ds.d_fy_ref.data(), ds.d_fz_ref.data(),
+    d_loss_sum.data() + 1);
+  GPU_CHECK_KERNEL
 }
 
 // ---- Fast unified loss gradient (matches Uf3Fitness::compute_loss) ---------
 void Uf3Model::compute_loss_gradient(
   const Uf3DatasetGPU& ds,
-  const std::vector<int>& batch_indices,
+  int batch_id,
   float loss_e,
   float loss_f,
   float lambda_e,
   float lambda_f,
+  GPU_Vector<float>& d_grad_ws,
+  GPU_Vector<float>& d_ediff_ws,
   std::vector<float>& host_gradient)
 {
-  int B = (int)batch_indices.size();
-  int total_atoms = 0;
-  for (int b = 0; b < B; b++) {
-    total_atoms += ds.h_natoms[batch_indices[b]];
-  }
+  int B = ds.batch_size(batch_id);
+  int total_atoms = ds.batch_total_atoms[batch_id % ds.num_batches];
+  const int* d_fidx = ds.batch_fidx_device_ptr(batch_id);
 
   int nparam = num_parameters();
-  GPU_Vector<float> d_grad(nparam);
-  cudaMemset(d_grad.data(), 0, nparam * sizeof(float));
+  if ((int)d_grad_ws.size() < nparam) d_grad_ws.resize(nparam);
+  cudaMemset(d_grad_ws.data(), 0, nparam * sizeof(float));
 
-  GPU_Vector<float> d_ediff(B);
+  if ((int)d_ediff_ws.size() < B) d_ediff_ws.resize(B);
   gpu_energy_peratom_diff_kernel<<<(B + 63) / 64, 64>>>(
-    B, d_energy_buf.data(), ds.d_energy_ref.data(), d_batch_idx.data(), ds.d_natoms.data(),
-    d_ediff.data());
+    B, d_energy_buf.data(), ds.d_energy_ref.data(), d_fidx, ds.d_natoms.data(),
+    d_ediff_ws.data());
   GPU_CHECK_KERNEL
 
   float kmin2 = knots_2b_[0];
@@ -923,21 +1255,21 @@ void Uf3Model::compute_loss_gradient(
   if (lambda_e > 0.0f && loss_e > 1e-12f && B > 0) {
     float scale_e = lambda_e / ((float)B * loss_e);
     uf3_grad_2b<<<num_params_2b_, 64>>>(
-      B, nparam, d_batch_idx.data(), ds.d_natoms.data(), ds.d_offsets.data(),
+      B, nparam, d_fidx, ds.d_natoms.data(), ds.d_offsets.data(),
       ds.d_types.data(), ds.d_x.data(), ds.d_y.data(), ds.d_z.data(),
       num_types_ * num_types_, ncoeff_2b_, nint_2b_, kmin2, kd2, rc_2b_,
-      d_type_map.data(), num_types_, d_ediff.data(), scale_e, d_grad.data());
+      d_type_map.data(), num_types_, d_ediff_ws.data(), scale_e, d_grad_ws.data());
     GPU_CHECK_KERNEL
     if (has_3b_ && ds.has_3b && num_params_3b_ > 0) {
       uf3_grad_3b_energy<<<nparam, 64>>>(
-        B, nparam, num_params_2b_, d_batch_idx.data(), ds.d_natoms.data(), ds.d_offsets.data(),
+        B, nparam, num_params_2b_, d_fidx, ds.d_natoms.data(), ds.d_offsets.data(),
         ds.d_types.data(), ds.d_x.data(), ds.d_y.data(), ds.d_z.data(),
         nc_3b_[0], nc_3b_[1], nc_3b_[2], nint_3b_[0], nint_3b_[1], nint_3b_[2],
         knots_3b_[0][0], (knots_3b_[0].back() - knots_3b_[0][0]) / nint_3b_[0], rc_3b_[0],
         knots_3b_[1][0], (knots_3b_[1].back() - knots_3b_[1][0]) / nint_3b_[1], rc_3b_[1],
         knots_3b_[2][0], (knots_3b_[2].back() - knots_3b_[2][0]) / nint_3b_[2], rc_3b_[2],
         num_types_, num_trips_, ds.d_nn_off.data(), ds.d_nn_lst.data(), ds.d_nn_frame_off.data(),
-        d_ediff.data(), scale_e, d_grad.data());
+        d_ediff_ws.data(), scale_e, d_grad_ws.data());
       GPU_CHECK_KERNEL
     }
   }
@@ -945,58 +1277,139 @@ void Uf3Model::compute_loss_gradient(
   if (lambda_f > 0.0f && loss_f > 1e-12f && total_atoms > 0) {
     float scale_f = lambda_f / ((float)(3 * total_atoms) * loss_f);
     uf3_grad_2b_force<<<num_params_2b_, 64>>>(
-      B, nparam, d_batch_idx.data(), ds.d_natoms.data(), ds.d_offsets.data(),
+      B, nparam, d_fidx, ds.d_natoms.data(), ds.d_offsets.data(),
       ds.d_types.data(), ds.d_x.data(), ds.d_y.data(), ds.d_z.data(),
       num_types_ * num_types_, ncoeff_2b_, nint_2b_, kmin2, kd2, rc_2b_,
       d_type_map.data(), num_types_, d_fx.data(), d_fy.data(), d_fz.data(),
-      ds.d_fx_ref.data(), ds.d_fy_ref.data(), ds.d_fz_ref.data(), scale_f, d_grad.data());
+      ds.d_fx_ref.data(), ds.d_fy_ref.data(), ds.d_fz_ref.data(), scale_f, d_grad_ws.data());
     GPU_CHECK_KERNEL
   }
 
   host_gradient.resize(nparam);
-  d_grad.copy_to_host(host_gradient.data());
+  d_grad_ws.copy_to_host(host_gradient.data());
 }
 
-// Legacy energy-only gradient (host-side frames).
-void Uf3Model::compute_energy_gradient(
-  const std::vector<Uf3Frame>& frames,
-  const std::vector<int>& batch_indices,
-  GPU_Vector<float>& d_energy_diff,
-  std::vector<float>& host_gradient)
+// ---- Population (multi-individual) fast path ------------------------------
+void Uf3Model::ensure_pop_buffers(int pop, int total_atoms)
 {
-  int B = (int)batch_indices.size();
-  evaluate(frames, batch_indices, d_energy_diff);
-  std::vector<float> h_ene(B);
-  d_energy_diff.copy_to_host(h_ene.data());
-  std::vector<float> h_diff(B);
-  for (int b = 0; b < B; b++) {
-    int fidx = batch_indices[b];
-    int na = frames[fidx].num_atoms;
-    if (na < 1) {
-      na = 1;
-    }
-    h_diff[b] = h_ene[b] / na - frames[fidx].energy / na;
+  if (pop > pop_capacity_) {
+    pop_capacity_ = pop;
+    int np2 = num_types_ * num_types_;
+    d_raw_coeffs_2b_pop.resize((size_t)pop * np2 * ncoeff_2b_);
+    d_coeff_2b_pop.resize((size_t)pop * np2 * nint_2b_);
+    d_energy_buf_pop.resize((size_t)pop * gpu_max_batch_);
   }
-  d_energy_diff.copy_from_host(h_diff.data());
-
-  int total = 0;
-  for (int b = 0; b < B; b++) {
-    total += frames[batch_indices[b]].num_atoms;
+  if (total_atoms > pop_force_atoms_capacity_ || pop > pop_capacity_) {
+    pop_force_atoms_capacity_ = total_atoms;
+    size_t n = (size_t)pop_capacity_ * total_atoms;
+    d_fx_pop.resize(n);
+    d_fy_pop.resize(n);
+    d_fz_pop.resize(n);
   }
-  ensure_batch_buffers(total, B);
+}
 
-  int nparam = num_parameters();
-  GPU_Vector<float> d_grad(nparam);
-  float kmin2 = knots_2b_[0];
-  float kd2 = (knots_2b_.back() - knots_2b_[0]) / nint_2b_;
-  uf3_grad_2b<<<num_params_2b_, 64>>>(
-    B, nparam, d_batch_idx.data(), d_bnatoms.data(), d_boffsets.data(),
-    d_types.data(), d_x.data(), d_y.data(), d_z.data(),
-    num_types_ * num_types_, ncoeff_2b_, nint_2b_, kmin2, kd2, rc_2b_,
-    d_type_map.data(), num_types_,
-    d_energy_diff.data(), 1.0f / B, d_grad.data());
+void Uf3Model::set_population_parameters_async(
+  const float* host_pop_params, int pop, cudaStream_t stream)
+{
+  // Pop buffers must already be sized; for the 2B path we don't yet know
+  // total_atoms, so allocate just the coeff buffers if needed.
+  if (pop > pop_capacity_) {
+    pop_capacity_ = pop;
+    int np2 = num_types_ * num_types_;
+    d_raw_coeffs_2b_pop.resize((size_t)pop * np2 * ncoeff_2b_);
+    d_coeff_2b_pop.resize((size_t)pop * np2 * nint_2b_);
+    d_energy_buf_pop.resize((size_t)pop * gpu_max_batch_);
+  }
+
+  // Pack raw 2B coeffs for each individual (skip 3B section here — caller
+  // handles fallback when has_3b_ is set).
+  int np2 = num_types_ * num_types_;
+  int stride2b_host = num_params_2b_;             // floats per individual on host
+  int stride2b_dev  = np2 * ncoeff_2b_;           // floats per individual on device
+  // host and device strides match by construction (num_params_2b_ == np2*ncoeff_2b_)
+  CHECK(cudaMemcpyAsync(d_raw_coeffs_2b_pop.data(), host_pop_params,
+                        (size_t)pop * stride2b_dev * sizeof(float),
+                        cudaMemcpyHostToDevice, stream));
+
+  // GPU spline build for every individual.
+  dim3 grid(np2, (nint_2b_ + 63) / 64, pop);
+  uf3_build_coeff_2b_pop_kernel<<<grid, 64, 0, stream>>>(
+    pop, np2, ncoeff_2b_, nint_2b_,
+    d_raw_coeffs_2b_pop.data(), d_coeff_2b_pop.data());
   GPU_CHECK_KERNEL
 
-  host_gradient.resize(nparam);
-  d_grad.copy_to_host(host_gradient.data());
+  // If 3B is on but caller invoked this anyway, the 3B coeffs aren't copied —
+  // the population kernels here only do 2B.  Caller must guard.
+  (void)stride2b_host;
+}
+
+void Uf3Model::evaluate_batch_population(
+  const Uf3DatasetGPU& ds, int batch_id, int pop,
+  GPU_Vector<float>& d_energy_pop)
+{
+  int B = ds.batch_size(batch_id);
+  int total_atoms = ds.total_atoms;
+  ensure_pop_buffers(pop, total_atoms);
+  if (B > gpu_max_batch_) {
+    gpu_max_batch_ = B;
+    d_energy_buf_pop.resize((size_t)pop_capacity_ * B);
+  }
+  const int* d_fidx = ds.batch_fidx_device_ptr(batch_id);
+  cudaStream_t s = stream_;
+
+  // Clear per-frame predicted energies; uf3_eval_2b_pop writes them directly,
+  // but if 3B is later added it will accumulate — keep semantics consistent.
+  cudaMemsetAsync(d_energy_buf_pop.data(), 0,
+                  (size_t)pop * B * sizeof(float), s);
+
+  const int BLK = 64;
+  float kmin2 = knots_2b_[0], kd2 = (knots_2b_.back() - knots_2b_[0]) / nint_2b_;
+  int np2 = num_types_ * num_types_;
+  int coeff_stride = np2 * nint_2b_;
+
+  dim3 grid(B, pop);
+  uf3_eval_2b_pop<<<grid, BLK, 0, s>>>(
+    B, pop, total_atoms, d_fidx, ds.d_natoms.data(), ds.d_offsets.data(),
+    ds.d_types.data(), ds.d_x.data(), ds.d_y.data(), ds.d_z.data(),
+    d_coeff_2b_pop.data(), coeff_stride, np2, nint_2b_, kmin2, kd2, rc_2b_,
+    d_type_map.data(), num_types_, d_energy_buf_pop.data());
+  GPU_CHECK_KERNEL
+
+  uf3_eval_2b_force_pop<<<grid, BLK, 0, s>>>(
+    B, pop, total_atoms, d_fidx, ds.d_natoms.data(), ds.d_offsets.data(),
+    ds.d_types.data(), ds.d_x.data(), ds.d_y.data(), ds.d_z.data(),
+    d_coeff_2b_pop.data(), coeff_stride, np2, nint_2b_, kmin2, kd2, rc_2b_,
+    d_type_map.data(), num_types_,
+    d_fx_pop.data(), d_fy_pop.data(), d_fz_pop.data());
+  GPU_CHECK_KERNEL
+
+  d_energy_pop.resize((size_t)pop * B);
+  cudaMemcpyAsync(d_energy_pop.data(), d_energy_buf_pop.data(),
+                  (size_t)pop * B * sizeof(float),
+                  cudaMemcpyDeviceToDevice, s);
+}
+
+void Uf3Model::compute_loss_reduction_population(
+  const Uf3DatasetGPU& ds, int batch_id, int pop,
+  GPU_Vector<float>& d_loss_sum_pop)
+{
+  int B = ds.batch_size(batch_id);
+  int total_atoms = ds.total_atoms;
+  const int* d_fidx = ds.batch_fidx_device_ptr(batch_id);
+  cudaStream_t s = stream_;
+  cudaMemsetAsync(d_loss_sum_pop.data(), 0, 2 * pop * sizeof(float), s);
+
+  dim3 gridE((B + 255) / 256, pop);
+  uf3_reduce_energy_sq_pop<<<gridE, 256, 0, s>>>(
+    B, pop, d_energy_buf_pop.data(), ds.d_energy_ref.data(), d_fidx,
+    ds.d_natoms.data(), d_loss_sum_pop.data());
+  GPU_CHECK_KERNEL
+
+  dim3 gridF(B, pop);
+  uf3_reduce_force_sq_pop<<<gridF, 128, 0, s>>>(
+    B, pop, total_atoms, d_fidx, ds.d_natoms.data(), ds.d_offsets.data(),
+    d_fx_pop.data(), d_fy_pop.data(), d_fz_pop.data(),
+    ds.d_fx_ref.data(), ds.d_fy_ref.data(), ds.d_fz_ref.data(),
+    d_loss_sum_pop.data());
+  GPU_CHECK_KERNEL
 }
