@@ -21,68 +21,83 @@
 #include <cstdlib>
 #include <vector>
 
-// Simple L-BFGS with backtracking line search
-void run_lbfgs(UF3_Parameters& para, Uf3Fitness& fitness)
+void run_lbfgs(
+  const UF3_Parameters& para,
+  const UF3_OptimizerStage& stage,
+  int stage_id,
+  int gen_offset,
+  Uf3Fitness& fitness)
 {
   int nparam = fitness.num_parameters();
-  int gen = para.generation;
-  int batch = para.batch;
-  const auto& train_set = fitness.train_set();
-  int nframes = (int)train_set.size();
-  const int M = 5; // L-BFGS memory
+  int gen = stage.generation;
+  const auto& ds = fitness.dataset();
+  const int M = 5;
 
   std::vector<float> x(nparam), grad(nparam), grad_old(nparam);
   fitness.model()->get_parameters(x.data());
 
-  // L-BFGS history
-  std::vector<float> s(M * nparam, 0);  // x_{k+1} - x_k
-  std::vector<float> y(M * nparam, 0);  // grad_{k+1} - grad_k
-  std::vector<float> rho(M, 0);
-  std::vector<float> alpha(M, 0);
+  std::vector<float> s(M * nparam, 0), y(M * nparam, 0);
+  std::vector<float> rho(M, 0), alpha(M, 0);
   std::vector<float> q(nparam), dir(nparam);
-  GPU_Vector<float> d_ediff(batch);
-  std::vector<int> bidx(batch);
   int hist_idx = 0, hist_count = 0;
 
-  srand(12345);
   auto t0 = std::chrono::high_resolution_clock::now();
   float best_loss = 1e30f;
 
-  // Initial gradient
-  for (int b = 0; b < batch; b++) bidx[b] = rand() % nframes;
-  fitness.model()->compute_energy_gradient(train_set, bidx, d_ediff, grad);
-  for (int i = 0; i < nparam; i++) dir[i] = -grad[i]; // initial search direction = -grad
+  int batch_id0 = 0 % ds.num_batches;
+  fitness.compute_gradient(batch_id0, gen_offset, grad);
+  for (int i = 0; i < nparam; i++) {
+    dir[i] = -grad[i];
+  }
 
   for (int g = 0; g < gen; g++) {
-    // Line search (simple backtracking, small initial step for stability)
+    int batch_id = g % ds.num_batches;
+    int global_gen = gen_offset + g;
+
     float step = 0.001f;
     std::vector<float> x_trial(nparam);
-    float loss_old = fitness.compute_loss(bidx, g);
-    float loss_new;
+    float loss_old = fitness.compute_loss(batch_id, global_gen, stage_id);
+    float loss_new = loss_old;
     for (int ls = 0; ls < 10; ls++) {
-      for (int i = 0; i < nparam; i++) x_trial[i] = x[i] + step * dir[i];
+      for (int i = 0; i < nparam; i++) {
+        x_trial[i] = x[i] + step * dir[i];
+      }
       fitness.model()->set_parameters(x_trial.data());
-      loss_new = fitness.compute_loss(bidx, g);
-      if (loss_new < loss_old) break;
+      loss_new = fitness.compute_loss(batch_id, global_gen, stage_id);
+      if (loss_new < loss_old) {
+        break;
+      }
       step *= 0.5f;
     }
-    if (loss_new >= loss_old) step = 0.001f; // fallback
-    for (int i = 0; i < nparam; i++) x[i] += step * dir[i];
+    if (loss_new >= loss_old) {
+      step = 0.001f;
+    }
+    for (int i = 0; i < nparam; i++) {
+      x[i] += step * dir[i];
+    }
     fitness.model()->set_parameters(x.data());
-    if (loss_new < best_loss) best_loss = loss_new;
+    if (loss_new < best_loss) {
+      best_loss = loss_new;
+    }
 
-    // New batch + gradient (with clipping for stability)
-    for (int b = 0; b < batch; b++) bidx[b] = rand() % nframes;
-    for (int i = 0; i < nparam; i++) grad_old[i] = grad[i];
-    fitness.model()->compute_energy_gradient(train_set, bidx, d_ediff, grad);
+    int grad_batch_id = (g + 1) % ds.num_batches;
+    for (int i = 0; i < nparam; i++) {
+      grad_old[i] = grad[i];
+    }
+    fitness.compute_gradient(grad_batch_id, global_gen + 1, grad);
 
-    // Gradient clipping: cap magnitude to prevent extreme steps
     float gnorm = 0;
-    for (int i = 0; i < nparam; i++) gnorm += grad[i] * grad[i];
+    for (int i = 0; i < nparam; i++) {
+      gnorm += grad[i] * grad[i];
+    }
     gnorm = sqrtf(gnorm);
-    if (gnorm > 10.0f) { float scl = 10.0f / gnorm; for (int i=0;i<nparam;i++) grad[i] *= scl; }
+    if (gnorm > 10.0f) {
+      float scl = 10.0f / gnorm;
+      for (int i = 0; i < nparam; i++) {
+        grad[i] *= scl;
+      }
+    }
 
-    // Update L-BFGS history: s = dx, y = dgrad
     float ys = 0;
     for (int i = 0; i < nparam; i++) {
       s[hist_idx * nparam + i] = step * dir[i];
@@ -90,39 +105,59 @@ void run_lbfgs(UF3_Parameters& para, Uf3Fitness& fitness)
       ys += s[hist_idx * nparam + i] * y[hist_idx * nparam + i];
     }
     rho[hist_idx] = (ys > 1e-8f) ? 1.0f / ys : 0.0f;
-    if (ys > 1e-8f) { hist_idx = (hist_idx + 1) % M; hist_count = std::min(hist_count + 1, M); }
+    if (ys > 1e-8f) {
+      hist_idx = (hist_idx + 1) % M;
+      hist_count = std::min(hist_count + 1, M);
+    }
 
-    // Two-loop recursion for search direction
-    for (int i = 0; i < nparam; i++) q[i] = grad[i];
+    for (int i = 0; i < nparam; i++) {
+      q[i] = grad[i];
+    }
     for (int j = hist_count - 1; j >= 0; j--) {
       int idx = (hist_idx - 1 - j + M) % M;
       float dot_sq = 0;
-      for (int i = 0; i < nparam; i++) dot_sq += s[idx*nparam+i] * q[i];
+      for (int i = 0; i < nparam; i++) {
+        dot_sq += s[idx * nparam + i] * q[i];
+      }
       alpha[j] = rho[idx] * dot_sq;
-      for (int i = 0; i < nparam; i++) q[i] -= alpha[j] * y[idx*nparam+i];
+      for (int i = 0; i < nparam; i++) {
+        q[i] -= alpha[j] * y[idx * nparam + i];
+      }
     }
-    // Scale initial Hessian: gamma = s^T y / y^T y (standard L-BFGS scaling)
     float gamma = 1.0f;
     if (hist_count > 0) {
       int last = (hist_idx - 1 + M) % M;
       float yy = 0, sy = 0;
-      for (int i = 0; i < nparam; i++) { yy += y[last*nparam+i]*y[last*nparam+i]; sy += s[last*nparam+i]*y[last*nparam+i]; }
-      if (yy > 1e-10f) gamma = sy / yy;
+      for (int i = 0; i < nparam; i++) {
+        yy += y[last * nparam + i] * y[last * nparam + i];
+        sy += s[last * nparam + i] * y[last * nparam + i];
+      }
+      if (yy > 1e-10f) {
+        gamma = sy / yy;
+      }
     }
-    for (int i = 0; i < nparam; i++) dir[i] = gamma * q[i];
+    for (int i = 0; i < nparam; i++) {
+      dir[i] = gamma * q[i];
+    }
     for (int j = 0; j < hist_count; j++) {
       int idx = (hist_idx - hist_count + j + M) % M;
       float dot_y = 0;
-      for (int i = 0; i < nparam; i++) dot_y += y[idx*nparam+i] * dir[i];
+      for (int i = 0; i < nparam; i++) {
+        dot_y += y[idx * nparam + i] * dir[i];
+      }
       float beta = rho[idx] * dot_y;
-      for (int i = 0; i < nparam; i++) dir[i] += s[idx*nparam+i] * (alpha[j] - beta);
+      for (int i = 0; i < nparam; i++) {
+        dir[i] += s[idx * nparam + i] * (alpha[j] - beta);
+      }
     }
-    for (int i = 0; i < nparam; i++) dir[i] = -dir[i]; // descent direction
+    for (int i = 0; i < nparam; i++) {
+      dir[i] = -dir[i];
+    }
 
     if (g % 5 == 0 || g == gen - 1) {
       auto t1 = std::chrono::high_resolution_clock::now();
       printf("  LBFGS gen %5d: loss=%.4f eV, best=%.4f eV (%.1fs)\n",
-             g, loss_new, best_loss, std::chrono::duration<double>(t1-t0).count());
+             g, loss_new, best_loss, std::chrono::duration<double>(t1 - t0).count());
     }
   }
 }

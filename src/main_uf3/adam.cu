@@ -21,44 +21,45 @@
 #include <cstdlib>
 #include <vector>
 
-void run_adam(UF3_Parameters& para, Uf3Fitness& fitness)
+void run_adam(
+  const UF3_Parameters& para,
+  const UF3_OptimizerStage& stage,
+  int stage_id,
+  int gen_offset,
+  Uf3Fitness& fitness)
 {
   int nparam = fitness.num_parameters();
-  int gen = para.generation;
-  int batch = para.batch;
-  const auto& train_set = fitness.train_set();
-  int nframes = (int)train_set.size();
+  int gen = stage.generation;
+  const auto& ds = fitness.dataset();
 
   std::vector<float> x(nparam), grad(nparam);
   fitness.model()->get_parameters(x.data());
 
   std::vector<float> m(nparam, 0.0f), v(nparam, 0.0f);
   float lr = 0.001f, beta1 = 0.9f, beta2 = 0.999f, eps = 1e-8f;
-  GPU_Vector<float> d_ediff(batch);
-  std::vector<int> bidx(batch);
 
-  srand(12345);
   auto t0 = std::chrono::high_resolution_clock::now();
   float best_loss = 1e30f;
 
   for (int g = 0; g < gen; g++) {
-    for (int b = 0; b < batch; b++) bidx[b] = rand() % nframes;
+    int batch_id = g % ds.num_batches;
+    int global_gen = gen_offset + g;
 
-    // Analytical gradient via GPU kernel
-    fitness.model()->compute_energy_gradient(train_set, bidx, d_ediff, grad);
+    fitness.compute_gradient(batch_id, global_gen, grad);
 
-    // Adam update
     for (int i = 0; i < nparam; i++) {
       m[i] = beta1 * m[i] + (1.0f - beta1) * grad[i];
       v[i] = beta2 * v[i] + (1.0f - beta2) * grad[i] * grad[i];
-      float mh = m[i] / (1.0f - powf(beta1, g+1));
-      float vh = v[i] / (1.0f - powf(beta2, g+1));
+      float mh = m[i] / (1.0f - powf(beta1, g + 1));
+      float vh = v[i] / (1.0f - powf(beta2, g + 1));
       x[i] -= lr * mh / (sqrtf(vh) + eps);
     }
 
     fitness.model()->set_parameters(x.data());
-    float loss = fitness.compute_loss(bidx, g);
-    if (loss < best_loss) best_loss = loss;
+    float loss = fitness.compute_loss(batch_id, global_gen, stage_id);
+    if (loss < best_loss) {
+      best_loss = loss;
+    }
 
     if (g % 5 == 0 || g == gen - 1) {
       auto t1 = std::chrono::high_resolution_clock::now();

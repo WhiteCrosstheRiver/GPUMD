@@ -15,6 +15,8 @@
 
 #pragma once
 #include "dataset.cuh"
+#include "dataset_gpu.cuh"
+#include "parameters.cuh"
 #include "uf3.cuh"
 #include "utilities/gpu_vector.cuh"
 #include <vector>
@@ -22,25 +24,36 @@
 class Uf3Fitness
 {
 public:
-  // Fitness loads train_set and test_set internally (like NEP).
   Uf3Fitness(UF3_Parameters& para, Uf3Model* model,
+             const Uf3DatasetGPU& dataset,
              const std::vector<Uf3Frame>& train_set);
 
-  float compute_loss(const std::vector<int>& batch_indices, int generation);
-  float compute_loss_for_params(
-    const float* params, const std::vector<int>& batch_indices, int generation);
+  float compute_loss(int batch_id, int generation, int stage_id = 0);
+  float compute_loss_for_params(const float* params, int batch_id, int generation, int stage_id = 0);
+  void compute_gradient(int batch_id, int generation, std::vector<float>& grad);
 
   int num_parameters() const { return model_->num_parameters(); }
   Uf3Model* model() { return model_; }
-  const std::vector<Uf3Frame>& train_set() const { return train_set_; }
+  const Uf3DatasetGPU& dataset() const { return dataset_; }
 
   float loss_e = 0, loss_f = 0, loss_l1 = 0, loss_l2 = 0, loss_total = 0;
   float test_e = 0, test_f = 0;
 
+  ~Uf3Fitness()
+  {
+    if (floss_) {
+      fclose(floss_);
+      floss_ = nullptr;
+    }
+  }
+
 private:
+  void accumulate_regularization_gradient(std::vector<float>& grad);
+
   Uf3Model* model_;
+  const Uf3DatasetGPU& dataset_;
   const std::vector<Uf3Frame>& train_set_;
-  std::vector<Uf3Frame> test_set_;     // owned by fitness (loaded internally)
+  std::vector<Uf3Frame> test_set_;
   int test_set_size_ = 0;
   GPU_Vector<float> d_energy_;
   std::vector<float> h_energy_, h_fx_, h_fy_, h_fz_;

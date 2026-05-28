@@ -1,13 +1,21 @@
-# UF3 training input for Si-Ge system (fast test)
+# UF3 training input for Si-Ge system (hybrid optimizer test)
 n_max_2b    6
 rc_2b       6.0
 knot_type   uk
 type        2 Si Ge
 batch       10
-population  2
-generation  2
 lambda_e    1.0
 lambda_f    1.0
-lambda_v    0.1
+lambda_1    0.0
+lambda_2    0.0
 train_data  train.xyz
-test_data   test.xyz
+test_data   none
+
+optimizer start lstsq
+  batch full
+optimizer end lstsq
+
+optimizer start snes
+  population  2
+  generation  2
+optimizer end snes

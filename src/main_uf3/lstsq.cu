@@ -223,8 +223,17 @@ static __global__ void lstsq_reduce_ata(
   // For now: CPU path below is the fallback.
 }
 
-void run_lstsq(UF3_Parameters& para, Uf3Fitness& fitness)
+void run_lstsq(
+  const UF3_Parameters& para,
+  const UF3_OptimizerStage& stage,
+  int stage_id,
+  int gen_offset,
+  Uf3Fitness& fitness)
 {
+  if (stage.generation > 1) {
+    printf("  Warning: lstsq runs once; generation=%d ignored.\n", stage.generation);
+  }
+
   int ncoeff = fitness.model()->ncoeff_2b(), npairs = fitness.model()->num_pairs();
   int nt = fitness.model()->num_types(), nint = fitness.model()->nknots_2b() - 1;
   float rc = fitness.model()->rc_2b(), kmin = fitness.model()->knots_2b()[0];
@@ -236,59 +245,25 @@ void run_lstsq(UF3_Parameters& para, Uf3Fitness& fitness)
     r3[d]=fitness.model()->rc_3b(d); k3[d]=fitness.model()->knots_3b(d)[0];
     kd3[d]=(fitness.model()->knots_3b(d).back()-k3[d])/ni3[d]; }
 
-  const auto& train_set = fitness.train_set();
-  int nframes = (int)train_set.size(), use_frames = std::min(nframes, para.batch);
+  const auto& ds = fitness.dataset();
+  int use_frames = ds.num_frames;
+  if (!stage.full_batch) {
+    int cap = stage.batch >= 0 ? stage.batch : para.batch;
+    use_frames = std::min(ds.num_frames, cap);
+  }
 
   auto t0 = std::chrono::high_resolution_clock::now();
 
-  // ---- GPU: upload frame data and compute per-frame basis ----
-  // Build flat batch arrays
-  int total_atoms = 0;
-  for (int f = 0; f < use_frames; f++) total_atoms += train_set[f].num_atoms;
-  std::vector<int>   h_natoms(use_frames), h_offsets(use_frames+1);
-  std::vector<int>   h_types(total_atoms);
-  std::vector<float> h_x(total_atoms), h_y(total_atoms), h_z(total_atoms);
-  h_offsets[0] = 0; int off = 0;
-  for (int f = 0; f < use_frames; f++) {
-    h_natoms[f] = train_set[f].num_atoms; h_offsets[f+1] = h_offsets[f] + train_set[f].num_atoms;
-    for (int i = 0; i < train_set[f].num_atoms; i++) {
-      h_types[off+i] = train_set[f].types[i];
-      h_x[off+i] = train_set[f].x[i]; h_y[off+i] = train_set[f].y[i]; h_z[off+i] = train_set[f].z[i];
-    }
-    off += train_set[f].num_atoms;
-  }
-
-  // Upload to GPU (positions + forces)
-  GPU_Vector<int>   d_natoms(use_frames);   d_natoms.copy_from_host(h_natoms.data());
-  GPU_Vector<int>   d_offsets(use_frames+1); d_offsets.copy_from_host(h_offsets.data());
-  GPU_Vector<int>   d_types(total_atoms);   d_types.copy_from_host(h_types.data());
-  GPU_Vector<float> d_x(total_atoms);       d_x.copy_from_host(h_x.data());
-  GPU_Vector<float> d_y(total_atoms);       d_y.copy_from_host(h_y.data());
-  GPU_Vector<float> d_z(total_atoms);       d_z.copy_from_host(h_z.data());
-  // Force reference data
-  std::vector<float> h_fx(total_atoms), h_fy(total_atoms), h_fz(total_atoms);
-  { int off = 0;
-    for (int f = 0; f < use_frames; f++) {
-      for (int i = 0; i < train_set[f].num_atoms; i++) {
-        h_fx[off+i] = train_set[f].fx[i]; h_fy[off+i] = train_set[f].fy[i]; h_fz[off+i] = train_set[f].fz[i];
-      }
-      off += train_set[f].num_atoms;
-    }
-  }
-  GPU_Vector<float> d_fx(total_atoms); d_fx.copy_from_host(h_fx.data());
-  GPU_Vector<float> d_fy(total_atoms); d_fy.copy_from_host(h_fy.data());
-  GPU_Vector<float> d_fz(total_atoms); d_fz.copy_from_host(h_fz.data());
+  // Use pre-loaded GPU data directly — NO H2D upload
 
   std::vector<int> h_bidx(use_frames);
   for (int i = 0; i < use_frames; i++) h_bidx[i] = i;
-  GPU_Vector<int> d_bidx(use_frames); d_bidx.copy_from_host(h_bidx.data());
+  GPU_Vector<int> d_bidx(use_frames);
+  d_bidx.copy_from_host(h_bidx.data());
 
   GPU_Vector<float> d_basis(use_frames * nparam);
   GPU_Vector<double> d_ATA(nparam * nparam), d_ATb(nparam);
-  GPU_Vector<float> d_target(use_frames);
-  { std::vector<float> ht(use_frames); for(int i=0;i<use_frames;i++) ht[i]=train_set[i].energy;
-    d_target.copy_from_host(ht.data()); }
-  // Zero ATA/ATb on GPU (use cudaMemset)
+  // Zero ATA/ATb on GPU
   cudaMemset(d_ATA.data(), 0, nparam * nparam * sizeof(double));
   cudaMemset(d_ATb.data(), 0, nparam * sizeof(double));
 
@@ -296,13 +271,13 @@ void run_lstsq(UF3_Parameters& para, Uf3Fitness& fitness)
   const int BLK = 64;
   size_t smem = nparam * sizeof(float);
   lstsq_accumulate<<<use_frames, BLK, smem>>>(
-    use_frames, d_bidx.data(), d_natoms.data(), d_offsets.data(),
-    d_types.data(), d_x.data(), d_y.data(), d_z.data(),
+    use_frames, d_bidx.data(), ds.d_natoms.data(), ds.d_offsets.data(),
+    ds.d_types.data(), ds.d_x.data(), ds.d_y.data(), ds.d_z.data(),
     ncoeff, npairs, nt, nint, kmin, kd, rc, num_params_2b,
     has_3b ? 1 : 0, nc3[0], nc3[1], nc3[2], ni3[0], ni3[1], ni3[2],
     k3[0], kd3[0], r3[0], k3[1], kd3[1], r3[1], k3[2], kd3[2], r3[2],
-    nparam, d_basis.data(), d_ATA.data(), d_ATb.data(), d_target.data(),
-    d_fx.data(), d_fy.data(), d_fz.data(), (float)para.lambda_f, num_params_2b);
+    nparam, d_basis.data(), d_ATA.data(), d_ATb.data(), ds.d_energy_ref.data(),
+    ds.d_fx_ref.data(), ds.d_fy_ref.data(), ds.d_fz_ref.data(), (float)para.lambda_f, num_params_2b);
   GPU_CHECK_KERNEL
 
   // Download ATA and ATb from GPU (already accumulated atomically)
@@ -323,7 +298,6 @@ void run_lstsq(UF3_Parameters& para, Uf3Fitness& fitness)
   printf("  lstsq GPU: %d params%s, %d frames, %.2f s\n",
          nparam, has_3b?" (2B+3B)":" (2B)", use_frames,
          std::chrono::duration<double>(t1-t0).count());
-  std::vector<int> tt(1); float tl=0; int en=std::min(20,nframes);
-  for(int f=0;f<en;f++){tt[0]=f;tl+=fitness.compute_loss(tt,0);}
-  tl/=en; printf("  Loss=%.3f [E=%.3f F=%.3f eV/A]\n",tl,fitness.loss_e,fitness.loss_f);
+  float tl = fitness.compute_loss(0, gen_offset, stage_id);
+  printf("  Loss=%.3f [E=%.3f F=%.3f eV/A]\n", tl, fitness.loss_e, fitness.loss_f);
 }

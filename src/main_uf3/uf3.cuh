@@ -22,6 +22,7 @@ resize to avoid heap fragmentation.
 
 #pragma once
 #include "dataset.cuh"
+#include "dataset_gpu.cuh"
 #include "parameters.cuh"
 #include "utilities/gpu_vector.cuh"
 #include <vector>
@@ -35,22 +36,35 @@ public:
   void get_parameters(float* params) const;
   void set_parameters(const float* params);
 
-  // GPU batch energy evaluation (2B + 3B).  d_energy is overwritten
-  // with per-frame energies; must be pre-sized to match batch_indices.size().
+  // ---- Fast path: evaluate using pre-loaded GPU dataset (NO H2D transfers) ---
+  // d_energy receives per-frame energies; must be pre-sized to batch_indices.size().
+  void evaluate(
+    const Uf3DatasetGPU& ds,
+    const std::vector<int>& batch_indices,
+    GPU_Vector<float>& d_energy);
+
+  // Gradient of the unified training loss (matches Uf3Fitness::compute_loss).
+  void compute_loss_gradient(
+    const Uf3DatasetGPU& ds,
+    const std::vector<int>& batch_indices,
+    float loss_e,
+    float loss_f,
+    float lambda_e,
+    float lambda_f,
+    std::vector<float>& host_gradient);
+
+  // ---- Legacy: evaluate using host-side frames (per-call H2D upload) ---
   void evaluate(
     const std::vector<Uf3Frame>& frames,
     const std::vector<int>& batch_indices,
     GPU_Vector<float>& d_energy);
 
-  // Compute analytical gradient dLoss/dCoeff for energy loss.
-  // d_energy_diff[b] = (E_pred - E_ref) per frame; gradient is basis-weighted sum.
   void compute_energy_gradient(
     const std::vector<Uf3Frame>& frames,
     const std::vector<int>& batch_indices,
     GPU_Vector<float>& d_energy_diff,
     std::vector<float>& host_gradient);
 
-  // Evaluate energy + forces for training loss (legacy)
   void evaluate_forces(
     const std::vector<Uf3Frame>& frames,
     const std::vector<int>& batch_indices,

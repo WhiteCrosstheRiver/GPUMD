@@ -22,67 +22,154 @@
 #include <iostream>
 #include <vector>
 
+static void apply_stage_token(UF3_OptimizerStage& stage, const std::vector<std::string>& tokens)
+{
+  if (tokens[0] == "batch") {
+    if (tokens.size() >= 2 && tokens[1] == "full") {
+      stage.full_batch = true;
+      stage.batch = -1;
+    } else {
+      stage.full_batch = false;
+      stage.batch = get_int_from_token(tokens[1], __FILE__, __LINE__);
+    }
+  } else if (tokens[0] == "population") {
+    stage.population = get_int_from_token(tokens[1], __FILE__, __LINE__);
+  } else if (tokens[0] == "generation") {
+    stage.generation = get_int_from_token(tokens[1], __FILE__, __LINE__);
+  }
+}
+
+static void apply_global_token(UF3_Parameters& para, const std::vector<std::string>& tokens)
+{
+  if (tokens[0] == "n_max_2b") {
+    para.n_max_2b = get_int_from_token(tokens[1], __FILE__, __LINE__);
+  } else if (tokens[0] == "n_max_3b") {
+    if (tokens.size() >= 4) {
+      para.n_max_3b[0] = get_int_from_token(tokens[1], __FILE__, __LINE__);
+      para.n_max_3b[1] = get_int_from_token(tokens[2], __FILE__, __LINE__);
+      para.n_max_3b[2] = get_int_from_token(tokens[3], __FILE__, __LINE__);
+    }
+  } else if (tokens[0] == "rc_2b") {
+    para.rc_2b = get_double_from_token(tokens[1], __FILE__, __LINE__);
+  } else if (tokens[0] == "rc_3b") {
+    if (tokens.size() >= 3) {
+      para.rc_3b[0] = get_double_from_token(tokens[1], __FILE__, __LINE__);
+      para.rc_3b[1] = get_double_from_token(tokens[2], __FILE__, __LINE__);
+    }
+  } else if (tokens[0] == "knot_type") {
+    para.knot_type_str = tokens[1];
+    para.knot_type = (tokens[1] == "uk") ? 1 : 0;
+  } else if (tokens[0] == "type") {
+    para.num_types = get_int_from_token(tokens[1], __FILE__, __LINE__);
+    for (int n = 0; n < para.num_types; n++) {
+      para.elements.push_back(tokens[2 + n]);
+    }
+  } else if (tokens[0] == "batch") {
+    para.batch = get_int_from_token(tokens[1], __FILE__, __LINE__);
+  } else if (tokens[0] == "population") {
+    para.population = get_int_from_token(tokens[1], __FILE__, __LINE__);
+  } else if (tokens[0] == "generation") {
+    para.generation = get_int_from_token(tokens[1], __FILE__, __LINE__);
+  } else if (tokens[0] == "lambda_e") {
+    para.lambda_e = get_double_from_token(tokens[1], __FILE__, __LINE__);
+  } else if (tokens[0] == "lambda_f") {
+    para.lambda_f = get_double_from_token(tokens[1], __FILE__, __LINE__);
+  } else if (tokens[0] == "lambda_v") {
+    para.lambda_v = get_double_from_token(tokens[1], __FILE__, __LINE__);
+  } else if (tokens[0] == "lambda_1") {
+    para.lambda_1 = get_double_from_token(tokens[1], __FILE__, __LINE__);
+  } else if (tokens[0] == "lambda_2") {
+    para.lambda_2 = get_double_from_token(tokens[1], __FILE__, __LINE__);
+  } else if (tokens[0] == "optimizer") {
+    if (tokens.size() >= 3 && tokens[1] == "start") {
+      PRINT_INPUT_ERROR("optimizer start must be closed with optimizer end.");
+    } else if (tokens.size() >= 2) {
+      para.optimizer = tokens[1];
+    }
+  } else if (tokens[0] == "train_data") {
+    para.train_data = tokens[1];
+  } else if (tokens[0] == "test_data") {
+    para.test_data = tokens[1];
+  }
+}
+
+void finalize_uf3_optimizer_stages(UF3_Parameters& para)
+{
+  if (!para.stages.empty()) {
+    return;
+  }
+  UF3_OptimizerStage stage;
+  stage.name = para.optimizer;
+  stage.generation = para.generation;
+  stage.population = para.population;
+  stage.batch = para.batch;
+  if (stage.name == "lstsq") {
+    stage.full_batch = true;
+    stage.generation = 1;
+  }
+  para.stages.push_back(stage);
+}
+
 void parse_uf3_parameters(const char* input_file, UF3_Parameters& para)
 {
   std::ifstream input(input_file);
   if (!input.is_open()) {
-    PRINT_INPUT_ERROR("Cannot open uf3.in.");
+    PRINT_INPUT_ERROR("Cannot open UF3 input file.");
   }
+
+  bool in_block = false;
+  UF3_OptimizerStage current;
 
   std::string line;
   while (std::getline(input, line)) {
     std::vector<std::string> tokens = get_tokens(line);
-    if (tokens.size() == 0) continue;
-    if (tokens[0][0] == '#') continue;
+    if (tokens.size() == 0) {
+      continue;
+    }
+    if (tokens[0][0] == '#') {
+      continue;
+    }
 
-    if (tokens[0] == "n_max_2b") {
-      para.n_max_2b = get_int_from_token(tokens[1], __FILE__, __LINE__);
-    } else if (tokens[0] == "n_max_3b") {
-      if (tokens.size() >= 4) {
-        para.n_max_3b[0] = get_int_from_token(tokens[1], __FILE__, __LINE__);
-        para.n_max_3b[1] = get_int_from_token(tokens[2], __FILE__, __LINE__);
-        para.n_max_3b[2] = get_int_from_token(tokens[3], __FILE__, __LINE__);
+    if (tokens[0] == "optimizer" && tokens.size() >= 3 && tokens[1] == "start") {
+      in_block = true;
+      current = UF3_OptimizerStage{};
+      current.name = tokens[2];
+      current.generation = para.generation;
+      current.population = para.population;
+      current.batch = -1;
+      current.full_batch = (current.name == "lstsq");
+      if (current.name == "lstsq") {
+        current.generation = 1;
       }
-    } else if (tokens[0] == "rc_2b") {
-      para.rc_2b = get_double_from_token(tokens[1], __FILE__, __LINE__);
-    } else if (tokens[0] == "rc_3b") {
-      if (tokens.size() >= 3) {
-        para.rc_3b[0] = get_double_from_token(tokens[1], __FILE__, __LINE__);
-        para.rc_3b[1] = get_double_from_token(tokens[2], __FILE__, __LINE__);
+      continue;
+    }
+
+    if (tokens[0] == "optimizer" && tokens.size() >= 3 && tokens[1] == "end") {
+      if (!in_block) {
+        PRINT_INPUT_ERROR("optimizer end without matching optimizer start.");
       }
-    } else if (tokens[0] == "knot_type") {
-      para.knot_type_str = tokens[1];
-      para.knot_type = (tokens[1] == "uk") ? 1 : 0;
-    } else if (tokens[0] == "type") {
-      para.num_types = get_int_from_token(tokens[1], __FILE__, __LINE__);
-      for (int n = 0; n < para.num_types; n++) {
-        para.elements.push_back(tokens[2 + n]);
+      if (current.name != tokens[2]) {
+        printf("Warning: optimizer end %s does not match start %s.\n",
+               tokens[2].c_str(), current.name.c_str());
       }
-    } else if (tokens[0] == "batch") {
-      para.batch = get_int_from_token(tokens[1], __FILE__, __LINE__);
-    } else if (tokens[0] == "population") {
-      para.population = get_int_from_token(tokens[1], __FILE__, __LINE__);
-    } else if (tokens[0] == "generation") {
-      para.generation = get_int_from_token(tokens[1], __FILE__, __LINE__);
-    } else if (tokens[0] == "lambda_e") {
-      para.lambda_e = get_double_from_token(tokens[1], __FILE__, __LINE__);
-    } else if (tokens[0] == "lambda_f") {
-      para.lambda_f = get_double_from_token(tokens[1], __FILE__, __LINE__);
-    } else if (tokens[0] == "lambda_v") {
-      para.lambda_v = get_double_from_token(tokens[1], __FILE__, __LINE__);
-    } else if (tokens[0] == "lambda_1") {
-      para.lambda_1 = get_double_from_token(tokens[1], __FILE__, __LINE__);
-    } else if (tokens[0] == "lambda_2") {
-      para.lambda_2 = get_double_from_token(tokens[1], __FILE__, __LINE__);
-    } else if (tokens[0] == "optimizer") {
-      para.optimizer = tokens[1];
-    } else if (tokens[0] == "train_data") {
-      para.train_data = tokens[1];
-    } else if (tokens[0] == "test_data") {
-      para.test_data = tokens[1];
+      para.stages.push_back(current);
+      in_block = false;
+      continue;
+    }
+
+    if (in_block) {
+      apply_stage_token(current, tokens);
+    } else {
+      apply_global_token(para, tokens);
     }
   }
   input.close();
+
+  if (in_block) {
+    PRINT_INPUT_ERROR("Unclosed optimizer block (missing optimizer end).");
+  }
+
+  finalize_uf3_optimizer_stages(para);
 
   printf("UF3 training parameters:\n");
   printf("  n_max_2b = %d\n", para.n_max_2b);
@@ -93,7 +180,21 @@ void parse_uf3_parameters(const char* input_file, UF3_Parameters& para)
     printf("%s%s", para.elements[n].c_str(), n < para.num_types - 1 ? " " : "");
   }
   printf(")\n");
-  printf("  optimizer = %s\n", para.optimizer.c_str());
+  printf("  global batch = %d\n", para.batch);
   printf("  training data = %s\n", para.train_data.c_str());
   printf("  test data = %s\n", para.test_data.c_str());
+  printf("  optimizer stages = %zu\n", para.stages.size());
+  for (size_t s = 0; s < para.stages.size(); s++) {
+    const auto& st = para.stages[s];
+    printf("    [%zu] %s: generation=%d population=%d",
+           s, st.name.c_str(), st.generation, st.population);
+    if (st.full_batch) {
+      printf(" batch=full");
+    } else if (st.batch >= 0) {
+      printf(" batch=%d", st.batch);
+    } else {
+      printf(" batch=global(%d)", para.batch);
+    }
+    printf("\n");
+  }
 }

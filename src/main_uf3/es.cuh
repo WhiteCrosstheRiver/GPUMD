@@ -13,12 +13,13 @@
     along with GPUMD.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-/*----------------------------------------------------------------------------80
-Evolutionary Strategy (ES) optimizer: random perturbation + selection.
-Simple, zero-gradient, good for rough exploration.
-------------------------------------------------------------------------------*/
-
 #pragma once
 #include "fitness.cuh"
+#include "parameters.cuh"
 
-void run_es(UF3_Parameters& para, Uf3Fitness& fitness);
+void run_es(
+  const UF3_Parameters& para,
+  const UF3_OptimizerStage& stage,
+  int stage_id,
+  int gen_offset,
+  Uf3Fitness& fitness);

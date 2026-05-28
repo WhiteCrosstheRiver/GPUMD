@@ -17,9 +17,4 @@
 #include "fitness.cuh"
 #include "parameters.cuh"
 
-void run_lstsq(
-  const UF3_Parameters& para,
-  const UF3_OptimizerStage& stage,
-  int stage_id,
-  int gen_offset,
-  Uf3Fitness& fitness);
+void run_optimizer_pipeline(UF3_Parameters& para, Uf3Fitness& fitness);

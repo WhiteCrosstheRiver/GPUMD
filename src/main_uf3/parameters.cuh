@@ -17,27 +17,38 @@
 #include <string>
 #include <vector>
 
+struct UF3_OptimizerStage {
+  std::string name = "adam";
+  int generation = 5000;
+  int population = 50;
+  int batch = -1;        // -1: inherit global batch
+  bool full_batch = false; // lstsq: use all training frames
+};
+
 struct UF3_Parameters {
-  int n_max_2b = 10;         // number of 2B basis functions per pair
-  int n_max_3b[3] = {0,0,0}; // 3B basis dimensions (optional)
+  int n_max_2b = 10;
+  int n_max_3b[3] = {0, 0, 0};
   double rc_2b = 6.0;
-  double rc_3b[2] = {0,0};   // 3B cutoffs (ij, ik). rc_jk = 2 * rc_ij assumed
-  int knot_type = 1;         // 0=non-uniform, 1=uniform
+  double rc_3b[2] = {0, 0};
+  int knot_type = 1;
   int num_types = 1;
   std::string knot_type_str = "uk";
 
   int batch = 1000;
   int population = 50;
-  std::string optimizer = "es"; // es, adam, snes
+  std::string optimizer = "adam";
   int generation = 5000;
   double lambda_e = 1.0;
   double lambda_f = 1.0;
   double lambda_v = 0.1;
-  double lambda_1 = 0.0;   // L1 regularization coefficient
-  double lambda_2 = 0.0;   // L2 regularization coefficient
+  double lambda_1 = 0.0;
+  double lambda_2 = 0.0;
   std::string train_data = "train.xyz";
   std::string test_data = "test.xyz";
   std::vector<std::string> elements;
+
+  std::vector<UF3_OptimizerStage> stages;
 };
 
 void parse_uf3_parameters(const char* input_file, UF3_Parameters& para);
+void finalize_uf3_optimizer_stages(UF3_Parameters& para);

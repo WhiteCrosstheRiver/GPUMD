@@ -13,14 +13,13 @@
     along with GPUMD.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-/*----------------------------------------------------------------------------80
-Separable Natural Evolution Strategy (SNES) — adapted from main_nep.
-Maintains a Gaussian search distribution N(mu, sigma) and updates it using
-natural gradient of the fitness ranking.
-Ref: Schaul et al., GECCO 2011, https://doi.org/10.1145/2001576.2001692
-------------------------------------------------------------------------------*/
-
 #pragma once
 #include "fitness.cuh"
+#include "parameters.cuh"
 
-void run_snes(UF3_Parameters& para, Uf3Fitness& fitness);
+void run_snes(
+  const UF3_Parameters& para,
+  const UF3_OptimizerStage& stage,
+  int stage_id,
+  int gen_offset,
+  Uf3Fitness& fitness);

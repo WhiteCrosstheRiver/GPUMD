@@ -13,12 +13,13 @@
     along with GPUMD.  If not, see <http://www.gnu.org/licenses/>.
 */
 
-/*----------------------------------------------------------------------------80
-Adam optimizer with finite-difference gradients.
-Good for B-spline coefficients (linear in the energy; well-conditioned).
-------------------------------------------------------------------------------*/
-
 #pragma once
 #include "fitness.cuh"
+#include "parameters.cuh"
 
-void run_adam(UF3_Parameters& para, Uf3Fitness& fitness);
+void run_adam(
+  const UF3_Parameters& para,
+  const UF3_OptimizerStage& stage,
+  int stage_id,
+  int gen_offset,
+  Uf3Fitness& fitness);

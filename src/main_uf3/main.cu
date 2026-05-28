@@ -18,14 +18,10 @@ UF3 (Ultra-Fast Force Field) training — main entry point.
 GPU-accelerated B-spline coefficient optimization with selectable optimizer.
 ------------------------------------------------------------------------------*/
 
-#include "adam.cuh"
 #include "dataset.cuh"
-#include "es.cuh"
 #include "fitness.cuh"
-#include "lbfgs.cuh"
-#include "lstsq.cuh"
+#include "optimizer.cuh"
 #include "parameters.cuh"
-#include "snes.cuh"
 #include "uf3.cuh"
 #include "utilities/error.cuh"
 #include "utilities/gpu_macro.cuh"
@@ -55,13 +51,17 @@ static void print_welcome_information(void)
 static void write_uf3_file(UF3_Parameters& para, Uf3Model* model)
 {
   std::string outfile;
-  for (int n = 0; n < para.num_types; n++) outfile += para.elements[n];
+  for (int n = 0; n < para.num_types; n++) {
+    outfile += para.elements[n];
+  }
   outfile += ".uf3";
 
   std::ofstream out(outfile);
   out.precision(10);
   out << "uf3 " << para.num_types;
-  for (int n = 0; n < para.num_types; n++) out << " " << para.elements[n];
+  for (int n = 0; n < para.num_types; n++) {
+    out << " " << para.elements[n];
+  }
   out << "\n";
 
   int nk = model->nknots_2b(), nc = model->ncoeff_2b();
@@ -77,13 +77,15 @@ static void write_uf3_file(UF3_Parameters& para, Uf3Model* model)
     out << "2B " << elements[ti] << " " << elements[tj] << " 0 3 uk\n";
     out << model->rc_2b() << " " << nk << "\n";
     out << std::fixed;
-    for (int k = 0; k < nk; k++) out << knots[k] << (k < nk - 1 ? " " : "\n");
+    for (int k = 0; k < nk; k++) {
+      out << knots[k] << (k < nk - 1 ? " " : "\n");
+    }
     out << nc << "\n";
-    for (int c = 0; c < nc; c++)
+    for (int c = 0; c < nc; c++) {
       out << coeffs[p * nc + c] << (c < nc - 1 ? " " : "\n");
+    }
     out << "#\n";
   }
-  // 3B blocks
   if (model->has_3b()) {
     int num_2b = np * nc;
     for (int t = 0; t < model->num_triplets(); t++) {
@@ -94,16 +96,22 @@ static void write_uf3_file(UF3_Parameters& para, Uf3Model* model)
       out << std::fixed << rc_jk << " " << model->rc_3b(1) << " " << model->rc_3b(0)
           << " " << model->nknots_3b(0) << " " << model->nknots_3b(1) << " " << model->nknots_3b(2) << "\n";
       auto& k0 = model->knots_3b(0), &k1 = model->knots_3b(1), &k2 = model->knots_3b(2);
-      for (size_t i = 0; i < k0.size(); i++) out << k0[i] << (i<k0.size()-1?" ":"\n");
-      for (size_t i = 0; i < k1.size(); i++) out << k1[i] << (i<k1.size()-1?" ":"\n");
-      for (size_t i = 0; i < k2.size(); i++) out << k2[i] << (i<k2.size()-1?" ":"\n");
+      for (size_t i = 0; i < k0.size(); i++) {
+        out << k0[i] << (i < k0.size() - 1 ? " " : "\n");
+      }
+      for (size_t i = 0; i < k1.size(); i++) {
+        out << k1[i] << (i < k1.size() - 1 ? " " : "\n");
+      }
+      for (size_t i = 0; i < k2.size(); i++) {
+        out << k2[i] << (i < k2.size() - 1 ? " " : "\n");
+      }
       out << model->ncoeff_3b(0) << " " << model->ncoeff_3b(1) << " " << model->ncoeff_3b(2) << "\n";
       int nc0 = model->ncoeff_3b(0), nc1 = model->ncoeff_3b(1), nc2 = model->ncoeff_3b(2);
       int t_off = t * nc0 * nc1 * nc2;
       for (int i = 0; i < nc0; i++) {
         for (int j = 0; j < nc1; j++) {
           for (int k = 0; k < nc2; k++) {
-            out << coeffs[num_2b + t_off + i + j * nc0 + k * nc0 * nc1] << (k<nc2-1?" ":"");
+            out << coeffs[num_2b + t_off + i + j * nc0 + k * nc0 * nc1] << (k < nc2 - 1 ? " " : "");
           }
           out << "\n";
         }
@@ -125,51 +133,34 @@ int main(int argc, char* argv[])
   printf("Started running UF3 training.\n");
   print_line_2();
 
-  if (argc < 2) { printf("Usage: uf3 <uf3.in>\n"); return EXIT_FAILURE; }
+  if (argc < 2) {
+    printf("Usage: uf3 <uf3.in>\n");
+    return EXIT_FAILURE;
+  }
 
   UF3_Parameters para;
   parse_uf3_parameters(argv[1], para);
 
-  // Load data
   printf("Loading data...\n");
   float nn_cutoff = para.n_max_3b[0] > 0 ? (float)std::max(para.rc_3b[0], para.rc_3b[1]) : 0.0f;
   auto train_frames = load_uf3_frames(para.train_data.c_str(), nn_cutoff);
   printf("Loaded %zu training frames.\n", train_frames.size());
 
-  // Create model and fitness (fitness loads test data internally)
+  bool has_3b = para.n_max_3b[0] > 0;
+  Uf3DatasetGPU ds;
+  ds.load(train_frames, has_3b, para.batch);
+
   Uf3Model model(para);
-  Uf3Fitness fitness(para, &model, train_frames);
+  Uf3Fitness fitness(para, &model, ds, train_frames);
 
   printf("Model: %d params, %d pairs, %d coeffs/pair\n",
          model.num_parameters(), model.num_pairs(), model.ncoeff_2b());
 
-  // Dispatch optimizer
   auto t0 = std::chrono::high_resolution_clock::now();
-
-  if (para.optimizer == "adam") {
-    printf("\n=== Adam (analytical gradient) ===\n");
-    run_adam(para, fitness);
-  } else if (para.optimizer == "lstsq") {
-    printf("\n=== Direct Least Squares ===\n");
-    run_lstsq(para, fitness);
-  } else if (para.optimizer == "lbfgs") {
-    printf("\n=== L-BFGS ===\n");
-    run_lbfgs(para, fitness);
-  } else if (para.optimizer == "snes") {
-    printf("\n=== SNES optimizer ===\n");
-    run_snes(para, fitness);
-  } else if (para.optimizer == "es") {
-    printf("\n=== ES optimizer (random) ===\n");
-    run_es(para, fitness);
-  } else {
-    printf("\n=== Adam (default) ===\n");
-    run_adam(para, fitness);
-  }
-
+  run_optimizer_pipeline(para, fitness);
   auto t1 = std::chrono::high_resolution_clock::now();
   double total = std::chrono::duration<double>(t1 - t0).count();
 
-  // Save result
   print_line_1();
   write_uf3_file(para, &model);
   printf("Total time = %.1f s\n", total);

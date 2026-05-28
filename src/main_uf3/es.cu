@@ -16,23 +16,23 @@
 #include "es.cuh"
 #include <chrono>
 #include <cmath>
-#include <cstdlib>
 #include <cstdio>
+#include <cstdlib>
 #include <vector>
 
-void run_es(UF3_Parameters& para, Uf3Fitness& fitness)
+void run_es(
+  const UF3_Parameters& para,
+  const UF3_OptimizerStage& stage,
+  int stage_id,
+  int gen_offset,
+  Uf3Fitness& fitness)
 {
   int nparam = fitness.num_parameters();
-  int pop = para.population;
-  int gen = para.generation;
-  int batch = para.batch;
+  int pop = stage.population;
+  int gen = stage.generation;
+  const auto& ds = fitness.dataset();
 
-  const auto& train_set = fitness.train_set();
-  int nframes = (int)train_set.size();
-
-  // Current best
-  std::vector<float> best(nparam);
-  std::vector<float> trial(nparam);
+  std::vector<float> best(nparam), trial(nparam);
   fitness.model()->get_parameters(best.data());
 
   float best_rmse = 1e30f;
@@ -41,27 +41,29 @@ void run_es(UF3_Parameters& para, Uf3Fitness& fitness)
   auto t0 = std::chrono::high_resolution_clock::now();
 
   for (int g = 0; g < gen; g++) {
+    int batch_id = g % ds.num_batches;
+    int global_gen = gen_offset + g;
     float total_rmse = 0.0f;
     float gen_best = 1e30f;
 
     for (int p = 0; p < pop; p++) {
-      // Perturb
-      for (int i = 0; i < nparam; i++)
+      for (int i = 0; i < nparam; i++) {
         trial[i] = best[i] + (rand() / (float)RAND_MAX - 0.5f) * 0.02f;
+      }
 
-      // Batch
-      std::vector<int> bidx(batch);
-      for (int b = 0; b < batch; b++) bidx[b] = rand() % nframes;
-
-      float rmse = fitness.compute_loss_for_params(trial.data(), bidx, g);
+      float rmse = fitness.compute_loss_for_params(trial.data(), batch_id, global_gen, stage_id);
       total_rmse += rmse;
 
       if (rmse < best_rmse) {
         best_rmse = rmse;
-        for (int i = 0; i < nparam; i++) best[i] = trial[i];
+        for (int i = 0; i < nparam; i++) {
+          best[i] = trial[i];
+        }
         fitness.model()->set_parameters(best.data());
       }
-      if (rmse < gen_best) gen_best = rmse;
+      if (rmse < gen_best) {
+        gen_best = rmse;
+      }
     }
 
     if (g % 5 == 0 || g == gen - 1) {
