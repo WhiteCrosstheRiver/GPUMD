@@ -65,6 +65,19 @@ __device__ inline float _bval(int ci, int ni, float r, float km, float kd) {
   return u*u*u/6;
 }
 
+// Basis derivative dB/dr for force equations
+__device__ inline float _dbval(int ci, int ni, float r, float km, float kd) {
+  int m = (int)((r - km) / kd); if (m < 0) m = 0; if (m >= ni) m = ni - 1;
+  float u = (r - (km + m*kd)) / kd;
+  int cr = ci - m + 3; if (cr < 0 || cr > 3) return 0;
+  float ddu = 0;
+  if (cr == 0) ddu = -3*(1-u)*(1-u)/6;
+  else if (cr == 1) ddu = (9*u*u - 12*u)/6;
+  else if (cr == 2) ddu = (-9*u*u + 6*u + 3)/6;
+  else ddu = 3*u*u/6;
+  return ddu / kd;
+}
+
 // GPU kernel: multi-threaded per frame with shared memory atomicAdd.
 // blockDim threads cooperate: each handles a subset of atoms, atomically
 // accumulates basis contributions into per-block shared memory.
@@ -75,7 +88,10 @@ static __global__ void lstsq_accumulate(
   int has_3b, int nc0, int nc1, int nc2, int ni0, int ni1, int ni2,
   float k0, float kd0, float r0, float k1, float kd1, float r1, float k2, float kd2, float r2,
   int nparam, float* __restrict__ basis_out,
-  double* __restrict__ d_ATA, double* __restrict__ d_ATb, const float* __restrict__ d_target)
+  double* __restrict__ d_ATA, double* __restrict__ d_ATb,
+  const float* __restrict__ d_target,
+  const float* __restrict__ d_fxref, const float* __restrict__ d_fyref, const float* __restrict__ d_fzref,
+  float lambda_f, int num_params_2b_only)
 {
   extern __shared__ float s_basis[]; // dynamically sized: nparam elements
   int b = blockIdx.x; if (b >= nf) return;
@@ -97,6 +113,47 @@ static __global__ void lstsq_accumulate(
       for (int c = 0; c < ncoeff; c++) {
         float bv = _bval(c, nint, r, kmin, kd);
         if (bv != 0) atomicAdd(&s_basis[pi * ncoeff + c], bv);
+      }
+    }
+  }
+
+  // 2B force equations (add to ATA/ATb with lambda_f weight, matching SNES loss)
+  if (d_fxref && lambda_f > 0) {
+    float fnorm = 1.0f / (3.0f * n); // per-component normalization (matching NEP)
+    float wf = lambda_f * fnorm;
+    for (int i = tid; i < n; i += stride) {
+      int ti = typ[o+i];
+      float fxi = d_fxref[o+i], fyi = d_fyref[o+i], fzi = d_fzref[o+i];
+      if (fxi == 0 && fyi == 0 && fzi == 0) continue;
+      for (int j = 0; j < n; j++) {
+        if (i == j) continue;
+        int tj = typ[o+j];
+        float dx = x[o+i]-x[o+j], dy = y[o+i]-y[o+j], dz = z[o+i]-z[o+j];
+        float r = sqrtf(dx*dx+dy*dy+dz*dz); if (r >= rc) continue;
+        float inv_r = 1.0f / r;
+        int pi = ti * nt + tj;
+        for (int c = 0; c < ncoeff; c++) {
+          float dbdr = _dbval(c, nint, r, kmin, kd);
+          float factor = -dbdr * inv_r;
+          int kk = pi * ncoeff + c;
+          float gx = factor * dx, gy = factor * dy, gz = factor * dz;
+          // Accumulate force contribution to ATb
+          float fcontrib = gx * (double)fxi + gy * (double)fyi + gz * (double)fzi;
+          if (fcontrib != 0) atomicAdd(&d_ATb[kk], wf * (double)fcontrib);
+          // Accumulate to ATA: ATA[kk][mm] += wf * (gx*gx' + gy*gy' + gz*gz')
+          for (int cc = 0; cc < ncoeff; cc++) {
+            int mm = pi * ncoeff + cc;
+            if (mm < kk) continue; // only upper triangle for efficiency
+            float dbdr2 = _dbval(cc, nint, r, kmin, kd);
+            float factor2 = -dbdr2 * inv_r;
+            float gx2 = factor2 * dx, gy2 = factor2 * dy, gz2 = factor2 * dz;
+            double gdot = (double)gx*gx2 + (double)gy*gy2 + (double)gz*gz2;
+            if (gdot != 0) {
+              atomicAdd(&d_ATA[kk * nparam + mm], wf * gdot);
+              if (kk != mm) atomicAdd(&d_ATA[mm * nparam + kk], wf * gdot);
+            }
+          }
+        }
       }
     }
   }
@@ -201,13 +258,27 @@ void run_lstsq(UF3_Parameters& para, Uf3Fitness& fitness)
     off += train_set[f].num_atoms;
   }
 
-  // Upload to GPU
+  // Upload to GPU (positions + forces)
   GPU_Vector<int>   d_natoms(use_frames);   d_natoms.copy_from_host(h_natoms.data());
   GPU_Vector<int>   d_offsets(use_frames+1); d_offsets.copy_from_host(h_offsets.data());
   GPU_Vector<int>   d_types(total_atoms);   d_types.copy_from_host(h_types.data());
   GPU_Vector<float> d_x(total_atoms);       d_x.copy_from_host(h_x.data());
   GPU_Vector<float> d_y(total_atoms);       d_y.copy_from_host(h_y.data());
   GPU_Vector<float> d_z(total_atoms);       d_z.copy_from_host(h_z.data());
+  // Force reference data
+  std::vector<float> h_fx(total_atoms), h_fy(total_atoms), h_fz(total_atoms);
+  { int off = 0;
+    for (int f = 0; f < use_frames; f++) {
+      for (int i = 0; i < train_set[f].num_atoms; i++) {
+        h_fx[off+i] = train_set[f].fx[i]; h_fy[off+i] = train_set[f].fy[i]; h_fz[off+i] = train_set[f].fz[i];
+      }
+      off += train_set[f].num_atoms;
+    }
+  }
+  GPU_Vector<float> d_fx(total_atoms); d_fx.copy_from_host(h_fx.data());
+  GPU_Vector<float> d_fy(total_atoms); d_fy.copy_from_host(h_fy.data());
+  GPU_Vector<float> d_fz(total_atoms); d_fz.copy_from_host(h_fz.data());
+
   std::vector<int> h_bidx(use_frames);
   for (int i = 0; i < use_frames; i++) h_bidx[i] = i;
   GPU_Vector<int> d_bidx(use_frames); d_bidx.copy_from_host(h_bidx.data());
@@ -230,7 +301,8 @@ void run_lstsq(UF3_Parameters& para, Uf3Fitness& fitness)
     ncoeff, npairs, nt, nint, kmin, kd, rc, num_params_2b,
     has_3b ? 1 : 0, nc3[0], nc3[1], nc3[2], ni3[0], ni3[1], ni3[2],
     k3[0], kd3[0], r3[0], k3[1], kd3[1], r3[1], k3[2], kd3[2], r3[2],
-    nparam, d_basis.data(), d_ATA.data(), d_ATb.data(), d_target.data());
+    nparam, d_basis.data(), d_ATA.data(), d_ATb.data(), d_target.data(),
+    d_fx.data(), d_fy.data(), d_fz.data(), (float)para.lambda_f, num_params_2b);
   GPU_CHECK_KERNEL
 
   // Download ATA and ATb from GPU (already accumulated atomically)
