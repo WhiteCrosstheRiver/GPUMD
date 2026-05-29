@@ -38,6 +38,7 @@ void run_adam(
   std::vector<float> m(nparam, 0.0f), v(nparam, 0.0f);
   float lr = 0.001f, beta1 = 0.9f, beta2 = 0.999f, eps = 1e-8f;
 
+  fitness.begin_stage(stage_id, "adam", "grad_step");
   auto t0 = std::chrono::high_resolution_clock::now();
   float best_loss = 1e30f;
 
@@ -56,15 +57,16 @@ void run_adam(
     }
 
     fitness.model()->set_parameters(x.data());
-    float loss = fitness.compute_loss(batch_id, global_gen, stage_id);
+    auto t1 = std::chrono::high_resolution_clock::now();
+    double dt = std::chrono::duration<double>(t1 - t0).count();
+    float loss = fitness.compute_loss(batch_id, global_gen, stage_id, g + 1, (float)dt);
     if (loss < best_loss) {
       best_loss = loss;
     }
 
     if (g % 5 == 0 || g == gen - 1) {
-      auto t1 = std::chrono::high_resolution_clock::now();
-      double dt = std::chrono::duration<double>(t1 - t0).count();
-      printf("  Adam gen %5d: loss=%.4f eV, best=%.4f eV (%.1fs)\n", g, loss, best_loss, dt);
+      printf("  Adam step %5d: loss=%.4f eV, best=%.4f eV (%.1fs)\n",
+             g + 1, loss, best_loss, dt);
     }
   }
 }

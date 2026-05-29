@@ -17,7 +17,30 @@
 Uf3Fitness — fast training-loss evaluator.  Hot-path goal: zero per-step
 heap allocation, zero force-vector D2H.  The training RMSE numerators are
 reduced on the GPU and only 2 floats are copied back per step.  Test-set
-RMSE goes through a slow CPU path that only triggers every 100 generations.
+RMSE goes through a slow CPU path that only triggers at logging checkpoints.
+
+Logging design
+--------------
+Every optimizer stage writes to two files:
+  loss.out                  — unified log across all stages
+  loss_stage_N_OPT.out      — per-stage log for debugging / plotting
+
+Both files share the same column layout.  Column semantics:
+  stage      integer stage index (0-based)
+  optimizer  adam | lbfgs | snes | es | lstsq
+  iter_unit  what one local_iter increment means:
+               grad_step        — one gradient update (Adam, LBFGS)
+               lbfgs_step       — one LBFGS outer step
+               snes_generation  — one SNES population evaluation
+               es_generation    — one ES generation
+               solve            — lstsq one-shot solve
+  local_iter within-stage iteration counter (1-based)
+  wall_time_s elapsed seconds since stage start
+
+Rows are written at local_iter == 1 and every 100 thereafter.  A
+duplicate-logging guard (last_logged_local_iter_) prevents multiple writes
+when compute_loss is called several times per iteration (LBFGS line-search,
+ES inner population loop).
 ------------------------------------------------------------------------------*/
 
 #include "fitness.cuh"
@@ -25,7 +48,22 @@ RMSE goes through a slow CPU path that only triggers every 100 generations.
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 
+// ---------------------------------------------------------------------------
+// Log format shared by loss.out and per-stage files
+// ---------------------------------------------------------------------------
+static const char LOG_HEADER[] =
+  "# stage  optimizer     iter_unit         local_iter  wall_time_s  "
+  "L_t          L_1          L_2          L_e_train    L_f_train    "
+  "L_e_test     L_f_test\n";
+
+static const char LOG_FMT[] =
+  "%-8d%-14s%-18s%-12d%-13.2f%-13.5f%-13.5f%-13.5f%-13.5f%-13.5f%-13.5f%-13.5f\n";
+
+// ---------------------------------------------------------------------------
+// Constructor
+// ---------------------------------------------------------------------------
 Uf3Fitness::Uf3Fitness(
   UF3_Parameters& para, Uf3Model* model,
   const Uf3DatasetGPU& dataset,
@@ -61,11 +99,63 @@ Uf3Fitness::Uf3Fitness(
 
   floss_ = fopen("loss.out", "w");
   if (floss_) {
-    fprintf(floss_, "# stage gen L_t L_1 L_2 L_e_train L_f_train L_e_test L_f_test\n");
+    fputs(LOG_HEADER, floss_);
     fflush(floss_);
   }
 }
 
+// ---------------------------------------------------------------------------
+// Stage context — call once per optimizer stage before the training loop
+// ---------------------------------------------------------------------------
+void Uf3Fitness::begin_stage(int stage_id, const char* opt_name, const char* iter_unit)
+{
+  cur_stage_id_ = stage_id;
+  cur_opt_name_ = opt_name;
+  cur_iter_unit_ = iter_unit;
+  last_logged_local_iter_ = -1;
+
+  if (fstage_) {
+    fclose(fstage_);
+    fstage_ = nullptr;
+  }
+
+  char fname[128];
+  snprintf(fname, sizeof(fname), "loss_stage_%d_%s.out", stage_id, opt_name);
+  fstage_ = fopen(fname, "w");
+  if (fstage_) {
+    fputs(LOG_HEADER, fstage_);
+    fflush(fstage_);
+  }
+  printf("  Stage %d [%s, iter_unit=%s] — log: %s\n",
+         stage_id, opt_name, iter_unit, fname);
+}
+
+// ---------------------------------------------------------------------------
+// Shared log-line writer: stdout + loss.out + per-stage file
+// ---------------------------------------------------------------------------
+void Uf3Fitness::write_log_line(
+  int stage_id, const char* opt, const char* iunit,
+  int local_iter, float wall_time_s,
+  float lt, float l1, float l2, float le, float lf, float te, float tf)
+{
+  printf(LOG_FMT, stage_id, opt, iunit, local_iter, wall_time_s,
+         lt, l1, l2, le, lf, te, tf);
+  fflush(stdout);
+  if (floss_) {
+    fprintf(floss_, LOG_FMT, stage_id, opt, iunit, local_iter, wall_time_s,
+            lt, l1, l2, le, lf, te, tf);
+    fflush(floss_);
+  }
+  if (fstage_) {
+    fprintf(fstage_, LOG_FMT, stage_id, opt, iunit, local_iter, wall_time_s,
+            lt, l1, l2, le, lf, te, tf);
+    fflush(fstage_);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// L1 / L2 regularization — computed on the host coefficient mirror
+// ---------------------------------------------------------------------------
 void Uf3Fitness::compute_l1_l2_host(float& l1, float& l2)
 {
   int nparam = model_->num_parameters();
@@ -103,6 +193,9 @@ void Uf3Fitness::accumulate_regularization_gradient(std::vector<float>& grad)
   }
 }
 
+// ---------------------------------------------------------------------------
+// Hot-path train loss — GPU forward + 2-float D2H, no test-set side-effects
+// ---------------------------------------------------------------------------
 float Uf3Fitness::compute_loss_train_only(int batch_id)
 {
   int bid = batch_id % dataset_.num_batches;
@@ -132,26 +225,12 @@ float Uf3Fitness::compute_loss_train_only(int batch_id)
   return loss_total;
 }
 
-float Uf3Fitness::compute_loss(int batch_id, int generation, int stage_id)
+// ---------------------------------------------------------------------------
+// Test-set evaluation (slow path — CPU D2H loops, called at checkpoints only)
+// ---------------------------------------------------------------------------
+void Uf3Fitness::evaluate_test_set(int /*generation*/, int /*stage_id*/)
 {
-  float total = compute_loss_train_only(batch_id);
-
-  // Optional test-set evaluation (slow path; runs at most every 100 gens).
-  if (test_set_size_ > 0 && generation > 0 && generation % 100 == 0) {
-    evaluate_test_set(generation, stage_id);
-  }
-  if (floss_ && generation > 0 && generation % 100 == 0) {
-    fprintf(floss_, "%d %d %.5f %.5f %.5f %.5f %.5f %.5f %.5f\n",
-            stage_id, generation, loss_total, loss_l1, loss_l2,
-            loss_e, loss_f, test_e, test_f);
-    fflush(floss_);
-  }
-  return total;
-}
-
-void Uf3Fitness::evaluate_test_set(int generation, int /*stage_id*/)
-{
-  int ntest = std::min(100, test_set_size_);
+  int ntest = test_set_size_;  // evaluate all test frames
   std::vector<int> tidx(ntest);
   int t_total = 0;
   for (int i = 0; i < ntest; i++) {
@@ -171,9 +250,6 @@ void Uf3Fitness::evaluate_test_set(int generation, int /*stage_id*/)
   model_->evaluate(test_set_, tidx, d_energy_test_);
   d_energy_test_.copy_to_host(h_energy_test_.data());
 
-  // For the test-set we re-use d_fx because Uf3Model::evaluate(frames,...)
-  // writes into batch-local positions for the host-frame path; we read back
-  // exactly t_total floats from each axis.
   cudaMemcpy(h_fx_test_.data(), model_->d_fx.data(), t_total * sizeof(float),
              cudaMemcpyDeviceToHost);
   cudaMemcpy(h_fy_test_.data(), model_->d_fy.data(), t_total * sizeof(float),
@@ -204,12 +280,40 @@ void Uf3Fitness::evaluate_test_set(int generation, int /*stage_id*/)
     toff += f.num_atoms;
   }
   test_f = (float)sqrt(tf_sum2 / (3.0 * std::max(1, tf_atoms)));
+}
 
-  // Force buffer was just clobbered by the test-set evaluator (which uses
-  // batch-local offsets) — caller must not re-use d_fx for the train batch
-  // after this without first re-running evaluate_batch(...).  No-op here:
-  // compute_loss returns immediately after.
-  (void)generation;
+// ---------------------------------------------------------------------------
+// Main loss entry-point (single individual)
+// ---------------------------------------------------------------------------
+float Uf3Fitness::compute_loss(int batch_id, int generation, int stage_id,
+                                int local_iter, float wall_time_s)
+{
+  float total = compute_loss_train_only(batch_id);
+
+  // Log at local_iter==1 (stage start) and every 100 steps thereafter.
+  // The duplicate guard prevents double-logging when the same local_iter is
+  // passed multiple times (LBFGS line-search, ES inner population loop).
+  bool is_checkpoint = (local_iter % 100 == 0 || local_iter == 1)
+                        && local_iter != last_logged_local_iter_;
+
+  if (test_set_size_ > 0 && is_checkpoint) {
+    evaluate_test_set(generation, stage_id);
+  }
+  if (is_checkpoint) {
+    last_logged_local_iter_ = local_iter;
+    write_log_line(stage_id, cur_opt_name_.c_str(), cur_iter_unit_.c_str(),
+                   local_iter, wall_time_s,
+                   loss_total, loss_l1, loss_l2, loss_e, loss_f, test_e, test_f);
+  }
+  return total;
+}
+
+float Uf3Fitness::compute_loss_for_params(
+  const float* params, int batch_id, int generation, int stage_id,
+  int local_iter, float wall_time_s)
+{
+  model_->set_parameters_async(params, model_->stream());
+  return compute_loss(batch_id, generation, stage_id, local_iter, wall_time_s);
 }
 
 void Uf3Fitness::compute_gradient(int batch_id, int generation,
@@ -217,8 +321,6 @@ void Uf3Fitness::compute_gradient(int batch_id, int generation,
 {
   (void)generation;
   int bid = batch_id % dataset_.num_batches;
-  // Train-only loss leaves d_energy_buf and d_fx/fy/fz populated and untouched
-  // by any test-set side-effect, so the gradient kernel can read them directly.
   compute_loss_train_only(bid);
   model_->compute_loss_gradient(
     dataset_, bid, loss_e, loss_f, lambda_e_, lambda_f_,
@@ -226,22 +328,18 @@ void Uf3Fitness::compute_gradient(int batch_id, int generation,
   accumulate_regularization_gradient(grad);
 }
 
-float Uf3Fitness::compute_loss_for_params(
-  const float* params, int batch_id, int generation, int stage_id)
-{
-  // Use the async path so the host-side coeff packing + raw H2D + GPU spline
-  // build chain naturally onto the model's compute stream.  evaluate_batch /
-  // compute_loss_reduction launch on the same stream, so no extra sync needed
-  // until we want loss_e/loss_f.
-  model_->set_parameters_async(params, model_->stream());
-  return compute_loss(batch_id, generation, stage_id);
-}
-
+// ---------------------------------------------------------------------------
+// Destructor
+// ---------------------------------------------------------------------------
 Uf3Fitness::~Uf3Fitness()
 {
   if (floss_) {
     fclose(floss_);
     floss_ = nullptr;
+  }
+  if (fstage_) {
+    fclose(fstage_);
+    fstage_ = nullptr;
   }
   if (h_loss_sum_pinned_) {
     cudaFreeHost(h_loss_sum_pinned_);
@@ -253,20 +351,26 @@ Uf3Fitness::~Uf3Fitness()
   }
 }
 
+// ---------------------------------------------------------------------------
+// Population-mode loss (SNES / ES)
+// ---------------------------------------------------------------------------
 void Uf3Fitness::compute_loss_population(
   const float* host_pop_params, int pop,
   int batch_id, int generation, int stage_id,
+  int local_iter, float wall_time_s,
   float* out_loss_total)
 {
   if (pop <= 0) return;
 
   // 3B fallback: pop kernels currently only cover 2B.  Use the existing
-  // single-individual path one at a time.
+  // single-individual path one at a time.  The duplicate-logging guard in
+  // compute_loss_for_params ensures only one row is written per checkpoint.
   if (model_->has_3b()) {
     int nparam = model_->num_parameters();
     for (int p = 0; p < pop; p++) {
       out_loss_total[p] = compute_loss_for_params(
-        host_pop_params + (size_t)p * nparam, batch_id, generation, stage_id);
+        host_pop_params + (size_t)p * nparam, batch_id, generation, stage_id,
+        local_iter, wall_time_s);
     }
     return;
   }
@@ -297,8 +401,7 @@ void Uf3Fitness::compute_loss_population(
                         (size_t)2 * pop * sizeof(float),
                         cudaMemcpyDeviceToHost, s));
 
-  // 5. Overlap host work: per-individual L1/L2 from the raw 2B coeffs the
-  //    caller just handed us.  3B is excluded (we early-returned above).
+  // 5. Overlap host work: per-individual L1/L2 from the raw 2B coeffs.
   int nparam = model_->num_parameters();
   std::vector<float> reg_per_ind(2 * pop, 0.0f);  // [p*2+0]=L1, +1=L2
   for (int p = 0; p < pop; p++) {
@@ -327,14 +430,37 @@ void Uf3Fitness::compute_loss_population(
                       + lambda_1_ * l1 + lambda_2_ * l2;
   }
 
-  // Mirror compute_loss's floss_ logging behavior using individual 0 as the
-  // "representative" sample.  Matches the cadence (every 100 gens, skip gen 0).
-  if (floss_ && generation > 0 && generation % 100 == 0) {
-    float le0 = sqrtf(h_loss_sum_pop_pinned_[0] * e_norm);
-    float lf0 = sqrtf(h_loss_sum_pop_pinned_[1] * f_norm);
-    fprintf(floss_, "%d %d %.5f %.5f %.5f %.5f %.5f %.5f %.5f\n",
-            stage_id, generation, out_loss_total[0],
-            reg_per_ind[0], reg_per_ind[1], le0, lf0, test_e, test_f);
-    fflush(floss_);
+  // 7. At checkpoints: find best individual, evaluate test set on it, log.
+  bool is_checkpoint = (local_iter % 100 == 0 || local_iter == 1)
+                        && local_iter != last_logged_local_iter_;
+  if (is_checkpoint) {
+    // Find best individual by total loss.
+    int best_p = 0;
+    float best_val = out_loss_total[0];
+    for (int p = 1; p < pop; p++) {
+      if (out_loss_total[p] < best_val) {
+        best_val = out_loss_total[p];
+        best_p = p;
+      }
+    }
+
+    // Evaluate test set on best individual's parameters.
+    // (Previously, test_e/test_f were never updated on the population path,
+    //  so they always showed 0 in loss.out — fixed here.)
+    if (test_set_size_ > 0) {
+      model_->set_parameters_async(
+        host_pop_params + (size_t)best_p * nparam, s);
+      CHECK(cudaStreamSynchronize(s));
+      evaluate_test_set(generation, stage_id);
+    }
+
+    last_logged_local_iter_ = local_iter;
+    float le_best = sqrtf(h_loss_sum_pop_pinned_[best_p * 2 + 0] * e_norm);
+    float lf_best = sqrtf(h_loss_sum_pop_pinned_[best_p * 2 + 1] * f_norm);
+    float l1_best = reg_per_ind[best_p * 2 + 0];
+    float l2_best = reg_per_ind[best_p * 2 + 1];
+    write_log_line(stage_id, cur_opt_name_.c_str(), cur_iter_unit_.c_str(),
+                   local_iter, wall_time_s,
+                   best_val, l1_best, l2_best, le_best, lf_best, test_e, test_f);
   }
 }

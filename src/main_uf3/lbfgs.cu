@@ -41,6 +41,7 @@ void run_lbfgs(
   std::vector<float> q(nparam), dir(nparam);
   int hist_idx = 0, hist_count = 0;
 
+  fitness.begin_stage(stage_id, "lbfgs", "lbfgs_step");
   auto t0 = std::chrono::high_resolution_clock::now();
   float best_loss = 1e30f;
 
@@ -56,14 +57,16 @@ void run_lbfgs(
 
     float step = 0.001f;
     std::vector<float> x_trial(nparam);
-    float loss_old = fitness.compute_loss(batch_id, global_gen, stage_id);
+    auto t1 = std::chrono::high_resolution_clock::now();
+    double dt = std::chrono::duration<double>(t1 - t0).count();
+    float loss_old = fitness.compute_loss(batch_id, global_gen, stage_id, g + 1, (float)dt);
     float loss_new = loss_old;
     for (int ls = 0; ls < 10; ls++) {
       for (int i = 0; i < nparam; i++) {
         x_trial[i] = x[i] + step * dir[i];
       }
       fitness.model()->set_parameters(x_trial.data());
-      loss_new = fitness.compute_loss(batch_id, global_gen, stage_id);
+      loss_new = fitness.compute_loss(batch_id, global_gen, stage_id, g + 1, (float)dt);
       if (loss_new < loss_old) {
         break;
       }
@@ -155,9 +158,8 @@ void run_lbfgs(
     }
 
     if (g % 5 == 0 || g == gen - 1) {
-      auto t1 = std::chrono::high_resolution_clock::now();
-      printf("  LBFGS gen %5d: loss=%.4f eV, best=%.4f eV (%.1fs)\n",
-             g, loss_new, best_loss, std::chrono::duration<double>(t1 - t0).count());
+      printf("  LBFGS step %5d: loss=%.4f eV, best=%.4f eV (%.1fs)\n",
+             g + 1, loss_new, best_loss, dt);
     }
   }
 }

@@ -233,6 +233,7 @@ void run_lstsq(
   if (stage.generation > 1) {
     printf("  Warning: lstsq runs once; generation=%d ignored.\n", stage.generation);
   }
+  fitness.begin_stage(stage_id, "lstsq", "solve");
 
   int ncoeff = fitness.model()->ncoeff_2b(), npairs = fitness.model()->num_pairs();
   int nt = fitness.model()->num_types(), nint = fitness.model()->nknots_2b() - 1;
@@ -295,9 +296,10 @@ void run_lstsq(
   fitness.model()->set_parameters(x.data());
 
   auto t1 = std::chrono::high_resolution_clock::now();
+  float dt = (float)std::chrono::duration<double>(t1 - t0).count();
   printf("  lstsq GPU: %d params%s, %d frames, %.2f s\n",
-         nparam, has_3b?" (2B+3B)":" (2B)", use_frames,
-         std::chrono::duration<double>(t1-t0).count());
-  float tl = fitness.compute_loss(0, gen_offset, stage_id);
+         nparam, has_3b?" (2B+3B)":" (2B)", use_frames, dt);
+  // local_iter=1: lstsq runs once; triggers the local_iter==1 logging checkpoint.
+  float tl = fitness.compute_loss(0, gen_offset, stage_id, 1, dt);
   printf("  Loss=%.3f [E=%.3f F=%.3f eV/A]\n", tl, fitness.loss_e, fitness.loss_f);
 }

@@ -38,6 +38,7 @@ void run_es(
   float best_rmse = 1e30f;
   srand(12345);
 
+  fitness.begin_stage(stage_id, "es", "es_generation");
   auto t0 = std::chrono::high_resolution_clock::now();
 
   for (int g = 0; g < gen; g++) {
@@ -46,12 +47,19 @@ void run_es(
     float total_rmse = 0.0f;
     float gen_best = 1e30f;
 
+    auto t1 = std::chrono::high_resolution_clock::now();
+    double dt = std::chrono::duration<double>(t1 - t0).count();
+
     for (int p = 0; p < pop; p++) {
       for (int i = 0; i < nparam; i++) {
         trial[i] = best[i] + (rand() / (float)RAND_MAX - 0.5f) * 0.02f;
       }
 
-      float rmse = fitness.compute_loss_for_params(trial.data(), batch_id, global_gen, stage_id);
+      // All individuals in this generation share the same local_iter (g+1).
+      // The duplicate-logging guard in compute_loss_for_params ensures only
+      // the first individual at a checkpoint actually writes to the log files.
+      float rmse = fitness.compute_loss_for_params(
+        trial.data(), batch_id, global_gen, stage_id, g + 1, (float)dt);
       total_rmse += rmse;
 
       if (rmse < best_rmse) {
@@ -67,10 +75,8 @@ void run_es(
     }
 
     if (g % 5 == 0 || g == gen - 1) {
-      auto t1 = std::chrono::high_resolution_clock::now();
-      double dt = std::chrono::duration<double>(t1 - t0).count();
       printf("  ES gen %5d: best=%.3f eV, avg=%.3f eV (%.1fs)\n",
-             g, best_rmse, total_rmse / pop, dt);
+             g + 1, best_rmse, total_rmse / pop, dt);
     }
   }
 }

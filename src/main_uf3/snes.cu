@@ -69,6 +69,7 @@ void run_snes(
   float eta_sigma = 0.1f;
   float eta_mu = 1.0f;
 
+  fitness.begin_stage(stage_id, "snes", "snes_generation");
   auto t0 = std::chrono::high_resolution_clock::now();
   float best_rmse = 1e30f;
 
@@ -86,9 +87,11 @@ void run_snes(
       }
       indices[p] = p;
     }
+    auto t1 = std::chrono::high_resolution_clock::now();
+    double dt = std::chrono::duration<double>(t1 - t0).count();
     fitness.compute_loss_population(
       trial_pop.data(), pop, batch_id, global_gen, stage_id,
-      fitness_vals.data());
+      g + 1, (float)dt, fitness_vals.data());
 
     std::sort(indices.begin(), indices.end(),
               [&](int a, int b) { return fitness_vals[a] < fitness_vals[b]; });
@@ -115,15 +118,13 @@ void run_snes(
     fitness.model()->set_parameters(mu.data());
 
     if (g % 5 == 0 || g == gen - 1) {
-      auto t1 = std::chrono::high_resolution_clock::now();
-      double dt = std::chrono::duration<double>(t1 - t0).count();
       float avg_fit = 0;
       for (int p = 0; p < pop; p++) {
         avg_fit += fitness_vals[p];
       }
       avg_fit /= pop;
       printf("  SNES gen %5d: best=%.3f eV, avg=%.3f eV (%.1fs)\n",
-             g, best_in_gen, avg_fit, dt);
+             g + 1, best_in_gen, avg_fit, dt);
     }
   }
 }
