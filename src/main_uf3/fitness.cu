@@ -392,11 +392,10 @@ void Uf3Fitness::compute_loss_population(
 
   // 1. Async build P spline tables on the GPU.
   model_->set_population_parameters_async(host_pop_params, pop, s);
-  // 2. P x forward passes (one launch per kernel, grid=(B,P)).
-  model_->evaluate_batch_population(dataset_, bid, pop, d_energy_pop_);
-  // 3. P x GPU reductions; output 2*P floats.
-  model_->compute_loss_reduction_population(dataset_, bid, pop, d_loss_sum_pop_);
-  // 4. Async D2H of the 2*P scalars.
+  // 2. Fused forward + reduction: single kernel per (frame, individual),
+  //    no intermediate force/energy buffers written to global memory.
+  model_->evaluate_and_reduce_population(dataset_, bid, pop, d_loss_sum_pop_);
+  // 3. Async D2H of the 2*P scalars.
   CHECK(cudaMemcpyAsync(h_loss_sum_pop_pinned_, d_loss_sum_pop_.data(),
                         (size_t)2 * pop * sizeof(float),
                         cudaMemcpyDeviceToHost, s));

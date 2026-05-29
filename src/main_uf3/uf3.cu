@@ -227,6 +227,90 @@ static __global__ void uf3_reduce_force_sq_pop(
   if (tid == 0) atomicAdd(&d_loss_sum_pop[p * 2 + 1], s[0]);
 }
 
+// ---- Fused population eval + MSE reduction (2B only) --------------------
+// Replaces uf3_eval_2b_pop + uf3_eval_2b_force_pop + uf3_reduce_*_pop with a
+// single kernel:  one pass over all pairs computes both energy and forces,
+// force residuals are accumulated in registers and reduced within the block,
+// and only two scalars per block are written to global memory.
+//
+// Compared to the four-kernel sequence this saves:
+//   • One full pass over all pairs (the old energy kernel repeated the same
+//     sqrt / interval / spline work the force kernel already does).
+//   • All writes to d_energy_buf_pop, d_fx_pop, d_fy_pop, d_fz_pop.
+//   • The two separate reduction kernel launches.
+//
+// grid = (B, P), block = 64.
+static __global__ void uf3_eval_reduce_2b_pop(
+  int B, int P, int total_atoms,
+  const int* __restrict__ fidx,
+  const int* __restrict__ nat,
+  const int* __restrict__ off,
+  const int* __restrict__ typ,
+  const float* __restrict__ x,
+  const float* __restrict__ y,
+  const float* __restrict__ z,
+  const float4* __restrict__ coeff,    // [P * coeff_stride]
+  int coeff_stride,                    // np2 * nint
+  int np2, int nint, float kmin, float kd, float rc,
+  const int* __restrict__ tmap, int nt,
+  const float* __restrict__ energy_ref,
+  const float* __restrict__ fx_ref,
+  const float* __restrict__ fy_ref,
+  const float* __restrict__ fz_ref,
+  float* __restrict__ loss_sum_pop)    // [P * 2]
+{
+  int b = blockIdx.x; if (b >= B) return;
+  int p = blockIdx.y; if (p >= P) return;
+  int tid = threadIdx.x, stride = blockDim.x;
+  int fid = fidx[b], n = nat[fid], o = off[fid];
+  const float4* coeff_p = coeff + p * coeff_stride;
+
+  float pe   = 0.0f;   // energy accumulator (pair counted once: j > i)
+  float fmse = 0.0f;   // force MSE accumulator
+
+  for (int i = tid; i < n; i += stride) {
+    float fxi = 0.0f, fyi = 0.0f, fzi = 0.0f;
+    for (int j = 0; j < n; j++) {
+      if (i == j) continue;
+      float dx = x[o+i]-x[o+j], dy = y[o+i]-y[o+j], dz = z[o+i]-z[o+j];
+      float r = sqrtf(dx*dx + dy*dy + dz*dz);
+      if (r >= rc) continue;
+      int m = uf3_find_interval(r, kmin, kd, nint);
+      float u = (r - (kmin + m*kd)) / kd;
+      float4 c = __ldg(&coeff_p[tmap[typ[o+i]*nt + typ[o+j]] * nint + m]);
+      // Energy: count each pair once (j > i)
+      if (j > i) pe += uf3_eval_cubic(c, u);
+      // Force on atom i from atom j (register accumulation, no global write)
+      float deriv = (c.y + u * (2.0f*c.z + u * 3.0f*c.w)) / kd;
+      float f = deriv / r;
+      fxi += f * dx; fyi += f * dy; fzi += f * dz;
+    }
+    // Immediately reduce into force MSE — no per-atom storage needed
+    float dfx = fxi - fx_ref[o+i];
+    float dfy = fyi - fy_ref[o+i];
+    float dfz = fzi - fz_ref[o+i];
+    fmse += dfx*dfx + dfy*dfy + dfz*dfz;
+  }
+
+  // Block-level reduction for both scalars
+  __shared__ float s_pe[64], s_fmse[64];
+  s_pe[tid] = pe; s_fmse[tid] = fmse;
+  __syncthreads();
+  for (int s = stride/2; s > 0; s >>= 1) {
+    if (tid < s) {
+      s_pe[tid]   += s_pe[tid + s];
+      s_fmse[tid] += s_fmse[tid + s];
+    }
+    __syncthreads();
+  }
+  if (tid == 0) {
+    float na = (float)n; if (na < 1.0f) na = 1.0f;
+    float ediff = (s_pe[0] - energy_ref[fid]) / na;
+    atomicAdd(&loss_sum_pop[p * 2 + 0], ediff * ediff);
+    atomicAdd(&loss_sum_pop[p * 2 + 1], s_fmse[0]);
+  }
+}
+
 // ---- 3B kernel (neighbor-list-based, multi-threaded) ---------------------
 static __global__ void uf3_eval_3b(
   int nf, const int* __restrict__ fidx, const int* __restrict__ nat,
@@ -1409,6 +1493,50 @@ void Uf3Model::compute_loss_reduction_population(
   uf3_reduce_force_sq_pop<<<gridF, 128, 0, s>>>(
     B, pop, total_atoms, d_fidx, ds.d_natoms.data(), ds.d_offsets.data(),
     d_fx_pop.data(), d_fy_pop.data(), d_fz_pop.data(),
+    ds.d_fx_ref.data(), ds.d_fy_ref.data(), ds.d_fz_ref.data(),
+    d_loss_sum_pop.data());
+  GPU_CHECK_KERNEL
+}
+
+// ---------------------------------------------------------------------------
+// Fused forward-pass + MSE reduction (2B).  Replaces the four-step sequence
+//   set_population_parameters_async
+//   → evaluate_batch_population
+//   → compute_loss_reduction_population
+// with a single kernel launched from this method.
+//
+// Eliminates:
+//   • d_energy_buf_pop: energy values no longer written to global memory
+//   • d_fx_pop / d_fy_pop / d_fz_pop: force vectors no longer stored
+//   • The D2D copy of energies that evaluate_batch_population used to do
+//   • One redundant sweep over all atom pairs (the old energy kernel repeated
+//     every distance / spline computation the force kernel already performed)
+// ---------------------------------------------------------------------------
+void Uf3Model::evaluate_and_reduce_population(
+  const Uf3DatasetGPU& ds, int batch_id, int pop,
+  GPU_Vector<float>& d_loss_sum_pop)
+{
+  int B = ds.batch_size(batch_id);
+  int total_atoms = ds.total_atoms;
+  const int* d_fidx = ds.batch_fidx_device_ptr(batch_id);
+  cudaStream_t s = stream_;
+
+  // Zero the two accumulators per individual before launching the kernel.
+  cudaMemsetAsync(d_loss_sum_pop.data(), 0, 2 * pop * sizeof(float), s);
+
+  float kmin2 = knots_2b_[0];
+  float kd2   = (knots_2b_.back() - knots_2b_[0]) / nint_2b_;
+  int np2 = num_types_ * num_types_;
+  int coeff_stride = np2 * nint_2b_;
+
+  dim3 grid(B, pop);
+  uf3_eval_reduce_2b_pop<<<grid, 64, 0, s>>>(
+    B, pop, total_atoms,
+    d_fidx, ds.d_natoms.data(), ds.d_offsets.data(),
+    ds.d_types.data(), ds.d_x.data(), ds.d_y.data(), ds.d_z.data(),
+    d_coeff_2b_pop.data(), coeff_stride, np2, nint_2b_, kmin2, kd2, rc_2b_,
+    d_type_map.data(), num_types_,
+    ds.d_energy_ref.data(),
     ds.d_fx_ref.data(), ds.d_fy_ref.data(), ds.d_fz_ref.data(),
     d_loss_sum_pop.data());
   GPU_CHECK_KERNEL

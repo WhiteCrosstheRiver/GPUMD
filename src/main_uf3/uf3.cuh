@@ -60,20 +60,28 @@ public:
   void set_population_parameters_async(
     const float* host_pop_params, int pop, cudaStream_t stream);
 
-  // Forward pass for the entire population on one batch.
-  //   d_energy_pop[p * B + b] = predicted energy for individual p on slot b.
-  // Forces are stored in d_fx_pop / d_fy_pop / d_fz_pop in layout
-  //   [pop * dataset_total_atoms], indexed by (p * total_atoms + global_atom).
+  // Fused forward + reduction for the entire population on one batch.
+  // Replaces the old evaluate_batch_population + compute_loss_reduction_population
+  // pair with a single kernel that:
+  //   • computes energy and forces for all P individuals in one pass
+  //   • immediately accumulates MSE residuals (no per-atom force storage)
+  //   • writes d_loss_sum_pop[p*2+0] = energy MSE sum
+  //           d_loss_sum_pop[p*2+1] = force MSE sum
+  // Saves: d_fx_pop / d_fy_pop / d_fz_pop buffers and the redundant second
+  // sweep over all pairs that the old separate-kernel design performed.
+  void evaluate_and_reduce_population(
+    const Uf3DatasetGPU& ds, int batch_id, int pop,
+    GPU_Vector<float>& d_loss_sum_pop);   // size >= 2 * pop
+
+  // Legacy separate-step API (kept for potential offline analysis).
+  // compute_loss_population in Uf3Fitness uses evaluate_and_reduce_population
+  // instead, so these are no longer on the SNES hot path.
   void evaluate_batch_population(
     const Uf3DatasetGPU& ds, int batch_id, int pop,
     GPU_Vector<float>& d_energy_pop);
-
-  // GPU reduction of the loss for an entire population.
-  //   d_loss_sum_pop[p*2 + 0] = sum_b (E_pred/na - E_ref/na)^2
-  //   d_loss_sum_pop[p*2 + 1] = sum_a ||f_pred - f_ref||^2
   void compute_loss_reduction_population(
     const Uf3DatasetGPU& ds, int batch_id, int pop,
-    GPU_Vector<float>& d_loss_sum_pop);    // size >= 2 * pop
+    GPU_Vector<float>& d_loss_sum_pop);
 
   // Lazy-allocate the population-side buffers to fit (pop, total_atoms).
   void ensure_pop_buffers(int pop, int dataset_total_atoms);
