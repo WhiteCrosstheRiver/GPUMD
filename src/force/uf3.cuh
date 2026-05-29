@@ -53,7 +53,7 @@ private:
     double rc;
     int nknots, nint;
     int knot_type;               // 0=non-uniform, 1=uniform
-    float knot_min, knot_delta;  // for uniform interval lookup
+    float knot_min, knot_delta, inv_knot_delta;  // uniform interval lookup
   } two_body;
 
   // ---- 3-body data ----
@@ -68,9 +68,9 @@ private:
     int nk_ij, nk_ik, nk_jk;         // knot counts
     int knot_type;
     double rc_ij, rc_ik, rc_jk;
-    float knot_min_ij, knot_delta_ij;
-    float knot_min_ik, knot_delta_ik;
-    float knot_min_jk, knot_delta_jk;
+    float knot_min_ij, knot_delta_ij, inv_knot_delta_ij;
+    float knot_min_ik, knot_delta_ik, inv_knot_delta_ik;
+    float knot_min_jk, knot_delta_jk, inv_knot_delta_jk;
   } three_body;
 
   bool has_2b, has_3b;

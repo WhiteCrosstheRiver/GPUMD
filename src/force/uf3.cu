@@ -155,31 +155,37 @@ static void precompute_3b_basis_uniform(
 }
 
 // ---------------------------------------------------------------------------
-// Device helper: evaluate cubic polynomial
+// Device helper: evaluate cubic polynomial (Horner form, FMA-friendly)
 // ---------------------------------------------------------------------------
-__device__ inline float eval_cubic(float4 c, float u)
+__device__ __forceinline__ float eval_cubic(float4 c, float u)
 {
-  return c.x + u * (c.y + u * (c.z + u * c.w));
+  return __fmaf_rn(u, __fmaf_rn(u, __fmaf_rn(u, c.w, c.z), c.y), c.x);
 }
 
-__device__ inline float eval_cubic_deriv(float4 c, float u)
+__device__ __forceinline__ float eval_cubic_deriv(float4 c, float u)
 {
-  return c.y + u * (2.0f * c.z + u * 3.0f * c.w);
+  // c.y + u*(2*c.z + u*3*c.w)
+  return __fmaf_rn(u, __fmaf_rn(u, 3.0f * c.w, 2.0f * c.z), c.y);
 }
 
 // ---------------------------------------------------------------------------
-// Device helper: find knot interval
+// Device helper: find knot interval (uniform grid, inv_delta pre-computed on host)
 // ---------------------------------------------------------------------------
-__device__ inline int find_interval(float r, float knot_min, float knot_delta, int nint)
+__device__ __forceinline__ int find_interval(float r, float knot_min, float inv_knot_delta, int nint)
 {
-  float t = (r - knot_min) / knot_delta;
+  float t = (r - knot_min) * inv_knot_delta;
   int i = (int)t;
   if (i < 0) i = 0; if (i >= nint) i = nint - 1;
   return i;
 }
 
+// Maximum 2B intervals that fit in shared memory cache.  A typical UF3 model
+// uses ~10-40 intervals (nknots-1).  64 covers all realistic cases and uses
+// only 1 KB of shared per block.
+static constexpr int UF3_2B_SHARED_INTERVALS = 64;
+
 // Non-uniform: binary search
-__device__ inline int find_interval_nu(float r, const float* knots, int nk)
+__device__ __forceinline__ int find_interval_nu(float r, const float* knots, int nk)
 {
   int lo = 0, hi = nk - 2;
   while (lo < hi) {
@@ -190,16 +196,23 @@ __device__ inline int find_interval_nu(float r, const float* knots, int nk)
 }
 
 // ---------------------------------------------------------------------------
-// 2-body kernel
+// 2-body kernel (optimized)
+// Optimizations vs. baseline:
+//   - cubic coefficient table cached in shared memory (cooperative load,
+//     unconditional: caller guarantees nint <= UF3_2B_SHARED_INTERVALS)
+//   - inv_knot_delta pre-computed on host (eliminates per-neighbor division)
+//   - interval lookup and fractional u computed in one shot: t = (r-min)*invD,
+//     m = floor(t), u = t - m
+//   - rsqrtf + d2*rinv replaces sqrtf + 1.0f/r (one transcendental + one mul)
+//   - eval_cubic / deriv use __fmaf_rn (fused multiply-add path)
 // ---------------------------------------------------------------------------
 static __global__ void find_force_uf3_2b(
   const int N, const int N1, const int N2,
   const Box box,
   const float4* __restrict__ d_coeff,
-  int nint, int knot_type,
-  float knot_min, float knot_delta,
-  const float* __restrict__ d_knots,
-  double rc,
+  int nint,
+  float knot_min, float inv_knot_delta,
+  float rc,
   const int* __restrict__ g_NN,
   const int* __restrict__ g_NL,
   const double* __restrict__ g_x,
@@ -209,42 +222,53 @@ static __global__ void find_force_uf3_2b(
   double* g_fx, double* g_fy, double* g_fz,
   double* g_virial)
 {
+  __shared__ float4 s_coeff[UF3_2B_SHARED_INTERVALS];
+  for (int idx = threadIdx.x; idx < nint; idx += blockDim.x) {
+    s_coeff[idx] = __ldg(&d_coeff[idx]);
+  }
+  __syncthreads();
+
   int n1 = blockIdx.x * blockDim.x + threadIdx.x + N1;
   if (n1 >= N2) return;
 
-  int NN = g_NN[n1];
-  double x1 = g_x[n1], y1 = g_y[n1], z1 = g_z[n1];
+  const int NN = g_NN[n1];
+  const double x1 = g_x[n1], y1 = g_y[n1], z1 = g_z[n1];
+  const float rc2 = rc * rc;
+  const int nint_minus_1 = nint - 1;
+
   float pe = 0.0f;
   float fx = 0.0f, fy = 0.0f, fz = 0.0f;
   float sxx = 0, sxy = 0, sxz = 0, syx = 0, syy = 0, syz = 0, szx = 0, szy = 0, szz = 0;
 
   for (int i1 = 0; i1 < NN; ++i1) {
-    int n2 = g_NL[n1 + N * i1];
-    float x12 = g_x[n2] - x1;
-    float y12 = g_y[n2] - y1;
-    float z12 = g_z[n2] - z1;
+    const int n2 = __ldg(&g_NL[n1 + N * i1]);
+    float x12 = float(__ldg(&g_x[n2]) - x1);
+    float y12 = float(__ldg(&g_y[n2]) - y1);
+    float z12 = float(__ldg(&g_z[n2]) - z1);
     apply_mic(box, x12, y12, z12);
-    float r = sqrtf(x12 * x12 + y12 * y12 + z12 * z12);
-    if (r >= rc) continue;
+    const float d2 = x12 * x12 + y12 * y12 + z12 * z12;
+    if (d2 >= rc2) continue;
 
-    int m; float h, u;
-    // Always use uniform interval lookup (non-uniform knots are approx uniform)
-    // knot_type differentiates only host-side precomputation; runtime is same
-    m = find_interval(r, knot_min, knot_delta, nint);
-    h = knot_delta;
-    u = (r - (knot_min + m * h)) / h;
-    float4 c = __ldg(&d_coeff[m]);
-    float val = eval_cubic(c, u);
-    float deriv = eval_cubic_deriv(c, u) / h;
+    const float rinv = rsqrtf(d2);
+    const float r = d2 * rinv;
 
-    float rinv = 1.0f / r;
-    float fpair = deriv * rinv;
-    float f12x = fpair * x12 * 0.5f;
-    float f12y = fpair * y12 * 0.5f;
-    float f12z = fpair * z12 * 0.5f;
+    // Combined interval lookup and fractional u in one division-equivalent op
+    const float t = (r - knot_min) * inv_knot_delta;
+    int m = (int)t;
+    if (m < 0) m = 0; else if (m > nint_minus_1) m = nint_minus_1;
+    const float u = t - (float)m;
+
+    const float4 c = s_coeff[m];
+    const float val = eval_cubic(c, u);
+    const float deriv = eval_cubic_deriv(c, u) * inv_knot_delta;
+
+    const float fpair_half = 0.5f * deriv * rinv;
+    const float f12x = fpair_half * x12;
+    const float f12y = fpair_half * y12;
+    const float f12z = fpair_half * z12;
 
     fx += f12x; fy += f12y; fz += f12z;
-    pe += val * 0.5f;
+    pe += 0.5f * val;
 
     sxx -= f12x * x12; sxy -= f12x * y12; sxz -= f12x * z12;
     syx -= f12y * x12; syy -= f12y * y12; syz -= f12y * z12;
@@ -275,10 +299,10 @@ static __global__ void find_force_uf3_3b(
   const float4* __restrict__ d_basis_ij, int nint_ij,
   const float4* __restrict__ d_basis_ik, int nint_ik,
   const float4* __restrict__ d_basis_jk, int nint_jk,
-  float knot_min_ij, float knot_delta_ij,
-  float knot_min_ik, float knot_delta_ik,
-  float knot_min_jk, float knot_delta_jk,
-  double rc_ij, double rc_ik, double rc_jk,
+  float knot_min_ij, float knot_delta_ij, float inv_knot_delta_ij,
+  float knot_min_ik, float knot_delta_ik, float inv_knot_delta_ik,
+  float knot_min_jk, float knot_delta_jk, float inv_knot_delta_jk,
+  float rc_ij, float rc_ik, float rc_jk,
   const int* __restrict__ g_NN,
   const int* __restrict__ g_NL,
   const double* __restrict__ g_x,
@@ -320,33 +344,35 @@ static __global__ void find_force_uf3_3b(
       if (r23 >= rc_jk) continue;
 
       // Evaluate basis values for each dimension
-      int mi = find_interval(r12, knot_min_ij, knot_delta_ij, nint_ij);
-      int mk = find_interval(r13, knot_min_ik, knot_delta_ik, nint_ik);
-      int mj = find_interval(r23, knot_min_jk, knot_delta_jk, nint_jk);
+      int mi = find_interval(r12, knot_min_ij, inv_knot_delta_ij, nint_ij);
+      int mk = find_interval(r13, knot_min_ik, inv_knot_delta_ik, nint_ik);
+      int mj = find_interval(r23, knot_min_jk, inv_knot_delta_jk, nint_jk);
 
-      float hi = knot_delta_ij, hk = knot_delta_ik, hj = knot_delta_jk;
-      float ui = (r12 - (knot_min_ij + mi * hi)) / hi;
-      float uk = (r13 - (knot_min_ik + mk * hk)) / hk;
-      float uj = (r23 - (knot_min_jk + mj * hj)) / hj;
+      float ui = (r12 - (knot_min_ij + mi * knot_delta_ij)) * inv_knot_delta_ij;
+      float uk = (r13 - (knot_min_ik + mk * knot_delta_ik)) * inv_knot_delta_ik;
+      float uj = (r23 - (knot_min_jk + mj * knot_delta_jk)) * inv_knot_delta_jk;
 
       float b_ij[4], db_ij[4];
       float b_ik[4], db_ik[4];
       float b_jk[4], db_jk[4];
 
+      #pragma unroll
       for (int p = 0; p < 4; p++) {
         float4 cb = __ldg(&d_basis_ij[mi * 4 + p]);
         b_ij[p] = eval_cubic(cb, ui);
-        db_ij[p] = eval_cubic_deriv(cb, ui) / hi;
+        db_ij[p] = eval_cubic_deriv(cb, ui) * inv_knot_delta_ij;
       }
+      #pragma unroll
       for (int p = 0; p < 4; p++) {
         float4 cb = __ldg(&d_basis_ik[mk * 4 + p]);
         b_ik[p] = eval_cubic(cb, uk);
-        db_ik[p] = eval_cubic_deriv(cb, uk) / hk;
+        db_ik[p] = eval_cubic_deriv(cb, uk) * inv_knot_delta_ik;
       }
+      #pragma unroll
       for (int p = 0; p < 4; p++) {
         float4 cb = __ldg(&d_basis_jk[mj * 4 + p]);
         b_jk[p] = eval_cubic(cb, uj);
-        db_jk[p] = eval_cubic_deriv(cb, uj) / hj;
+        db_jk[p] = eval_cubic_deriv(cb, uj) * inv_knot_delta_jk;
       }
 
       // Starting indices for active basis functions on this interval
@@ -509,6 +535,13 @@ void UF3::initialize(const char* filename, const int number_of_atoms)
       // Store knot info for GPU
       two_body.knot_min = knots[0];
       two_body.knot_delta = (knots[two_body.nknots - 1] - knots[0]) / (two_body.nknots - 1);
+      two_body.inv_knot_delta = 1.0f / two_body.knot_delta;
+      if (two_body.nint > UF3_2B_SHARED_INTERVALS) {
+        std::cout << "UF3 2B intervals=" << two_body.nint
+                  << " exceeds shared-memory cache (" << UF3_2B_SHARED_INTERVALS
+                  << "). Recompile with a larger UF3_2B_SHARED_INTERVALS." << std::endl;
+        exit(1);
+      }
       {
         two_body.d_knots.resize(two_body.nknots);
         two_body.d_knots.copy_from_host(knots.data());
@@ -601,6 +634,9 @@ void UF3::initialize(const char* filename, const int number_of_atoms)
       three_body.knot_delta_ij = (k_ij[three_body.nk_ij - 1] - k_ij[0]) / (three_body.nk_ij - 1);
       three_body.knot_delta_ik = (k_ik[three_body.nk_ik - 1] - k_ik[0]) / (three_body.nk_ik - 1);
       three_body.knot_delta_jk = (k_jk[three_body.nk_jk - 1] - k_jk[0]) / (three_body.nk_jk - 1);
+      three_body.inv_knot_delta_ij = 1.0f / three_body.knot_delta_ij;
+      three_body.inv_knot_delta_ik = 1.0f / three_body.knot_delta_ik;
+      three_body.inv_knot_delta_jk = 1.0f / three_body.knot_delta_jk;
 
       // Upload knot arrays
       three_body.d_knots_ij.resize(k_ij.size()); three_body.d_knots_ij.copy_from_host(k_ij.data());
@@ -646,7 +682,7 @@ void UF3::compute(
   GPU_Vector<double>& force_per_atom,
   GPU_Vector<double>& virial_per_atom)
 {
-  const int BLOCK_SIZE = 64;
+  const int BLOCK_SIZE = 128;
   const int N = type.size();
   const int grid_size = (N2 - N1 - 1) / BLOCK_SIZE + 1;
 
@@ -655,8 +691,9 @@ void UF3::compute(
   if (has_2b) {
     find_force_uf3_2b<<<grid_size, BLOCK_SIZE>>>(
       N, N1, N2, box,
-      two_body.d_coeff.data(), two_body.nint, two_body.knot_type,
-      two_body.knot_min, two_body.knot_delta, two_body.d_knots.data(), two_body.rc,
+      two_body.d_coeff.data(), two_body.nint,
+      two_body.knot_min, two_body.inv_knot_delta,
+      (float)two_body.rc,
       neighbor.NN.data(), neighbor.NL.data(),
       position_per_atom.data(),
       position_per_atom.data() + N,
@@ -678,10 +715,10 @@ void UF3::compute(
       three_body.d_basis_ij.data(), three_body.nint_ij,
       three_body.d_basis_ik.data(), three_body.nint_ik,
       three_body.d_basis_jk.data(), three_body.nint_jk,
-      three_body.knot_min_ij, three_body.knot_delta_ij,
-      three_body.knot_min_ik, three_body.knot_delta_ik,
-      three_body.knot_min_jk, three_body.knot_delta_jk,
-      three_body.rc_ij, three_body.rc_ik, three_body.rc_jk,
+      three_body.knot_min_ij, three_body.knot_delta_ij, three_body.inv_knot_delta_ij,
+      three_body.knot_min_ik, three_body.knot_delta_ik, three_body.inv_knot_delta_ik,
+      three_body.knot_min_jk, three_body.knot_delta_jk, three_body.inv_knot_delta_jk,
+      (float)three_body.rc_ij, (float)three_body.rc_ik, (float)three_body.rc_jk,
       neighbor.NN.data(), neighbor.NL.data(),
       position_per_atom.data(),
       position_per_atom.data() + N,
