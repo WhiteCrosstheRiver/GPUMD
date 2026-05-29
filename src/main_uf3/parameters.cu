@@ -64,12 +64,9 @@ static void apply_global_token(UF3_Parameters& para, const std::vector<std::stri
     for (int n = 0; n < para.num_types; n++) {
       para.elements.push_back(tokens[2 + n]);
     }
-  } else if (tokens[0] == "batch") {
-    para.batch = get_int_from_token(tokens[1], __FILE__, __LINE__);
-  } else if (tokens[0] == "population") {
-    para.population = get_int_from_token(tokens[1], __FILE__, __LINE__);
-  } else if (tokens[0] == "generation") {
-    para.generation = get_int_from_token(tokens[1], __FILE__, __LINE__);
+  } else if (tokens[0] == "batch" || tokens[0] == "population" || tokens[0] == "generation") {
+    printf("Error: '%s' must be inside an optimizer block.\n", tokens[0].c_str());
+    PRINT_INPUT_ERROR("Move this parameter into an 'optimizer start ... end' block.");
   } else if (tokens[0] == "lambda_e") {
     para.lambda_e = get_double_from_token(tokens[1], __FILE__, __LINE__);
   } else if (tokens[0] == "lambda_f") {
@@ -81,11 +78,7 @@ static void apply_global_token(UF3_Parameters& para, const std::vector<std::stri
   } else if (tokens[0] == "lambda_2") {
     para.lambda_2 = get_double_from_token(tokens[1], __FILE__, __LINE__);
   } else if (tokens[0] == "optimizer") {
-    if (tokens.size() >= 3 && tokens[1] == "start") {
-      PRINT_INPUT_ERROR("optimizer start must be closed with optimizer end.");
-    } else if (tokens.size() >= 2) {
-      para.optimizer = tokens[1];
-    }
+    PRINT_INPUT_ERROR("Use 'optimizer start <name> ... optimizer end <name>' block syntax.");
   } else if (tokens[0] == "train_data") {
     para.train_data = tokens[1];
   } else if (tokens[0] == "test_data") {
@@ -93,34 +86,15 @@ static void apply_global_token(UF3_Parameters& para, const std::vector<std::stri
   }
 }
 
-void finalize_uf3_optimizer_stages(UF3_Parameters& para)
-{
-  if (!para.stages.empty()) {
-    return;
-  }
-  UF3_OptimizerStage stage;
-  stage.name = para.optimizer;
-  stage.generation = para.generation;
-  stage.population = para.population;
-  stage.batch = para.batch;
-  if (stage.name == "lstsq") {
-    stage.full_batch = true;
-    stage.generation = 1;
-  }
-  para.stages.push_back(stage);
-}
-
 static void print_optimizer_stage_line(
-  size_t index, const UF3_OptimizerStage& stage, int global_batch)
+  size_t index, const UF3_OptimizerStage& stage)
 {
   printf("  [%zu] %s: generation=%d population=%d",
          index, stage.name.c_str(), stage.generation, stage.population);
   if (stage.full_batch) {
     printf(" batch=full");
-  } else if (stage.batch >= 0) {
-    printf(" batch=%d", stage.batch);
   } else {
-    printf(" batch=global(%d)", global_batch);
+    printf(" batch=%d", stage.batch);
   }
   printf("\n");
 }
@@ -129,7 +103,7 @@ static void print_optimizer_stages(const char* title, const UF3_Parameters& para
 {
   printf("%s\n", title);
   for (size_t s = 0; s < para.stages.size(); s++) {
-    print_optimizer_stage_line(s, para.stages[s], para.batch);
+    print_optimizer_stage_line(s, para.stages[s]);
   }
 }
 
@@ -177,6 +151,46 @@ void normalize_uf3_optimizer_stages(UF3_Parameters& para)
   }
 }
 
+static void validate_optimizer_stages(UF3_Parameters& para)
+{
+  if (para.stages.empty()) {
+    PRINT_INPUT_ERROR("No optimizer stages. Use 'optimizer start <name> ... end' blocks.");
+  }
+
+  int max_batch = 0;
+  for (size_t i = 0; i < para.stages.size(); i++) {
+    auto& s = para.stages[i];
+
+    if (s.name == "lstsq") {
+      if (!s.full_batch && s.batch <= 0) {
+        PRINT_INPUT_ERROR("lstsq block requires 'batch full' or 'batch <N>'.");
+      }
+    } else {
+      if (s.batch <= 0) {
+        printf("Error: stage [%zu] '%s' requires 'batch <N>'.\n", i, s.name.c_str());
+        PRINT_INPUT_ERROR("Missing batch in optimizer block.");
+      }
+      max_batch = std::max(max_batch, s.batch);
+      if (s.generation <= 0) {
+        printf("Error: stage [%zu] '%s' requires 'generation <N>'.\n", i, s.name.c_str());
+        PRINT_INPUT_ERROR("Missing generation in optimizer block.");
+      }
+    }
+
+    if ((s.name == "snes" || s.name == "es") && s.population <= 0) {
+      printf("Error: stage [%zu] '%s' requires 'population <N>'.\n", i, s.name.c_str());
+      PRINT_INPUT_ERROR("Missing population in optimizer block.");
+    }
+
+    if ((s.name == "adam" || s.name == "lbfgs" || s.name == "lstsq") && s.population > 0) {
+      printf("Warning: stage [%zu] %s ignores population=%d.\n",
+             i, s.name.c_str(), s.population);
+    }
+  }
+
+  para.batch = max_batch > 0 ? max_batch : 1000;
+}
+
 void parse_uf3_parameters(const char* input_file, UF3_Parameters& para)
 {
   std::ifstream input(input_file);
@@ -201,13 +215,7 @@ void parse_uf3_parameters(const char* input_file, UF3_Parameters& para)
       in_block = true;
       current = UF3_OptimizerStage{};
       current.name = tokens[2];
-      current.generation = para.generation;
-      current.population = para.population;
-      current.batch = -1;
       current.full_batch = (current.name == "lstsq");
-      if (current.name == "lstsq") {
-        current.generation = 1;
-      }
       continue;
     }
 
@@ -236,7 +244,7 @@ void parse_uf3_parameters(const char* input_file, UF3_Parameters& para)
     PRINT_INPUT_ERROR("Unclosed optimizer block (missing optimizer end).");
   }
 
-  finalize_uf3_optimizer_stages(para);
+  validate_optimizer_stages(para);
   normalize_uf3_optimizer_stages(para);
 
   printf("UF3 training parameters:\n");
@@ -248,7 +256,7 @@ void parse_uf3_parameters(const char* input_file, UF3_Parameters& para)
     printf("%s%s", para.elements[n].c_str(), n < para.num_types - 1 ? " " : "");
   }
   printf(")\n");
-  printf("  global batch = %d\n", para.batch);
+  printf("  batch = %d (max across stages)\n", para.batch);
   printf("  training data = %s\n", para.train_data.c_str());
   printf("  test data = %s\n", para.test_data.c_str());
   print_optimizer_stages("  optimizer stages (execution order):", para);

@@ -19,9 +19,9 @@
 
 struct UF3_OptimizerStage {
   std::string name = "adam";
-  int generation = 5000;
-  int population = 50;
-  int batch = -1;        // -1: inherit global batch
+  int generation = 0;
+  int population = 0;
+  int batch = 0;           // >0 for non-lstsq; lstsq can use batch full
   bool full_batch = false; // lstsq: use all training frames
 };
 
@@ -34,10 +34,7 @@ struct UF3_Parameters {
   int num_types = 1;
   std::string knot_type_str = "uk";
 
-  int batch = 1000;
-  int population = 50;
-  std::string optimizer = "adam";
-  int generation = 5000;
+  int batch = 1000;  // computed from stage max batch
   double lambda_e = 1.0;
   double lambda_f = 1.0;
   double lambda_v = 0.1;
@@ -51,5 +48,4 @@ struct UF3_Parameters {
 };
 
 void parse_uf3_parameters(const char* input_file, UF3_Parameters& para);
-void finalize_uf3_optimizer_stages(UF3_Parameters& para);
 void normalize_uf3_optimizer_stages(UF3_Parameters& para);

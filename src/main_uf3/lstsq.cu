@@ -249,7 +249,7 @@ void run_lstsq(
   const auto& ds = fitness.dataset();
   int use_frames = ds.num_frames;
   if (!stage.full_batch) {
-    int cap = stage.batch >= 0 ? stage.batch : para.batch;
+    int cap = stage.batch;
     use_frames = std::min(ds.num_frames, cap);
   }
 
