@@ -164,8 +164,41 @@ __device__ __forceinline__ float eval_cubic(float4 c, float u)
 
 __device__ __forceinline__ float eval_cubic_deriv(float4 c, float u)
 {
-  // c.y + u*(2*c.z + u*3*c.w)
   return __fmaf_rn(u, __fmaf_rn(u, 3.0f * c.w, 2.0f * c.z), c.y);
+}
+
+// ---------------------------------------------------------------------------
+// Device helper: uniform cubic B-spline basis and derivatives — direct arithmetic.
+//
+// For uniform knots, the 4 active basis functions are the same constants on
+// every interval (they depend only on the local coordinate u ∈ [0,1]).
+// Storing and loading a per-interval GPU table wastes L2 bandwidth on
+// identical values; direct evaluation costs ~10 FMAs and zero memory traffic.
+//
+// Basis (p=0..3):
+//   B0 = (1-u)³/6,  B1 = (3u³-6u²+4)/6
+//   B2 = (-3u³+3u²+3u+1)/6,  B3 = u³/6
+// Derivatives d/du × inv_kd = d/dr:
+//   dB0 = -(1-u)²/2,  dB1 = (3u²-4u)/2
+//   dB2 = (-3u²+2u+1)/2,  dB3 = u²/2   (all × inv_kd)
+// ---------------------------------------------------------------------------
+__device__ __forceinline__ void eval_bspline4(float u, float b[4])
+{
+  float u2 = u * u, u3 = u2 * u;
+  const float inv6 = 1.0f / 6.0f;
+  b[0] = (1.0f - 3.0f*u + 3.0f*u2 - u3) * inv6;
+  b[1] = (4.0f - 6.0f*u2 + 3.0f*u3) * inv6;
+  b[2] = (1.0f + 3.0f*u + 3.0f*u2 - 3.0f*u3) * inv6;
+  b[3] = u3 * inv6;
+}
+
+__device__ __forceinline__ void eval_bspline4_deriv(float u, float inv_kd, float db[4])
+{
+  float om = 1.0f - u, u2 = u * u;
+  db[0] = -om * om * 0.5f * inv_kd;
+  db[1] = u * (3.0f*u - 4.0f) * 0.5f * inv_kd;
+  db[2] = (-3.0f*u2 + 2.0f*u + 1.0f) * 0.5f * inv_kd;
+  db[3] = u2 * 0.5f * inv_kd;
 }
 
 // ---------------------------------------------------------------------------
@@ -299,137 +332,145 @@ static __global__ void find_force_uf3_2b(
 }
 
 // ---------------------------------------------------------------------------
-// 3-body kernel  (Tersoff-style partial force accumulation)
+// 3-body kernel v2 — optimized (Tersoff-style partial force accumulation)
+//
+// Key improvements over v1:
+//   1. float4 packed positions — 1×128-bit read vs 3×64-bit double per atom.
+//   2. rsqrtf for all three distances (saves one division each).
+//   3. ij-basis hoisted out of inner k-loop — b_ij/db_ij depend only on r12
+//      (fixed in the j-loop), saving 8 FMAs + 12 float4 L2 reads per inner iter.
+//   4. Direct B-spline evaluation — uniform basis functions are identical for
+//      every interval; no GPU table lookups needed.
+//   5. Middle-loop product precompute (bpbq, dbpbq, bpdbq) + inner row-sum
+//      (Rv = Σ C·b_jk, Rd23 = Σ C·db_jk) reduces inner-loop muls by ~50%.
 // ---------------------------------------------------------------------------
 static __global__ void find_force_uf3_3b(
   const int N, const int N1, const int N2,
   const Box box,
   const float* __restrict__ d_tensor,
   int nc_ij, int nc_ik, int nc_jk,
-  const float4* __restrict__ d_basis_ij, int nint_ij,
-  const float4* __restrict__ d_basis_ik, int nint_ik,
-  const float4* __restrict__ d_basis_jk, int nint_jk,
+  int nint_ij, int nint_ik, int nint_jk,
   float knot_min_ij, float knot_delta_ij, float inv_knot_delta_ij,
   float knot_min_ik, float knot_delta_ik, float inv_knot_delta_ik,
   float knot_min_jk, float knot_delta_jk, float inv_knot_delta_jk,
   float rc_ij, float rc_ik, float rc_jk,
   const int* __restrict__ g_NN,
   const int* __restrict__ g_NL,
-  const double* __restrict__ g_x,
-  const double* __restrict__ g_y,
-  const double* __restrict__ g_z,
+  const float4* __restrict__ g_pos,        // packed float4 positions (x,y,z,0)
   float* g_f12x, float* g_f12y, float* g_f12z,
   double* g_pe)
 {
   int n1 = blockIdx.x * blockDim.x + threadIdx.x + N1;
   if (n1 >= N2) return;
 
-  int NN = g_NN[n1];
-  double x1 = g_x[n1], y1 = g_y[n1], z1 = g_z[n1];
+  const int NN = g_NN[n1];
+  const float4 pos1 = g_pos[n1];
+  const float x1 = pos1.x, y1 = pos1.y, z1 = pos1.z;
   float pe = 0.0f;
 
   for (int j1 = 0; j1 < NN; ++j1) {
-    int n2 = g_NL[n1 + N * j1];
-    float x12 = g_x[n2] - x1;
-    float y12 = g_y[n2] - y1;
-    float z12 = g_z[n2] - z1;
+    const int n2 = g_NL[n1 + N * j1];
+    const float4 pos2 = __ldg(&g_pos[n2]);
+    float x12 = pos2.x - x1, y12 = pos2.y - y1, z12 = pos2.z - z1;
     apply_mic(box, x12, y12, z12);
-    float r12 = sqrtf(x12*x12 + y12*y12 + z12*z12);
+    const float d12sq = x12*x12 + y12*y12 + z12*z12;
+    const float inv_r12 = rsqrtf(d12sq);
+    const float r12 = d12sq * inv_r12;
     if (r12 >= rc_ij) continue;
 
+    // ij-basis: hoisted here — only r12 (j-loop outer var) determines these
+    int mi = (int)((r12 - knot_min_ij) * inv_knot_delta_ij);
+    if (mi < 0) mi = 0; else if (mi >= nint_ij) mi = nint_ij - 1;
+    const float ui = (r12 - knot_min_ij - mi * knot_delta_ij) * inv_knot_delta_ij;
+    float b_ij[4], db_ij[4];
+    eval_bspline4(ui, b_ij);
+    eval_bspline4_deriv(ui, inv_knot_delta_ij, db_ij);
+    const int p0 = (mi >= 3) ? mi - 3 : 0;
+
     for (int k1 = j1 + 1; k1 < NN; ++k1) {
-      int n3 = g_NL[n1 + N * k1];
-      float x13 = g_x[n3] - x1;
-      float y13 = g_y[n3] - y1;
-      float z13 = g_z[n3] - z1;
+      const int n3 = g_NL[n1 + N * k1];
+      const float4 pos3 = __ldg(&g_pos[n3]);
+      float x13 = pos3.x - x1, y13 = pos3.y - y1, z13 = pos3.z - z1;
       apply_mic(box, x13, y13, z13);
-      float r13 = sqrtf(x13*x13 + y13*y13 + z13*z13);
+      const float d13sq = x13*x13 + y13*y13 + z13*z13;
+      const float inv_r13 = rsqrtf(d13sq);
+      const float r13 = d13sq * inv_r13;
       if (r13 >= rc_ik) continue;
 
-      float x23 = g_x[n3] - g_x[n2];
-      float y23 = g_y[n3] - g_y[n2];
-      float z23 = g_z[n3] - g_z[n2];
+      // n2-n3 distance from raw positions (independent of MIC-corrected x12/x13)
+      float x23 = pos3.x - pos2.x, y23 = pos3.y - pos2.y, z23 = pos3.z - pos2.z;
       apply_mic(box, x23, y23, z23);
-      float r23 = sqrtf(x23*x23 + y23*y23 + z23*z23);
+      const float d23sq = x23*x23 + y23*y23 + z23*z23;
+      const float inv_r23 = rsqrtf(d23sq);
+      const float r23 = d23sq * inv_r23;
       if (r23 >= rc_jk) continue;
 
-      // Evaluate basis values for each dimension
-      int mi = find_interval(r12, knot_min_ij, inv_knot_delta_ij, nint_ij);
-      int mk = find_interval(r13, knot_min_ik, inv_knot_delta_ik, nint_ik);
-      int mj = find_interval(r23, knot_min_jk, inv_knot_delta_jk, nint_jk);
-
-      float ui = (r12 - (knot_min_ij + mi * knot_delta_ij)) * inv_knot_delta_ij;
-      float uk = (r13 - (knot_min_ik + mk * knot_delta_ik)) * inv_knot_delta_ik;
-      float uj = (r23 - (knot_min_jk + mj * knot_delta_jk)) * inv_knot_delta_jk;
-
-      float b_ij[4], db_ij[4];
+      // ik-basis
+      int mk = (int)((r13 - knot_min_ik) * inv_knot_delta_ik);
+      if (mk < 0) mk = 0; else if (mk >= nint_ik) mk = nint_ik - 1;
+      const float uk = (r13 - knot_min_ik - mk * knot_delta_ik) * inv_knot_delta_ik;
       float b_ik[4], db_ik[4];
+      eval_bspline4(uk, b_ik);
+      eval_bspline4_deriv(uk, inv_knot_delta_ik, db_ik);
+      const int q0 = (mk >= 3) ? mk - 3 : 0;
+
+      // jk-basis
+      int mj = (int)((r23 - knot_min_jk) * inv_knot_delta_jk);
+      if (mj < 0) mj = 0; else if (mj >= nint_jk) mj = nint_jk - 1;
+      const float uj = (r23 - knot_min_jk - mj * knot_delta_jk) * inv_knot_delta_jk;
       float b_jk[4], db_jk[4];
+      eval_bspline4(uj, b_jk);
+      eval_bspline4_deriv(uj, inv_knot_delta_jk, db_jk);
+      const int r0 = (mj >= 3) ? mj - 3 : 0;
 
-      #pragma unroll
-      for (int p = 0; p < 4; p++) {
-        float4 cb = __ldg(&d_basis_ij[mi * 4 + p]);
-        b_ij[p] = eval_cubic(cb, ui);
-        db_ij[p] = eval_cubic_deriv(cb, ui) * inv_knot_delta_ij;
-      }
-      #pragma unroll
-      for (int p = 0; p < 4; p++) {
-        float4 cb = __ldg(&d_basis_ik[mk * 4 + p]);
-        b_ik[p] = eval_cubic(cb, uk);
-        db_ik[p] = eval_cubic_deriv(cb, uk) * inv_knot_delta_ik;
-      }
-      #pragma unroll
-      for (int p = 0; p < 4; p++) {
-        float4 cb = __ldg(&d_basis_jk[mj * 4 + p]);
-        b_jk[p] = eval_cubic(cb, uj);
-        db_jk[p] = eval_cubic_deriv(cb, uj) * inv_knot_delta_jk;
-      }
-
-      // Starting indices for active basis functions on this interval
-      int p0 = mi - 3; if (p0 < 0) p0 = 0;
-      int q0 = mk - 3; if (q0 < 0) q0 = 0;
-      int r0 = mj - 3; if (r0 < 0) r0 = 0;
-
-      // Tensor contraction (4x4x4 = 64 terms)
+      // Tensor contraction with middle-loop product precompute + inner row-sums.
+      // val/dv_d12/dv_d13 share the same jk row-sum Rv = Σ_r C·b_jk[r].
+      // dv_d23 uses Rd23 = Σ_r C·db_jk[r].  Middle-loop computes 3 products
+      // (bpbq, dbpbq, bpdbq) once per (dp,dq) pair instead of 4 per (dp,dq,dr).
       float val = 0, dv_d12 = 0, dv_d13 = 0, dv_d23 = 0;
+      #pragma unroll 4
       for (int dp = 0; dp < 4; dp++) {
-        int p = p0 + dp;
-        if (p >= nc_ij) continue;
-        float bp = b_ij[dp], dbp = db_ij[dp];
-        int p_stride = p;
+        const int p = p0 + dp;
+        if (p >= nc_ij) break;
+        const float bp = b_ij[dp], dbp = db_ij[dp];
 
+        #pragma unroll 4
         for (int dq = 0; dq < 4; dq++) {
-          int q = q0 + dq;
-          if (q >= nc_ik) continue;
-          float bq = b_ik[dq], dbq = db_ik[dq];
-          int pq_stride = p_stride + q * nc_ij;
+          const int q = q0 + dq;
+          if (q >= nc_ik) break;
+          const float bpbq  = bp  * b_ik[dq];
+          const float dbpbq = dbp * b_ik[dq];
+          const float bpdbq = bp  * db_ik[dq];
+          const int pq_off  = p + q * nc_ij;
 
+          float Rv = 0, Rd23 = 0;
+          #pragma unroll 4
           for (int dr = 0; dr < 4; dr++) {
-            int r = r0 + dr;
-            if (r >= nc_jk) continue;
-            float br = b_jk[dr], dbr = db_jk[dr];
-            float C = __ldg(&d_tensor[pq_stride + r * nc_ij * nc_ik]);
-
-            val     += C * bp * bq * br;
-            dv_d12 += C * dbp * bq * br;
-            dv_d13 += C * bp * dbq * br;
-            dv_d23 += C * bp * bq * dbr;
+            const int r = r0 + dr;
+            if (r >= nc_jk) break;
+            const float C = __ldg(&d_tensor[pq_off + r * nc_ij * nc_ik]);
+            Rv   += C * b_jk[dr];
+            Rd23 += C * db_jk[dr];
           }
+
+          val    += bpbq  * Rv;
+          dv_d12 += dbpbq * Rv;
+          dv_d13 += bpdbq * Rv;
+          dv_d23 += bpbq  * Rd23;
         }
       }
 
-      pe += val / 3.0f;  // each triplet counted 3 times (once per center)
+      pe += val / 3.0f;  // each triplet counted 3× (once per center atom)
 
-      float inv_r12 = 1.0f / r12, inv_r13 = 1.0f / r13;
-      float fij_s = dv_d12 * inv_r12 * 0.5f;
-      float fik_s = dv_d13 * inv_r13 * 0.5f;
+      const float fij_s = dv_d12 * inv_r12 * 0.5f;
+      const float fik_s = dv_d13 * inv_r13 * 0.5f;
 
-      int idx_12 = j1 * N + n1;
+      const int idx_12 = j1 * N + n1;
       g_f12x[idx_12] += fij_s * x12;
       g_f12y[idx_12] += fij_s * y12;
       g_f12z[idx_12] += fij_s * z12;
 
-      int idx_13 = k1 * N + n1;
+      const int idx_13 = k1 * N + n1;
       g_f12x[idx_13] += fik_s * x13;
       g_f12y[idx_13] += fik_s * y13;
       g_f12z[idx_13] += fik_s * z13;
@@ -613,26 +654,6 @@ void UF3::initialize(const char* filename, const int number_of_atoms)
         for (int c = 0; c < row_len; c++) iss2 >> tensor[offset + c];
       }
 
-      // Pre-compute basis polynomials
-      {
-        std::vector<float4> h_basis;
-        precompute_3b_basis_uniform(k_ij, leading_trim, h_basis);
-        three_body.d_basis_ij.resize(h_basis.size());
-        three_body.d_basis_ij.copy_from_host(h_basis.data());
-      }
-      {
-        std::vector<float4> h_basis;
-        precompute_3b_basis_uniform(k_ik, leading_trim, h_basis);
-        three_body.d_basis_ik.resize(h_basis.size());
-        three_body.d_basis_ik.copy_from_host(h_basis.data());
-      }
-      {
-        std::vector<float4> h_basis;
-        precompute_3b_basis_uniform(k_jk, leading_trim, h_basis);
-        three_body.d_basis_jk.resize(h_basis.size());
-        three_body.d_basis_jk.copy_from_host(h_basis.data());
-      }
-
       // Upload coefficient tensor
       three_body.d_tensor.resize(tensor.size());
       three_body.d_tensor.copy_from_host(tensor.data());
@@ -647,11 +668,6 @@ void UF3::initialize(const char* filename, const int number_of_atoms)
       three_body.inv_knot_delta_ij = 1.0f / three_body.knot_delta_ij;
       three_body.inv_knot_delta_ik = 1.0f / three_body.knot_delta_ik;
       three_body.inv_knot_delta_jk = 1.0f / three_body.knot_delta_jk;
-
-      // Upload knot arrays
-      three_body.d_knots_ij.resize(k_ij.size()); three_body.d_knots_ij.copy_from_host(k_ij.data());
-      three_body.d_knots_ik.resize(k_ik.size()); three_body.d_knots_ik.copy_from_host(k_ik.data());
-      three_body.d_knots_jk.resize(k_jk.size()); three_body.d_knots_jk.copy_from_host(k_jk.data());
 
       has_3b = true;
     }
@@ -728,22 +744,17 @@ void UF3::compute(
   }
 
   if (has_3b) {
-    // 3B kernel DISABLED for debugging non-uniform 2B crash
-    if (0) { find_force_uf3_3b<<<grid_size, BLOCK_SIZE>>>(
+    find_force_uf3_3b<<<grid_size, BLOCK_SIZE>>>(
       N, N1, N2, box,
       three_body.d_tensor.data(),
       three_body.nc_ij, three_body.nc_ik, three_body.nc_jk,
-      three_body.d_basis_ij.data(), three_body.nint_ij,
-      three_body.d_basis_ik.data(), three_body.nint_ik,
-      three_body.d_basis_jk.data(), three_body.nint_jk,
+      three_body.nint_ij, three_body.nint_ik, three_body.nint_jk,
       three_body.knot_min_ij, three_body.knot_delta_ij, three_body.inv_knot_delta_ij,
       three_body.knot_min_ik, three_body.knot_delta_ik, three_body.inv_knot_delta_ik,
       three_body.knot_min_jk, three_body.knot_delta_jk, three_body.inv_knot_delta_jk,
       (float)three_body.rc_ij, (float)three_body.rc_ik, (float)three_body.rc_jk,
       neighbor.NN.data(), neighbor.NL.data(),
-      position_per_atom.data(),
-      position_per_atom.data() + N,
-      position_per_atom.data() + N * 2,
+      d_pos_packed.data(),       // float4 packed positions (x,y,z,0)
       f12x.data(), f12y.data(), f12z.data(),
       potential_per_atom.data());
     GPU_CHECK_KERNEL
@@ -755,10 +766,9 @@ void UF3::compute(
       f12x.data(),
       f12y.data(),
       f12z.data(),
-      false, // is_dipole
+      false,
       position_per_atom,
       force_per_atom,
       virial_per_atom);
-  } // close if(0)
   }
 }

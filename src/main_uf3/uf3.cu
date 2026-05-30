@@ -28,6 +28,25 @@ __device__ inline int uf3_find_interval(float r, float kmin, float kdelta, int n
   return i;
 }
 
+// Uniform cubic B-spline basis and derivatives — direct arithmetic (no table).
+// Basis: B0=(1-u)³/6, B1=(3u³-6u²+4)/6, B2=(-3u³+3u²+3u+1)/6, B3=u³/6
+// Derivative ×inv_kd: dB0=-(1-u)²/2, dB1=(3u²-4u)/2, dB2=(-3u²+2u+1)/2, dB3=u²/2
+__device__ inline void uf3_bspline4(float u, float b[4]) {
+  float u2 = u*u, u3 = u2*u;
+  const float inv6 = 1.0f/6.0f;
+  b[0] = (1.0f - 3.0f*u + 3.0f*u2 - u3) * inv6;
+  b[1] = (4.0f - 6.0f*u2 + 3.0f*u3) * inv6;
+  b[2] = (1.0f + 3.0f*u + 3.0f*u2 - 3.0f*u3) * inv6;
+  b[3] = u3 * inv6;
+}
+__device__ inline void uf3_bspline4_deriv(float u, float inv_kd, float db[4]) {
+  float om = 1.0f - u, u2 = u*u;
+  db[0] = -om*om * 0.5f * inv_kd;
+  db[1] = u*(3.0f*u - 4.0f) * 0.5f * inv_kd;
+  db[2] = (-3.0f*u2 + 2.0f*u + 1.0f) * 0.5f * inv_kd;
+  db[3] = u2 * 0.5f * inv_kd;
+}
+
 // ---- 2B kernel (multi-threaded: each thread handles some atoms) -----------
 static __global__ void uf3_eval_2b(
   int nf, const int* __restrict__ fidx, const int* __restrict__ nat,
@@ -78,12 +97,14 @@ static __global__ void uf3_eval_2b_force(
     for (int j = 0; j < n; j++) {
       if (i == j) continue;
       float dx = x[o+i]-x[o+j], dy = y[o+i]-y[o+j], dz = z[o+i]-z[o+j];
-      float r = sqrtf(dx*dx+dy*dy+dz*dz); if (r >= rc) continue;
+      float d2 = dx*dx+dy*dy+dz*dz;
+      float rinv = rsqrtf(d2);
+      float r = d2 * rinv;
+      if (r >= rc) continue;
       int m = uf3_find_interval(r, kmin, kd, nint);
       float u = (r - (kmin + m*kd)) / kd;
       float4 c = __ldg(&coeff[tmap[typ[o+i]*nt+typ[o+j]] * nint + m]);
-      float deriv = (c.y + u * (2.0f*c.z + u * 3.0f*c.w)) / kd;
-      float f = deriv / r;
+      float f = (c.y + u * (2.0f*c.z + u * 3.0f*c.w)) * (rinv / kd);
       fxi += f * dx; fyi += f * dy; fzi += f * dz;
     }
     fx[o+i] = fxi; fy[o+i] = fyi; fz[o+i] = fzi;
@@ -153,12 +174,14 @@ static __global__ void uf3_eval_2b_force_pop(
     for (int j = 0; j < n; j++) {
       if (i == j) continue;
       float dx = x[o+i]-x[o+j], dy = y[o+i]-y[o+j], dz = z[o+i]-z[o+j];
-      float r = sqrtf(dx*dx + dy*dy + dz*dz); if (r >= rc) continue;
+      float d2 = dx*dx + dy*dy + dz*dz;
+      float rinv = rsqrtf(d2);
+      float r = d2 * rinv;
+      if (r >= rc) continue;
       int m = uf3_find_interval(r, kmin, kd, nint);
       float u = (r - (kmin + m*kd)) / kd;
       float4 c = __ldg(&coeff_p[tmap[typ[o+i]*nt + typ[o+j]] * nint + m]);
-      float deriv = (c.y + u * (2.0f*c.z + u * 3.0f*c.w)) / kd;
-      float f = deriv / r;
+      float f = (c.y + u * (2.0f*c.z + u * 3.0f*c.w)) * (rinv / kd);
       fxi += f * dx; fyi += f * dy; fzi += f * dz;
     }
     fx_p[o+i] = fxi; fy_p[o+i] = fyi; fz_p[o+i] = fzi;
@@ -341,31 +364,50 @@ static __global__ void uf3_eval_3b(
     // Iterate over all pairs (j,k) from i's neighbor list
     for (int jj = 0; jj < nni; jj++) {
       int j = nn_lst[nn_start + jj];
-      if (j <= i) continue; // ensure unique triplets: i < j < k
+      if (j <= i) continue; // unique triplets: i < j < k
       float dx12=x[o+j]-x[o+i], dy12=y[o+j]-y[o+i], dz12=z[o+j]-z[o+i];
-      float r12=sqrtf(dx12*dx12+dy12*dy12+dz12*dz12); if (r12>=rc0) continue;
+      float d12sq = dx12*dx12+dy12*dy12+dz12*dz12;
+      float r12 = d12sq * rsqrtf(d12sq);
+      if (r12>=rc0) continue;
       int tj=typ[o+j];
+
+      // ij-basis hoisted: r12 is fixed for this jj iteration
+      int m0 = uf3_find_interval(r12,km0,kd0,ni0);
+      float u0 = (r12-(km0+m0*kd0))/kd0;
+      float vb0[4]; uf3_bspline4(u0, vb0);
+      int p0 = m0-3; if(p0<0) p0=0;
 
       for (int kk = jj+1; kk < nni; kk++) {
         int k = nn_lst[nn_start + kk];
         if (k <= j) continue;
         float dx13=x[o+k]-x[o+i], dy13=y[o+k]-y[o+i], dz13=z[o+k]-z[o+i];
-        float r13=sqrtf(dx13*dx13+dy13*dy13+dz13*dz13); if (r13>=rc1) continue;
+        float d13sq = dx13*dx13+dy13*dy13+dz13*dz13;
+        float r13 = d13sq * rsqrtf(d13sq);
+        if (r13>=rc1) continue;
         float dx23=x[o+k]-x[o+j], dy23=y[o+k]-y[o+j], dz23=z[o+k]-z[o+j];
-        float r23=sqrtf(dx23*dx23+dy23*dy23+dz23*dz23); if (r23>=rc2) continue;
+        float d23sq = dx23*dx23+dy23*dy23+dz23*dz23;
+        float r23 = d23sq * rsqrtf(d23sq);
+        if (r23>=rc2) continue;
         int tk=typ[o+k];
-        int m0=uf3_find_interval(r12,km0,kd0,ni0), m1=uf3_find_interval(r13,km1,kd1,ni1), m2=uf3_find_interval(r23,km2,kd2,ni2);
-        float u0=(r12-(km0+m0*kd0))/kd0, u1=(r13-(km1+m1*kd1))/kd1, u2=(r23-(km2+m2*kd2))/kd2;
-        float vb0[4],vb1[4],vb2[4];
-        for(int p=0;p<4;p++){vb0[p]=uf3_eval_cubic(__ldg(&b0[m0*4+p]),u0);}
-        for(int p=0;p<4;p++){vb1[p]=uf3_eval_cubic(__ldg(&b1[m1*4+p]),u1);}
-        for(int p=0;p<4;p++){vb2[p]=uf3_eval_cubic(__ldg(&b2[m2*4+p]),u2);}
-        int p0=m0-3;if(p0<0)p0=0;int p1=m1-3;if(p1<0)p1=0;int p2=m2-3;if(p2<0)p2=0;
+        int m1=uf3_find_interval(r13,km1,kd1,ni1), m2=uf3_find_interval(r23,km2,kd2,ni2);
+        float u1=(r13-(km1+m1*kd1))/kd1, u2=(r23-(km2+m2*kd2))/kd2;
+        float vb1[4],vb2[4];
+        uf3_bspline4(u1, vb1);
+        uf3_bspline4(u2, vb2);
+        int p1=m1-3;if(p1<0)p1=0;int p2=m2-3;if(p2<0)p2=0;
         const float* C=&tensor[tmap[(ti*nt+tj)*nt+tk]*nc0*nc1*nc2];
-        for(int dp=0;dp<4;dp++){int q=p0+dp;if(q>=nc0)continue;float bp=vb0[dp];
-        for(int dq=0;dq<4;dq++){int r=p1+dq;if(r>=nc1)continue;float bq=vb1[dq];
-        for(int dr=0;dr<4;dr++){int s=p2+dr;if(s>=nc2)continue;
-        pe+=C[q+r*nc0+s*nc0*nc1]*bp*bq*vb2[dr];}}}
+        #pragma unroll 4
+        for(int dp=0;dp<4;dp++){int q=p0+dp;if(q>=nc0)break;float bp=vb0[dp];
+          #pragma unroll 4
+          for(int dq=0;dq<4;dq++){int r=p1+dq;if(r>=nc1)break;
+            float bpbq=bp*vb1[dq]; int pq_off=q+r*nc0;
+            float Rv=0;
+            #pragma unroll 4
+            for(int dr=0;dr<4;dr++){int s=p2+dr;if(s>=nc2)break;
+              Rv+=C[pq_off+s*nc0*nc1]*vb2[dr];}
+            pe+=bpbq*Rv;
+          }
+        }
       }
     }
   }
@@ -407,70 +449,80 @@ static __global__ void uf3_eval_3b_force(
       int j = nn_lst[nn_start + jj];
       if (j <= i) continue;
       float dx12=x[o+j]-x[o+i], dy12=y[o+j]-y[o+i], dz12=z[o+j]-z[o+i];
-      float r12=sqrtf(dx12*dx12+dy12*dy12+dz12*dz12); if (r12>=rc0) continue;
+      float d12sq = dx12*dx12+dy12*dy12+dz12*dz12;
+      float inv12 = rsqrtf(d12sq);
+      float r12 = d12sq * inv12;
+      if (r12>=rc0) continue;
       int tj=typ[o+j];
-      float inv12 = 1.0f/r12;
+
+      // ij-basis: hoisted out of inner kk-loop (r12 fixed in jj-loop)
+      int m0 = uf3_find_interval(r12, km0, kd0, ni0);
+      float u0 = (r12 - (km0 + m0*kd0)) / kd0;
+      float vb0[4], db0[4];
+      uf3_bspline4(u0, vb0);
+      uf3_bspline4_deriv(u0, 1.0f/kd0, db0);
+      int p0 = m0 - 3; if (p0 < 0) p0 = 0;
 
       for (int kk = jj+1; kk < nni; kk++) {
         int k = nn_lst[nn_start + kk];
         if (k <= j) continue;
         float dx13=x[o+k]-x[o+i], dy13=y[o+k]-y[o+i], dz13=z[o+k]-z[o+i];
-        float r13=sqrtf(dx13*dx13+dy13*dy13+dz13*dz13); if (r13>=rc1) continue;
+        float d13sq = dx13*dx13+dy13*dy13+dz13*dz13;
+        float inv13 = rsqrtf(d13sq);
+        float r13 = d13sq * inv13;
+        if (r13>=rc1) continue;
         float dx23=x[o+k]-x[o+j], dy23=y[o+k]-y[o+j], dz23=z[o+k]-z[o+j];
-        float r23=sqrtf(dx23*dx23+dy23*dy23+dz23*dz23); if (r23>=rc2) continue;
+        float d23sq = dx23*dx23+dy23*dy23+dz23*dz23;
+        float inv23 = rsqrtf(d23sq);
+        float r23 = d23sq * inv23;
+        if (r23>=rc2) continue;
         int tk=typ[o+k];
-        float inv13=1.0f/r13, inv23=1.0f/r23;
 
-        int m0=uf3_find_interval(r12,km0,kd0,ni0), m1=uf3_find_interval(r13,km1,kd1,ni1), m2=uf3_find_interval(r23,km2,kd2,ni2);
-        float u0=(r12-(km0+m0*kd0))/kd0, u1=(r13-(km1+m1*kd1))/kd1, u2=(r23-(km2+m2*kd2))/kd2;
+        int m1=uf3_find_interval(r13,km1,kd1,ni1), m2=uf3_find_interval(r23,km2,kd2,ni2);
+        float u1=(r13-(km1+m1*kd1))/kd1, u2=(r23-(km2+m2*kd2))/kd2;
 
-        // Basis values for energy
-        float vb0[4],vb1[4],vb2[4];
-        // Derivative basis for each dimension
-        float db0[4],db1[4],db2[4];
-        for(int p=0;p<4;p++){
-          float4 cb = __ldg(&b0[m0*4+p]); vb0[p]=uf3_eval_cubic(cb,u0);
-          db0[p] = (cb.y + u0*(2.0f*cb.z + u0*3.0f*cb.w)) / kd0;
-        }
-        for(int p=0;p<4;p++){
-          float4 cb = __ldg(&b1[m1*4+p]); vb1[p]=uf3_eval_cubic(cb,u1);
-          db1[p] = (cb.y + u1*(2.0f*cb.z + u1*3.0f*cb.w)) / kd1;
-        }
-        for(int p=0;p<4;p++){
-          float4 cb = __ldg(&b2[m2*4+p]); vb2[p]=uf3_eval_cubic(cb,u2);
-          db2[p] = (cb.y + u2*(2.0f*cb.z + u2*3.0f*cb.w)) / kd2;
-        }
+        float vb1[4],vb2[4],db1[4],db2[4];
+        uf3_bspline4(u1, vb1); uf3_bspline4_deriv(u1, 1.0f/kd1, db1);
+        uf3_bspline4(u2, vb2); uf3_bspline4_deriv(u2, 1.0f/kd2, db2);
 
-        int p0=m0-3;if(p0<0)p0=0; int p1=m1-3;if(p1<0)p1=0; int p2=m2-3;if(p2<0)p2=0;
+        int p1=m1-3;if(p1<0)p1=0; int p2=m2-3;if(p2<0)p2=0;
         const float* C=&tensor[tmap[(ti*nt+tj)*nt+tk]*nc0*nc1*nc2];
 
-        // Tensor contractions: dV/dr12, dV/dr13, dV/dr23
+        // Tensor contraction with middle-loop product precompute + row-sums
         float dv12=0, dv13=0, dv23=0;
-        for(int dp=0;dp<4;dp++){int q=p0+dp;if(q>=nc0)continue;
-        for(int dq=0;dq<4;dq++){int r=p1+dq;if(r>=nc1)continue;
-        for(int dr=0;dr<4;dr++){int s=p2+dr;if(s>=nc2)continue;
-          float Cv = C[q+r*nc0+s*nc0*nc1];
-          dv12 += Cv * db0[dp] * vb1[dq] * vb2[dr];
-          dv13 += Cv * vb0[dp] * db1[dq] * vb2[dr];
-          dv23 += Cv * vb0[dp] * vb1[dq] * db2[dr];
-        }}}
+        #pragma unroll 4
+        for(int dp=0;dp<4;dp++){
+          int q=p0+dp; if(q>=nc0) break;
+          float bp=vb0[dp], dbp=db0[dp];
+          #pragma unroll 4
+          for(int dq=0;dq<4;dq++){
+            int r=p1+dq; if(r>=nc1) break;
+            float bpbq=bp*vb1[dq], dbpbq=dbp*vb1[dq], bpdbq=bp*db1[dq];
+            int pq_off = q + r*nc0;
+            float Rv=0, Rd23=0;
+            #pragma unroll 4
+            for(int dr=0;dr<4;dr++){
+              int s=p2+dr; if(s>=nc2) break;
+              float Cv = C[pq_off + s*nc0*nc1];
+              Rv   += Cv * vb2[dr];
+              Rd23 += Cv * db2[dr];
+            }
+            dv12 += dbpbq * Rv;
+            dv13 += bpdbq * Rv;
+            dv23 += bpbq  * Rd23;
+          }
+        }
 
-        // Convert to Cartesian forces (negative gradient convention)
-        float f12 = -dv12 * inv12, f13 = -dv13 * inv13, f23 = -dv23 * inv23;
-
-        // Force on i: -dV/dri = -(d12*r̂12 + d13*r̂13) where d12 = dV/dr12
         float fix = -(dv12*inv12*dx12 + dv13*inv13*dx13);
         float fiy = -(dv12*inv12*dy12 + dv13*inv13*dy13);
         float fiz = -(dv12*inv12*dz12 + dv13*inv13*dz13);
         atomicAdd(&fx[o+i], fix); atomicAdd(&fy[o+i], fiy); atomicAdd(&fz[o+i], fiz);
 
-        // Force on j: -dV/drj = d12*r̂12 - d23*r̂23
         float fjx = dv12*inv12*dx12 - dv23*inv23*dx23;
         float fjy = dv12*inv12*dy12 - dv23*inv23*dy23;
         float fjz = dv12*inv12*dz12 - dv23*inv23*dz23;
         atomicAdd(&fx[o+j], fjx); atomicAdd(&fy[o+j], fjy); atomicAdd(&fz[o+j], fjz);
 
-        // Force on k: -dV/drk = d13*r̂13 + d23*r̂23
         float fkx = dv13*inv13*dx13 + dv23*inv23*dx23;
         float fky = dv13*inv13*dy13 + dv23*inv23*dy23;
         float fkz = dv13*inv13*dz13 + dv23*inv23*dz23;

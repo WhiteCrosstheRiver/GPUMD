@@ -59,12 +59,8 @@ private:
   // ---- 3-body data ----
   struct {
     GPU_Vector<float> d_tensor;      // flattened coefficient tensor [nc_ij*nc_ik*nc_jk]
-    GPU_Vector<float4> d_basis_ij;   // [nint_ij] 4 basis cubic coefficients per interval
-    GPU_Vector<float4> d_basis_ik;
-    GPU_Vector<float4> d_basis_jk;
-    GPU_Vector<float> d_knots_ij, d_knots_ik, d_knots_jk;
     int nc_ij, nc_ik, nc_jk;         // coefficient dimensions
-    int nint_ij, nint_ik, nint_jk;   // intervals per dim
+    int nint_ij, nint_ik, nint_jk;   // intervals per dim (for interval clamping)
     int nk_ij, nk_ik, nk_jk;         // knot counts
     int knot_type;
     double rc_ij, rc_ik, rc_jk;
