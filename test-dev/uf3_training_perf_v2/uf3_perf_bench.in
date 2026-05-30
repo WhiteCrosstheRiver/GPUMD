@@ -1,0 +1,21 @@
+# uf3_training_perf_v2 — post-fix+opt benchmark
+# Uses medium_train.xyz (10 frames). 200 SNES gens, pop=40, batch=10
+# Goal: verify loss decreases + measure speed.
+n_max_2b    6
+rc_2b       6.0
+knot_type   uk
+type        2 Si Ge
+
+lambda_e    1.0
+lambda_f    1.0
+lambda_1    0.0
+lambda_2    0.0
+
+train_data  train.xyz
+test_data   none
+
+optimizer start snes
+  batch       10
+  population  40
+  generation  200
+optimizer end snes

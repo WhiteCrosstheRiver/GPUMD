@@ -61,6 +61,7 @@ void run_lbfgs(
     double dt = std::chrono::duration<double>(t1 - t0).count();
     float loss_old = fitness.compute_loss(batch_id, global_gen, stage_id, g + 1, (float)dt);
     float loss_new = loss_old;
+    bool found = false;
     for (int ls = 0; ls < 10; ls++) {
       for (int i = 0; i < nparam; i++) {
         x_trial[i] = x[i] + step * dir[i];
@@ -68,17 +69,19 @@ void run_lbfgs(
       fitness.model()->set_parameters(x_trial.data());
       loss_new = fitness.compute_loss(batch_id, global_gen, stage_id, g + 1, (float)dt);
       if (loss_new < loss_old) {
+        found = true;
         break;
       }
       step *= 0.5f;
     }
-    if (loss_new >= loss_old) {
+    if (found) {
+      for (int i = 0; i < nparam; i++) x[i] = x_trial[i];
+    } else {
+      // All backtrack steps failed — revert to previous params, skip update
+      fitness.model()->set_parameters(x.data());
+      loss_new = loss_old;
       step = 0.001f;
     }
-    for (int i = 0; i < nparam; i++) {
-      x[i] += step * dir[i];
-    }
-    fitness.model()->set_parameters(x.data());
     if (loss_new < best_loss) {
       best_loss = loss_new;
     }

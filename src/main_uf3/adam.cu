@@ -48,11 +48,13 @@ void run_adam(
 
     fitness.compute_gradient(batch_id, global_gen, grad);
 
+    float bc1 = 1.0f - powf(beta1, g + 1);   // bias-correction terms: O(1) per step
+    float bc2 = 1.0f - powf(beta2, g + 1);
     for (int i = 0; i < nparam; i++) {
       m[i] = beta1 * m[i] + (1.0f - beta1) * grad[i];
       v[i] = beta2 * v[i] + (1.0f - beta2) * grad[i] * grad[i];
-      float mh = m[i] / (1.0f - powf(beta1, g + 1));
-      float vh = v[i] / (1.0f - powf(beta2, g + 1));
+      float mh = m[i] / bc1;
+      float vh = v[i] / bc2;
       x[i] -= lr * mh / (sqrtf(vh) + eps);
     }
 

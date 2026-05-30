@@ -13,69 +13,302 @@
     along with GPUMD.  If not, see <http://www.gnu.org/licenses/>.
 */
 
+/*----------------------------------------------------------------------------80
+Extended-XYZ loader for UF3 training data.
+
+Design goals (matching main_nep/structure.cu):
+  1. Element type mapping driven by UF3_Parameters::elements — no hardcoding.
+  2. Lattice matrix parsed from Lattice="..." header token.
+  3. Minimum-image convention (MIC) applied when building the 3B neighbor list.
+  4. Properties= column offsets parsed so species/pos/forces can appear in any
+     order; default layout species:pos:forces is handled without Properties=.
+------------------------------------------------------------------------------*/
+
 #include "dataset.cuh"
+#include "utilities/error.cuh"
+#include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <vector>
 
-std::vector<Uf3Frame> load_uf3_frames(const char* filename, float nn_cutoff)
+// ---------------------------------------------------------------------------
+// Box helpers — column-major 3×3 (same convention as main_nep)
+// ---------------------------------------------------------------------------
+
+// Compute 3×3 matrix determinant (column-major h[col*3 + row])
+static float box_det(const float h[9])
 {
-  std::vector<Uf3Frame> frames;
+  return h[0] * (h[4] * h[8] - h[5] * h[7])
+       - h[3] * (h[1] * h[8] - h[2] * h[7])
+       + h[6] * (h[1] * h[5] - h[2] * h[4]);
+}
+
+// Compute H^{-1} and store column-major in h_inv
+static void box_inverse(const float h[9], float h_inv[9])
+{
+  float det = box_det(h);
+  float inv = 1.0f / det;
+  h_inv[0] =  (h[4]*h[8] - h[5]*h[7]) * inv;
+  h_inv[1] = -(h[1]*h[8] - h[2]*h[7]) * inv;
+  h_inv[2] =  (h[1]*h[5] - h[2]*h[4]) * inv;
+  h_inv[3] = -(h[3]*h[8] - h[5]*h[6]) * inv;
+  h_inv[4] =  (h[0]*h[8] - h[2]*h[6]) * inv;
+  h_inv[5] = -(h[0]*h[5] - h[2]*h[3]) * inv;
+  h_inv[6] =  (h[3]*h[7] - h[4]*h[6]) * inv;
+  h_inv[7] = -(h[0]*h[7] - h[1]*h[6]) * inv;
+  h_inv[8] =  (h[0]*h[4] - h[1]*h[3]) * inv;
+}
+
+// Apply minimum-image convention to (dx,dy,dz) using precomputed H and H^{-1}
+static void apply_mic(
+  const float h[9], const float h_inv[9],
+  float& dx, float& dy, float& dz)
+{
+  // Fractional coordinates
+  float sx = h_inv[0]*dx + h_inv[3]*dy + h_inv[6]*dz;
+  float sy = h_inv[1]*dx + h_inv[4]*dy + h_inv[7]*dz;
+  float sz = h_inv[2]*dx + h_inv[5]*dy + h_inv[8]*dz;
+  // Wrap to [-0.5, 0.5)
+  sx -= std::round(sx);
+  sy -= std::round(sy);
+  sz -= std::round(sz);
+  // Back to Cartesian
+  dx = h[0]*sx + h[3]*sy + h[6]*sz;
+  dy = h[1]*sx + h[4]*sy + h[7]*sz;
+  dz = h[2]*sx + h[5]*sy + h[8]*sz;
+}
+
+// ---------------------------------------------------------------------------
+// Header-line parsing helpers
+// ---------------------------------------------------------------------------
+
+// Tokenise a string by whitespace, respecting quoted regions.
+// Quotes are used in extended-XYZ for Lattice="..." values.
+static std::vector<std::string> tokenise_header(const std::string& line)
+{
+  std::vector<std::string> tokens;
+  std::string cur;
+  bool in_quote = false;
+  for (char c : line) {
+    if (c == '"') {
+      in_quote = !in_quote;
+    } else if (std::isspace((unsigned char)c) && !in_quote) {
+      if (!cur.empty()) { tokens.push_back(cur); cur.clear(); }
+    } else {
+      cur += c;
+    }
+  }
+  if (!cur.empty()) tokens.push_back(cur);
+  return tokens;
+}
+
+// Extract value of key="value" or key=value from a token list.
+// Returns empty string if not found.
+static std::string find_key(const std::vector<std::string>& tokens, const std::string& key)
+{
+  for (const auto& t : tokens) {
+    if (t.size() > key.size() && t.substr(0, key.size()) == key) {
+      return t.substr(key.size());
+    }
+  }
+  return {};
+}
+
+// ---------------------------------------------------------------------------
+// Properties= column layout parser
+// Determines offsets of species, pos, forces columns.
+// Default: species:S:1 pos:R:3 forces:R:3
+// ---------------------------------------------------------------------------
+struct ColLayout {
+  int species = 0;
+  int pos     = 1;
+  int force   = 4;
+  int ncols   = 7;
+  bool valid  = true;
+};
+
+static ColLayout parse_properties(const std::string& prop_str)
+{
+  ColLayout lay;
+  if (prop_str.empty()) return lay;   // use defaults
+
+  // Replace ':' with spaces for tokenisation
+  std::string s = prop_str;
+  for (char& c : s) if (c == ':') c = ' ';
+  std::istringstream iss(s);
+  std::vector<std::string> sub;
+  std::string tok;
+  while (iss >> tok) sub.push_back(tok);
+
+  if (sub.size() % 3 != 0) return lay;   // malformed; fall back to defaults
+
+  int col = 0, sp = -1, pp = -1, fp = -1;
+  for (int k = 0; k < (int)sub.size() / 3; k++) {
+    const std::string& name = sub[k * 3];
+    int n = std::stoi(sub[k * 3 + 2]);
+    if (name == "species") sp = col;
+    else if (name == "pos")    pp = col;
+    else if (name == "force" || name == "forces") fp = col;
+    col += n;
+  }
+
+  if (sp < 0 || pp < 0) { lay.valid = false; return lay; }
+  lay.species = sp;
+  lay.pos     = pp;
+  lay.force   = (fp >= 0) ? fp : -1;
+  lay.ncols   = col;
+  return lay;
+}
+
+// ---------------------------------------------------------------------------
+// Main loader
+// ---------------------------------------------------------------------------
+std::vector<Uf3Frame> load_uf3_frames(
+  const char* filename,
+  const std::vector<std::string>& elements,
+  float nn_cutoff)
+{
   std::ifstream input(filename);
   if (!input.is_open()) {
     std::cerr << "Error: cannot open " << filename << std::endl;
     exit(1);
   }
 
+  const float cutoff_sq = nn_cutoff * nn_cutoff;
+  std::vector<Uf3Frame> frames;
   std::string line;
+
   while (std::getline(input, line)) {
     if (line.empty()) continue;
-    int natoms = std::stoi(line);
+
+    int natoms = 0;
+    try { natoms = std::stoi(line); }
+    catch (...) { continue; }
 
     Uf3Frame f;
     f.num_atoms = natoms;
-    std::getline(input, line);
-    size_t pos = line.find("energy=");
-    if (pos != std::string::npos) f.energy = std::stof(line.substr(pos + 7));
-
     f.types.resize(natoms);
     f.x.resize(natoms); f.y.resize(natoms); f.z.resize(natoms);
     f.fx.resize(natoms); f.fy.resize(natoms); f.fz.resize(natoms);
 
-    for (int i = 0; i < natoms; i++) {
-      std::getline(input, line);
-      std::istringstream iss(line);
-      std::string elem;
-      iss >> elem >> f.x[i] >> f.y[i] >> f.z[i] >> f.fx[i] >> f.fy[i] >> f.fz[i];
-      if (elem == "Si") f.types[i] = 0;
-      else if (elem == "Ge") f.types[i] = 1;
-      else f.types[i] = 0;
+    // ---- Header line -------------------------------------------------------
+    std::getline(input, line);
+    auto header = tokenise_header(line);
+
+    // Energy
+    std::string ev = find_key(header, "energy=");
+    if (!ev.empty()) {
+      try { f.energy = std::stof(ev); } catch (...) {}
     }
 
-    // Build neighbor list within nn_cutoff (for 3B optimization)
+    // Lattice (row-major in extxyz: rows are lattice vectors a,b,c)
+    // Store column-major in f.box (same as main_nep): H = [a|b|c]
+    std::string lv = find_key(header, "Lattice=");
+    if (lv.empty()) lv = find_key(header, "lattice=");
+    if (!lv.empty()) {
+      // Strip surrounding quotes if present
+      if (!lv.empty() && lv.front() == '"') lv = lv.substr(1);
+      if (!lv.empty() && lv.back() == '"')  lv.pop_back();
+      std::istringstream ls(lv);
+      float raw[9] = {};
+      for (int k = 0; k < 9; k++) ls >> raw[k];
+      // raw = [a1 a2 a3 b1 b2 b3 c1 c2 c3] (row-major, each row = lattice vector)
+      // Convert to column-major H: H[:,0]=a, H[:,1]=b, H[:,2]=c
+      // H[row + 3*col] → col-major: H[0]=h11=a1, H[1]=h21=b1, H[2]=h31=c1, ...
+      // transpose_index from main_nep: {0,3,6,1,4,7,2,5,8}
+      static const int T[9] = {0, 3, 6, 1, 4, 7, 2, 5, 8};
+      for (int k = 0; k < 9; k++) f.box[T[k]] = raw[k];
+      box_inverse(f.box, f.box_inv);
+      f.has_lattice = true;
+    }
+
+    // Properties= column layout
+    std::string pv = find_key(header, "Properties=");
+    if (pv.empty()) pv = find_key(header, "properties=");
+    ColLayout lay = parse_properties(pv);
+
+    // ---- Atom lines --------------------------------------------------------
+    bool frame_ok = true;
+    for (int i = 0; i < natoms; i++) {
+      if (!std::getline(input, line) || line.empty()) {
+        std::cerr << "Warning: frame " << frames.size()
+                  << " is truncated at atom " << i << "/" << natoms
+                  << " — skipping frame.\n";
+        frame_ok = false;
+        break;
+      }
+      std::istringstream iss(line);
+      std::vector<std::string> cols;
+      std::string w;
+      while (iss >> w) cols.push_back(w);
+
+      // Species — match against elements list (same logic as main_nep)
+      std::string elem = (lay.species < (int)cols.size()) ? cols[lay.species] : "";
+      bool found = false;
+      for (int t = 0; t < (int)elements.size(); t++) {
+        if (elem == elements[t]) {
+          f.types[i] = t;
+          found = true;
+          break;
+        }
+      }
+      if (!found) {
+        std::cerr << "Error: atom symbol '" << elem
+                  << "' in " << filename
+                  << " is not in the type list. Check the 'type' line in uf3.in.\n";
+        exit(1);
+      }
+
+      // Position
+      if (lay.pos + 2 < (int)cols.size()) {
+        f.x[i] = std::stof(cols[lay.pos]);
+        f.y[i] = std::stof(cols[lay.pos + 1]);
+        f.z[i] = std::stof(cols[lay.pos + 2]);
+      }
+
+      // Forces
+      if (lay.force >= 0 && lay.force + 2 < (int)cols.size()) {
+        f.fx[i] = std::stof(cols[lay.force]);
+        f.fy[i] = std::stof(cols[lay.force + 1]);
+        f.fz[i] = std::stof(cols[lay.force + 2]);
+      }
+    }
+
+    // ---- 3B neighbor list (with PBC if lattice is available) ---------------
     if (nn_cutoff > 0.0f) {
-      float cutoff_sq = nn_cutoff * nn_cutoff;
-      f.nn_counts.resize(natoms, 0);
+      f.nn_counts.assign(natoms, 0);
       f.nn_offset.resize(natoms + 1, 0);
-      // Pass 1: count neighbors
+
+      // Pass 1: count
       for (int i = 0; i < natoms; i++) {
         for (int j = i + 1; j < natoms; j++) {
-          float dx = f.x[i] - f.x[j], dy = f.y[i] - f.y[j], dz = f.z[i] - f.z[j];
+          float dx = f.x[j] - f.x[i];
+          float dy = f.y[j] - f.y[i];
+          float dz = f.z[j] - f.z[i];
+          if (f.has_lattice) apply_mic(f.box, f.box_inv, dx, dy, dz);
           if (dx*dx + dy*dy + dz*dz < cutoff_sq) {
-            f.nn_counts[i]++; f.nn_counts[j]++;
+            f.nn_counts[i]++;
+            f.nn_counts[j]++;
           }
         }
       }
-      // Compute offsets
-      for (int i = 0; i < natoms; i++) f.nn_offset[i+1] = f.nn_offset[i] + f.nn_counts[i];
+
+      for (int i = 0; i < natoms; i++)
+        f.nn_offset[i + 1] = f.nn_offset[i] + f.nn_counts[i];
       int total_nn = f.nn_offset[natoms];
       f.nn_list.resize(total_nn);
-      // Pass 2: fill (use temp per-atom counters)
+
+      // Pass 2: fill
       std::vector<int> counters(natoms, 0);
       for (int i = 0; i < natoms; i++) {
         for (int j = i + 1; j < natoms; j++) {
-          float dx = f.x[i] - f.x[j], dy = f.y[i] - f.y[j], dz = f.z[i] - f.z[j];
+          float dx = f.x[j] - f.x[i];
+          float dy = f.y[j] - f.y[i];
+          float dz = f.z[j] - f.z[i];
+          if (f.has_lattice) apply_mic(f.box, f.box_inv, dx, dy, dz);
           if (dx*dx + dy*dy + dz*dz < cutoff_sq) {
             f.nn_list[f.nn_offset[i] + counters[i]++] = j;
             f.nn_list[f.nn_offset[j] + counters[j]++] = i;
@@ -84,8 +317,9 @@ std::vector<Uf3Frame> load_uf3_frames(const char* filename, float nn_cutoff)
       }
     }
 
-    frames.push_back(f);
+    if (frame_ok) frames.push_back(std::move(f));
   }
+
   input.close();
   return frames;
 }

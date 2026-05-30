@@ -1021,11 +1021,11 @@ static __global__ void uf3_grad_2b_force(
         float dy = y[o + i] - y[o + j];
         float dz = z[o + i] - z[o + j];
         float r2 = dx * dx + dy * dy + dz * dz;
-        float r = sqrtf(r2);
+        float inv_r = rsqrtf(r2);
+        float r = r2 * inv_r;
         if (r >= rc) {
           continue;
         }
-        float inv_r = 1.0f / r;
         int m = uf3_find_interval(r, kmin, kd, nint);
         float u = (r - (kmin + m * kd)) / kd;
         int c_rel = coeff_idx - m + 3;

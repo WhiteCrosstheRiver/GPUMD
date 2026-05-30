@@ -24,10 +24,22 @@ struct Uf3Frame {
   std::vector<float> fx, fy, fz;
   float energy = 0.0f;
 
-  // Pre-built neighbor list (indices of atoms within 3B cutoff)
-  std::vector<int> nn_counts;    // per-atom neighbor count
-  std::vector<int> nn_offset;    // per-atom offset in nn_list (cumsum)
-  std::vector<int> nn_list;      // flat neighbor indices
+  // Lattice matrix (column-major, same convention as main_nep):
+  //   box[0..8]  = H = [a|b|c], where a,b,c are lattice vectors as columns
+  //   box_inv[0..8] = H^{-1} (for minimum-image convention)
+  float box[9]     = {};
+  float box_inv[9] = {};
+  bool has_lattice = false;
+
+  // Pre-built neighbor list within 3B cutoff (indices of atoms)
+  std::vector<int> nn_counts;
+  std::vector<int> nn_offset;
+  std::vector<int> nn_list;
 };
 
-std::vector<Uf3Frame> load_uf3_frames(const char* filename, float nn_cutoff = 0.0f);
+// elements: ordered list from UF3_Parameters (e.g. {"Si","Ge"}).
+// nn_cutoff > 0 triggers neighbor-list construction with PBC.
+std::vector<Uf3Frame> load_uf3_frames(
+  const char* filename,
+  const std::vector<std::string>& elements,
+  float nn_cutoff = 0.0f);

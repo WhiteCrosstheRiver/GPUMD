@@ -108,7 +108,7 @@ static __global__ void lstsq_accumulate(
     for (int j = i+1; j < n; j++) {
       int tj = typ[o+j];
       float dx = x[o+i]-x[o+j], dy = y[o+i]-y[o+j], dz = z[o+i]-z[o+j];
-      float r = sqrtf(dx*dx+dy*dy+dz*dz); if (r >= rc) continue;
+      float d2 = dx*dx+dy*dy+dz*dz; float r = sqrtf(d2); if (r >= rc) continue;
       int pi = ti * nt + tj;
       for (int c = 0; c < ncoeff; c++) {
         float bv = _bval(c, nint, r, kmin, kd);
@@ -129,8 +129,10 @@ static __global__ void lstsq_accumulate(
         if (i == j) continue;
         int tj = typ[o+j];
         float dx = x[o+i]-x[o+j], dy = y[o+i]-y[o+j], dz = z[o+i]-z[o+j];
-        float r = sqrtf(dx*dx+dy*dy+dz*dz); if (r >= rc) continue;
-        float inv_r = 1.0f / r;
+        float d2 = dx*dx+dy*dy+dz*dz;
+        float inv_r = rsqrtf(d2);
+        float r = d2 * inv_r;
+        if (r >= rc) continue;
         int pi = ti * nt + tj;
         for (int c = 0; c < ncoeff; c++) {
           float dbdr = _dbval(c, nint, r, kmin, kd);
@@ -138,8 +140,8 @@ static __global__ void lstsq_accumulate(
           int kk = pi * ncoeff + c;
           float gx = factor * dx, gy = factor * dy, gz = factor * dz;
           // Accumulate force contribution to ATb
-          float fcontrib = gx * (double)fxi + gy * (double)fyi + gz * (double)fzi;
-          if (fcontrib != 0) atomicAdd(&d_ATb[kk], wf * (double)fcontrib);
+          double fcontrib = (double)gx*(double)fxi + (double)gy*(double)fyi + (double)gz*(double)fzi;
+          if (fcontrib != 0.0) atomicAdd(&d_ATb[kk], wf * fcontrib);
           // Accumulate to ATA: ATA[kk][mm] += wf * (gx*gx' + gy*gy' + gz*gz')
           for (int cc = 0; cc < ncoeff; cc++) {
             int mm = pi * ncoeff + cc;

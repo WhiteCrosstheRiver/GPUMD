@@ -92,7 +92,7 @@ static void write_uf3_file(UF3_Parameters& para, Uf3Model* model)
       int ti = t / (nt * nt), tj = (t / nt) % nt, tk = t % nt;
       out << "3B " << elements[ti] << " " << elements[tj] << " " << elements[tk]
           << " 0 3 uk\n";
-      float rc_jk = model->rc_3b(0) * 2.0f;
+      float rc_jk = model->rc_3b(2);   // rc_jk == rc_ij by construction; was wrongly ×2
       out << std::fixed << rc_jk << " " << model->rc_3b(1) << " " << model->rc_3b(0)
           << " " << model->nknots_3b(0) << " " << model->nknots_3b(1) << " " << model->nknots_3b(2) << "\n";
       auto& k0 = model->knots_3b(0), &k1 = model->knots_3b(1), &k2 = model->knots_3b(2);
@@ -143,7 +143,7 @@ int main(int argc, char* argv[])
 
   printf("Loading data...\n");
   float nn_cutoff = para.n_max_3b[0] > 0 ? (float)std::max(para.rc_3b[0], para.rc_3b[1]) : 0.0f;
-  auto train_frames = load_uf3_frames(para.train_data.c_str(), nn_cutoff);
+  auto train_frames = load_uf3_frames(para.train_data.c_str(), para.elements, nn_cutoff);
   printf("Loaded %zu training frames.\n", train_frames.size());
 
   bool has_3b = para.n_max_3b[0] > 0;

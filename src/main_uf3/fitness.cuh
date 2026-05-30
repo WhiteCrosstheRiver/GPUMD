@@ -110,6 +110,13 @@ private:
   std::vector<float> h_energy_test_, h_fx_test_, h_fy_test_, h_fz_test_;
   GPU_Vector<float> d_energy_test_;
 
+  // Cached host parameter mirror — avoids per-step heap alloc in the hot path.
+  // Grown when nparam increases (never happens at runtime but safe).
+  std::vector<float> h_params_cache_;
+  // Per-individual [L1, L2] buffer for population path — pre-allocated in
+  // compute_loss_population, grown if pop increases.
+  std::vector<float> reg_per_ind_;
+
   float lambda_e_ = 1, lambda_f_ = 1, lambda_1_ = 0, lambda_2_ = 0;
 
   // Logging state.

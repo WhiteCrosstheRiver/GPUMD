@@ -26,7 +26,6 @@ static void compute_utilities(int pop, std::vector<float>& u)
 {
   u.resize(pop);
   for (int i = 0; i < pop; i++) {
-    float x = (i + 0.5f) / pop;
     u[i] = std::max(0.0f, logf(pop / 2.0f + 1.0f) - logf((float)(i + 1)));
   }
   float sum = 0;

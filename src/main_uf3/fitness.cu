@@ -90,7 +90,7 @@ Uf3Fitness::Uf3Fitness(
   h_loss_sum_pinned_[1] = 0.0f;
 
   if (!para.test_data.empty() && para.test_data != "none") {
-    test_set_ = load_uf3_frames(para.test_data.c_str(), 0.0f);
+    test_set_ = load_uf3_frames(para.test_data.c_str(), para.elements, 0.0f);
     test_set_size_ = (int)test_set_.size();
     printf("Loaded %d test frames.\n", test_set_size_);
   } else {
@@ -159,12 +159,12 @@ void Uf3Fitness::write_log_line(
 void Uf3Fitness::compute_l1_l2_host(float& l1, float& l2)
 {
   int nparam = model_->num_parameters();
-  std::vector<float> params(nparam);
-  model_->get_parameters(params.data());
+  if ((int)h_params_cache_.size() < nparam) h_params_cache_.resize(nparam);
+  model_->get_parameters(h_params_cache_.data());
   float s1 = 0, s2 = 0;
   for (int i = 0; i < nparam; i++) {
-    s1 += fabsf(params[i]);
-    s2 += params[i] * params[i];
+    s1 += fabsf(h_params_cache_[i]);
+    s2 += h_params_cache_[i] * h_params_cache_[i];
   }
   l1 = s1 / nparam;
   l2 = sqrtf(s2 / nparam);
@@ -173,11 +173,10 @@ void Uf3Fitness::compute_l1_l2_host(float& l1, float& l2)
 void Uf3Fitness::accumulate_regularization_gradient(std::vector<float>& grad)
 {
   int nparam = model_->num_parameters();
-  if ((int)grad.size() != nparam) {
-    grad.resize(nparam, 0.0f);
-  }
-  std::vector<float> params(nparam);
-  model_->get_parameters(params.data());
+  if ((int)grad.size() != nparam) grad.resize(nparam, 0.0f);
+  if ((int)h_params_cache_.size() < nparam) h_params_cache_.resize(nparam);
+  model_->get_parameters(h_params_cache_.data());
+  const std::vector<float>& params = h_params_cache_;
   if (lambda_1_ > 0.0f) {
     float scale = lambda_1_ / nparam;
     for (int i = 0; i < nparam; i++) {
@@ -402,7 +401,8 @@ void Uf3Fitness::compute_loss_population(
 
   // 5. Overlap host work: per-individual L1/L2 from the raw 2B coeffs.
   int nparam = model_->num_parameters();
-  std::vector<float> reg_per_ind(2 * pop, 0.0f);  // [p*2+0]=L1, +1=L2
+  if ((int)reg_per_ind_.size() < 2 * pop) reg_per_ind_.assign(2 * pop, 0.0f);
+  else std::fill(reg_per_ind_.begin(), reg_per_ind_.begin() + 2 * pop, 0.0f);
   for (int p = 0; p < pop; p++) {
     const float* params = host_pop_params + (size_t)p * nparam;
     float s1 = 0.0f, s2 = 0.0f;
@@ -411,8 +411,8 @@ void Uf3Fitness::compute_loss_population(
       s1 += fabsf(v);
       s2 += v * v;
     }
-    reg_per_ind[p * 2 + 0] = s1 / nparam;
-    reg_per_ind[p * 2 + 1] = sqrtf(s2 / nparam);
+    reg_per_ind_[p * 2 + 0] = s1 / nparam;
+    reg_per_ind_[p * 2 + 1] = sqrtf(s2 / nparam);
   }
 
   // 6. Sync the compute stream so the loss numerators are visible.
@@ -423,8 +423,8 @@ void Uf3Fitness::compute_loss_population(
   for (int p = 0; p < pop; p++) {
     float le = sqrtf(h_loss_sum_pop_pinned_[p * 2 + 0] * e_norm);
     float lf = sqrtf(h_loss_sum_pop_pinned_[p * 2 + 1] * f_norm);
-    float l1 = reg_per_ind[p * 2 + 0];
-    float l2 = reg_per_ind[p * 2 + 1];
+    float l1 = reg_per_ind_[p * 2 + 0];
+    float l2 = reg_per_ind_[p * 2 + 1];
     out_loss_total[p] = lambda_e_ * le + lambda_f_ * lf
                       + lambda_1_ * l1 + lambda_2_ * l2;
   }
@@ -456,8 +456,8 @@ void Uf3Fitness::compute_loss_population(
     last_logged_local_iter_ = local_iter;
     float le_best = sqrtf(h_loss_sum_pop_pinned_[best_p * 2 + 0] * e_norm);
     float lf_best = sqrtf(h_loss_sum_pop_pinned_[best_p * 2 + 1] * f_norm);
-    float l1_best = reg_per_ind[best_p * 2 + 0];
-    float l2_best = reg_per_ind[best_p * 2 + 1];
+    float l1_best = reg_per_ind_[best_p * 2 + 0];
+    float l2_best = reg_per_ind_[best_p * 2 + 1];
     write_log_line(stage_id, cur_opt_name_.c_str(), cur_iter_unit_.c_str(),
                    local_iter, wall_time_s,
                    best_val, l1_best, l2_best, le_best, lf_best, test_e, test_f);
