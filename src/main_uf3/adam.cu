@@ -36,11 +36,16 @@ void run_adam(
   fitness.model()->get_parameters(x.data());
 
   std::vector<float> m(nparam, 0.0f), v(nparam, 0.0f);
-  float lr = 0.001f, beta1 = 0.9f, beta2 = 0.999f, eps = 1e-8f;
+  // lr0 tunable via env (UF3_LR); default higher than before since the warm
+  // start from lstsq sits near the convex optimum and needs a real step to
+  // refine.  Cosine decay to ~0 over the run for clean convergence.
+  float lr0 = 0.01f, beta1 = 0.9f, beta2 = 0.999f, eps = 1e-8f;
+  if (const char* e = getenv("UF3_LR")) lr0 = atof(e);
 
   fitness.begin_stage(stage_id, "adam", "grad_step");
   auto t0 = std::chrono::high_resolution_clock::now();
   float best_loss = 1e30f;
+  std::vector<float> best_x = x;          // keep the best parameters seen
 
   for (int g = 0; g < gen; g++) {
     int batch_id = g % ds.num_batches;
@@ -48,6 +53,8 @@ void run_adam(
 
     fitness.compute_gradient(batch_id, global_gen, grad);
 
+    // Cosine learning-rate schedule.
+    float lr = 0.5f * lr0 * (1.0f + cosf(3.14159265f * (float)g / (float)gen));
     float bc1 = 1.0f - powf(beta1, g + 1);   // bias-correction terms: O(1) per step
     float bc2 = 1.0f - powf(beta2, g + 1);
     for (int i = 0; i < nparam; i++) {
@@ -64,11 +71,15 @@ void run_adam(
     float loss = fitness.compute_loss(batch_id, global_gen, stage_id, g + 1, (float)dt);
     if (loss < best_loss) {
       best_loss = loss;
+      best_x = x;
     }
 
     if (g % 5 == 0 || g == gen - 1) {
-      printf("  Adam step %5d: loss=%.4f eV, best=%.4f eV (%.1fs)\n",
-             g + 1, loss, best_loss, dt);
+      printf("  Adam step %5d: loss=%.4f eV, best=%.4f eV lr=%.2e (%.1fs)\n",
+             g + 1, loss, best_loss, lr, dt);
     }
   }
+
+  // Restore the best parameters found (a high lr can overshoot late in the run).
+  fitness.model()->set_parameters(best_x.data());
 }

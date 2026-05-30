@@ -1396,6 +1396,130 @@ void Uf3Model::compute_loss_reduction(
 }
 
 // ---- Fast unified loss gradient (matches Uf3Fitness::compute_loss) ---------
+// ===========================================================================
+// Backward (gradient) pass — scatter dLoss/dc in a single forward-style sweep.
+// Ghost/e0/3B-force aware; replaces the old per-coefficient gradient kernels.
+// Gradient of  L = lambda_e*sqrt(MSE_e) + lambda_f*sqrt(MSE_f):
+//   grad_k = scale_e * sum_f wE_f * dE_f/dc_k  +  scale_f * sum_a dF_a * dF_a/dc_k
+// with wE_f = (E_f-Eref)/na^2, dF_a = (F_a-Fref_a),
+//      scale_e = lambda_e/(B*loss_e),  scale_f = lambda_f/(3*Natoms*loss_f).
+// ===========================================================================
+static __global__ void uf3_ediff2_kernel(
+  int B, const float* __restrict__ d_energy, const float* __restrict__ d_ref,
+  const int* __restrict__ d_fidx, const int* __restrict__ d_natoms, float* __restrict__ d_w)
+{
+  int b = blockIdx.x * blockDim.x + threadIdx.x; if (b >= B) return;
+  int fid = d_fidx[b]; float na = (float)d_natoms[fid]; if (na < 1.0f) na = 1.0f;
+  d_w[b] = (d_energy[b] - d_ref[fid]) / (na * na);
+}
+
+// 2B + 1-body backward.  One block per frame; threads stride over real atoms.
+static __global__ void uf3_grad_2b_bwd(
+  int nf, const int* __restrict__ fidx, const int* __restrict__ nat,
+  const int* __restrict__ nat_tot, const int* __restrict__ off, const int* __restrict__ typ,
+  const float* __restrict__ x, const float* __restrict__ y, const float* __restrict__ z,
+  int nint, float kmin, float kd, float rc, const int* __restrict__ tmap, int nt,
+  int ncoeff, int e0_off, const float* __restrict__ wE, float scale_e,
+  const float* __restrict__ fx, const float* __restrict__ fy, const float* __restrict__ fz,
+  const float* __restrict__ fxr, const float* __restrict__ fyr, const float* __restrict__ fzr,
+  float scale_f, float* __restrict__ grad)
+{
+  int b = blockIdx.x; if (b >= nf) return;
+  int tid = threadIdx.x, stride = blockDim.x;
+  int fid = fidx[b], n = nat[fid], n_tot = nat_tot[fid], o = off[fid];
+  float we = scale_e * wE[b];
+  for (int i = tid; i < n; i += stride) {
+    int ti = typ[o+i];
+    atomicAdd(&grad[e0_off + ti], we);                 // dE/de0[ti] = 1 per atom
+    float dFx = scale_f*(fx[o+i]-fxr[o+i]);
+    float dFy = scale_f*(fy[o+i]-fyr[o+i]);
+    float dFz = scale_f*(fz[o+i]-fzr[o+i]);
+    for (int j = 0; j < n_tot; j++) {
+      if (j == i) continue;
+      float ddx=x[o+i]-x[o+j], ddy=y[o+i]-y[o+j], ddz=z[o+i]-z[o+j];
+      float d2=ddx*ddx+ddy*ddy+ddz*ddz; float rinv=rsqrtf(d2), r=d2*rinv; if (r>=rc) continue;
+      int pi = tmap[ti*nt + typ[o+j]];
+      int m=(int)((r-kmin)/kd); if(m<0)m=0; if(m>=nint)m=nint-1;
+      float u=(r-(kmin+m*kd))/kd; float bb[4],db[4];
+      uf3_bspline4(u,bb); uf3_bspline4_deriv(u,1.0f/kd,db);
+      int p0=m-3; if(p0<0)p0=0;
+      for(int dp=0;dp<4;dp++){int c=p0+dp; if(c>=ncoeff)break;
+        float ff = -db[dp]*rinv;                        // per-coeff dF_i,dim = ff*ddx_dim
+        float g = we*0.5f*bb[dp] + dFx*(ff*ddx) + dFy*(ff*ddy) + dFz*(ff*ddz);
+        atomicAdd(&grad[pi*ncoeff + c], g);
+      }
+    }
+  }
+}
+
+// 3B backward (energy + force).  One block per frame; threads stride over real
+// centres using the ghost-aware neighbour list.
+static __global__ void uf3_grad_3b_bwd(
+  int nf, const int* __restrict__ fidx, const int* __restrict__ nat,
+  const int* __restrict__ off, const int* __restrict__ typ,
+  const float* __restrict__ x, const float* __restrict__ y, const float* __restrict__ z,
+  int nc0,int nc1,int nc2, float km0,float kd0,float rc0, float km1,float kd1,float rc1,
+  float km2,float kd2,float rc2, int nt, int num_params_2b,
+  const int* __restrict__ nn_off, const int* __restrict__ nn_lst,
+  const int* __restrict__ nn_frame_off, const int* __restrict__ parent,
+  const float* __restrict__ wE, float scale_e,
+  const float* __restrict__ fx, const float* __restrict__ fy, const float* __restrict__ fz,
+  const float* __restrict__ fxr, const float* __restrict__ fyr, const float* __restrict__ fzr,
+  float scale_f, float* __restrict__ grad)
+{
+  int b = blockIdx.x; if (b >= nf) return;
+  int tid = threadIdx.x, stride = blockDim.x;
+  int fid = fidx[b], n = nat[fid], o = off[fid]; int nn_base = nn_frame_off[fid];
+  float we = scale_e * wE[b];
+  for (int i = tid; i < n; i += stride) {
+    int ti = typ[o+i]; int ns = nn_off[nn_base+i]; int nni = nn_off[nn_base+i+1]-ns;
+    float dFix=scale_f*(fx[o+i]-fxr[o+i]), dFiy=scale_f*(fy[o+i]-fyr[o+i]), dFiz=scale_f*(fz[o+i]-fzr[o+i]);
+    for (int jj=0; jj<nni; jj++) {
+      int j=nn_lst[ns+jj];
+      float dx12=x[o+j]-x[o+i],dy12=y[o+j]-y[o+i],dz12=z[o+j]-z[o+i];
+      float d12=dx12*dx12+dy12*dy12+dz12*dz12,inv12=rsqrtf(d12),r12=d12*inv12; if(r12>=rc0)continue;
+      int tj=typ[o+j]; int pj=parent[o+j];
+      float dFjx=scale_f*(fx[o+pj]-fxr[o+pj]),dFjy=scale_f*(fy[o+pj]-fyr[o+pj]),dFjz=scale_f*(fz[o+pj]-fzr[o+pj]);
+      int m0=(int)((r12-km0)/kd0); if(m0<0)m0=0; if(m0>=nc0+3)m0=nc0+3-1; // nint0=nc0+3
+      float u0=(r12-(km0+m0*kd0))/kd0; float b0[4],db0[4];
+      uf3_bspline4(u0,b0); uf3_bspline4_deriv(u0,1.0f/kd0,db0); int p0=m0-3; if(p0<0)p0=0;
+      for (int kk=jj+1; kk<nni; kk++) {
+        int k=nn_lst[ns+kk];
+        float dx13=x[o+k]-x[o+i],dy13=y[o+k]-y[o+i],dz13=z[o+k]-z[o+i];
+        float d13=dx13*dx13+dy13*dy13+dz13*dz13,inv13=rsqrtf(d13),r13=d13*inv13; if(r13>=rc1)continue;
+        float dx23=x[o+k]-x[o+j],dy23=y[o+k]-y[o+j],dz23=z[o+k]-z[o+j];
+        float d23=dx23*dx23+dy23*dy23+dz23*dz23,inv23=rsqrtf(d23),r23=d23*inv23; if(r23>=rc2)continue;
+        int tk=typ[o+k]; int pk=parent[o+k];
+        float dFkx=scale_f*(fx[o+pk]-fxr[o+pk]),dFky=scale_f*(fy[o+pk]-fyr[o+pk]),dFkz=scale_f*(fz[o+pk]-fzr[o+pk]);
+        int trip=(ti*nt+tj)*nt+tk; int off3=num_params_2b+trip*nc0*nc1*nc2;
+        int m1=(int)((r13-km1)/kd1); if(m1<0)m1=0; if(m1>=nc1+3)m1=nc1+3-1;
+        int m2=(int)((r23-km2)/kd2); if(m2<0)m2=0; if(m2>=nc2+3)m2=nc2+3-1;
+        float u1=(r13-(km1+m1*kd1))/kd1, u2=(r23-(km2+m2*kd2))/kd2;
+        float b1[4],db1[4],b2[4],db2[4];
+        uf3_bspline4(u1,b1); uf3_bspline4_deriv(u1,1.0f/kd1,db1);
+        uf3_bspline4(u2,b2); uf3_bspline4_deriv(u2,1.0f/kd2,db2);
+        int p1=m1-3; if(p1<0)p1=0; int p2=m2-3; if(p2<0)p2=0;
+        for(int dp=0;dp<4;dp++){int p=p0+dp; if(p>=nc0)break; float Bp=b0[dp],dBp=db0[dp];
+        for(int dq=0;dq<4;dq++){int q=p1+dq; if(q>=nc1)break; float Bq=b1[dq],dBq=db1[dq];
+        for(int dr=0;dr<4;dr++){int rr=p2+dr; if(rr>=nc2)break;
+          int col=off3+p+q*nc0+rr*nc0*nc1;
+          float Br=b2[dr], dBr=db2[dr];
+          float G12=dBp*Bq*Br, G13=Bp*dBq*Br, G23=Bp*Bq*dBr;
+          float fix=G12*inv12*dx12+G13*inv13*dx13, fiy=G12*inv12*dy12+G13*inv13*dy13, fiz=G12*inv12*dz12+G13*inv13*dz13;
+          float fjx=-G12*inv12*dx12+G23*inv23*dx23, fjy=-G12*inv12*dy12+G23*inv23*dy23, fjz=-G12*inv12*dz12+G23*inv23*dz23;
+          float fkx=-G13*inv13*dx13-G23*inv23*dx23, fky=-G13*inv13*dy13-G23*inv23*dy23, fkz=-G13*inv13*dz13-G23*inv23*dz23;
+          float g = we*Bp*Bq*Br
+                  + dFix*fix+dFiy*fiy+dFiz*fiz
+                  + dFjx*fjx+dFjy*fjy+dFjz*fjz
+                  + dFkx*fkx+dFky*fky+dFkz*fkz;
+          atomicAdd(&grad[col], g);
+        }}}
+      }
+    }
+  }
+}
+
+
 void Uf3Model::compute_loss_gradient(
   const Uf3DatasetGPU& ds,
   int batch_id,
@@ -1415,44 +1539,43 @@ void Uf3Model::compute_loss_gradient(
   if ((int)d_grad_ws.size() < nparam) d_grad_ws.resize(nparam);
   cudaMemset(d_grad_ws.data(), 0, nparam * sizeof(float));
 
+  // wE_f = (E_pred - E_ref)/na^2  (energy residual weight for the gradient).
   if ((int)d_ediff_ws.size() < B) d_ediff_ws.resize(B);
-  gpu_energy_peratom_diff_kernel<<<(B + 63) / 64, 64>>>(
+  uf3_ediff2_kernel<<<(B + 63) / 64, 64>>>(
     B, d_energy_buf.data(), ds.d_energy_ref.data(), d_fidx, ds.d_natoms.data(),
     d_ediff_ws.data());
   GPU_CHECK_KERNEL
 
   float kmin2 = knots_2b_[0];
   float kd2 = (knots_2b_.back() - knots_2b_[0]) / nint_2b_;
+  float scale_e = (lambda_e > 0.0f && loss_e > 1e-12f && B > 0)
+                    ? lambda_e / ((float)B * loss_e) : 0.0f;
+  float scale_f = (lambda_f > 0.0f && loss_f > 1e-12f && total_atoms > 0)
+                    ? lambda_f / ((float)(3 * total_atoms) * loss_f) : 0.0f;
+  int e0_off = num_params_2b_ + num_params_3b_;
 
-  if (lambda_e > 0.0f && loss_e > 1e-12f && B > 0) {
-    float scale_e = lambda_e / ((float)B * loss_e);
-    uf3_grad_2b<<<num_params_2b_, 64>>>(
-      B, nparam, d_fidx, ds.d_natoms.data(), ds.d_offsets.data(),
-      ds.d_types.data(), ds.d_x.data(), ds.d_y.data(), ds.d_z.data(),
-      num_types_ * num_types_, ncoeff_2b_, nint_2b_, kmin2, kd2, rc_2b_,
-      d_type_map.data(), num_types_, d_ediff_ws.data(), scale_e, d_grad_ws.data());
-    GPU_CHECK_KERNEL
-    if (has_3b_ && ds.has_3b && num_params_3b_ > 0) {
-      uf3_grad_3b_energy<<<nparam, 64>>>(
-        B, nparam, num_params_2b_, d_fidx, ds.d_natoms.data(), ds.d_offsets.data(),
-        ds.d_types.data(), ds.d_x.data(), ds.d_y.data(), ds.d_z.data(),
-        nc_3b_[0], nc_3b_[1], nc_3b_[2], nint_3b_[0], nint_3b_[1], nint_3b_[2],
-        knots_3b_[0][0], (knots_3b_[0].back() - knots_3b_[0][0]) / nint_3b_[0], rc_3b_[0],
-        knots_3b_[1][0], (knots_3b_[1].back() - knots_3b_[1][0]) / nint_3b_[1], rc_3b_[1],
-        knots_3b_[2][0], (knots_3b_[2].back() - knots_3b_[2][0]) / nint_3b_[2], rc_3b_[2],
-        num_types_, num_trips_, ds.d_nn_off.data(), ds.d_nn_lst.data(), ds.d_nn_frame_off.data(),
-        d_ediff_ws.data(), scale_e, d_grad_ws.data());
-      GPU_CHECK_KERNEL
-    }
-  }
+  // 2B + 1-body backward (single sweep; energy & force together).
+  uf3_grad_2b_bwd<<<B, 64>>>(
+    B, d_fidx, ds.d_natoms.data(), ds.d_natoms_tot.data(), ds.d_offsets.data(),
+    ds.d_types.data(), ds.d_x.data(), ds.d_y.data(), ds.d_z.data(),
+    nint_2b_, kmin2, kd2, rc_2b_, d_type_map.data(), num_types_,
+    ncoeff_2b_, e0_off, d_ediff_ws.data(), scale_e,
+    d_fx.data(), d_fy.data(), d_fz.data(),
+    ds.d_fx_ref.data(), ds.d_fy_ref.data(), ds.d_fz_ref.data(), scale_f, d_grad_ws.data());
+  GPU_CHECK_KERNEL
 
-  if (lambda_f > 0.0f && loss_f > 1e-12f && total_atoms > 0) {
-    float scale_f = lambda_f / ((float)(3 * total_atoms) * loss_f);
-    uf3_grad_2b_force<<<num_params_2b_, 64>>>(
-      B, nparam, d_fidx, ds.d_natoms.data(), ds.d_offsets.data(),
+  if (has_3b_ && ds.has_3b && num_params_3b_ > 0) {
+    uf3_grad_3b_bwd<<<B, 64>>>(
+      B, d_fidx, ds.d_natoms.data(), ds.d_offsets.data(),
       ds.d_types.data(), ds.d_x.data(), ds.d_y.data(), ds.d_z.data(),
-      num_types_ * num_types_, ncoeff_2b_, nint_2b_, kmin2, kd2, rc_2b_,
-      d_type_map.data(), num_types_, d_fx.data(), d_fy.data(), d_fz.data(),
+      nc_3b_[0], nc_3b_[1], nc_3b_[2],
+      knots_3b_[0][0], (knots_3b_[0].back()-knots_3b_[0][0])/nint_3b_[0], rc_3b_[0],
+      knots_3b_[1][0], (knots_3b_[1].back()-knots_3b_[1][0])/nint_3b_[1], rc_3b_[1],
+      knots_3b_[2][0], (knots_3b_[2].back()-knots_3b_[2][0])/nint_3b_[2], rc_3b_[2],
+      num_types_, num_params_2b_,
+      ds.d_nn_off.data(), ds.d_nn_lst.data(), ds.d_nn_frame_off.data(), ds.d_parent.data(),
+      d_ediff_ws.data(), scale_e,
+      d_fx.data(), d_fy.data(), d_fz.data(),
       ds.d_fx_ref.data(), ds.d_fy_ref.data(), ds.d_fz_ref.data(), scale_f, d_grad_ws.data());
     GPU_CHECK_KERNEL
   }
