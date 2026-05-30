@@ -198,15 +198,17 @@ public:
   void initialize(const double rc, const int num_atoms, const int num_neighbors);
   void find_neighbor_global(
     const double rc,
-    Box& box, 
-    const GPU_Vector<int>& type, 
+    Box& box,
+    const GPU_Vector<int>& type,
     const GPU_Vector<double>& position_per_atom);
   void find_local_neighbor_from_global(
     const double rc,
-    Box& box, 
+    Box& box,
     const GPU_Vector<double>& position_per_atom,
     GPU_Vector<int>& NN_local,
     GPU_Vector<int>& NL_local);
+  int get_rebuild_count() const { return rebuild_count; }
+  void set_skin(double s) { skin = s; }
 
 private:
   double skin = 1.0;              // skin distance
@@ -215,4 +217,5 @@ private:
   GPU_Vector<int> cell_contents;  // for cell list
   GPU_Vector<double> x0, y0, z0;  // for checking atom distance
   int check_atom_distance(Box& box, const double* x, const double* y, const double* z);
+  int rebuild_count = 0;          // incremented each time NL is rebuilt
 };

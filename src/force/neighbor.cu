@@ -778,8 +778,8 @@ void Neighbor::find_neighbor_global(
       0,
       N,
       rc + skin,
-      box, 
-      type, 
+      box,
+      type,
       position_per_atom,
       cell_count,
       cell_count_sum,
@@ -788,14 +788,15 @@ void Neighbor::find_neighbor_global(
       NL);
 
     gpu_update_xyz0<<<(N - 1) / 128 + 1, 128>>>(
-      N, 
-      x, 
-      y, 
-      z, 
-      x0.data(), 
-      y0.data(), 
+      N,
+      x,
+      y,
+      z,
+      x0.data(),
+      y0.data(),
       z0.data());
     GPU_CHECK_KERNEL
+    rebuild_count++;
   }
 }
 

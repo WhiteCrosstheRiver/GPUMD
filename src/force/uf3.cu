@@ -196,15 +196,26 @@ __device__ __forceinline__ int find_interval_nu(float r, const float* knots, int
 }
 
 // ---------------------------------------------------------------------------
-// 2-body kernel (optimized)
-// Optimizations vs. baseline:
-//   - cubic coefficient table cached in shared memory (cooperative load,
-//     unconditional: caller guarantees nint <= UF3_2B_SHARED_INTERVALS)
-//   - inv_knot_delta pre-computed on host (eliminates per-neighbor division)
-//   - interval lookup and fractional u computed in one shot: t = (r-min)*invD,
-//     m = floor(t), u = t - m
-//   - rsqrtf + d2*rinv replaces sqrtf + 1.0f/r (one transcendental + one mul)
-//   - eval_cubic / deriv use __fmaf_rn (fused multiply-add path)
+// Position packing: double SoA → float4 AoS  (run every step, fully coalesced)
+// ---------------------------------------------------------------------------
+static __global__ void pack_positions_float4(
+  int N,
+  const double* __restrict__ g_x,
+  const double* __restrict__ g_y,
+  const double* __restrict__ g_z,
+  float4* __restrict__ g_pos)
+{
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= N) return;
+  g_pos[i] = make_float4((float)g_x[i], (float)g_y[i], (float)g_z[i], 0.0f);
+}
+
+// ---------------------------------------------------------------------------
+// 2-body kernel (optimized v3)
+//   - float4 packed positions (1×128-bit L2 read vs 3×64-bit double)
+//   - cubic coefficient table in shared memory
+//   - inv_knot_delta pre-computed, rsqrtf, __fmaf_rn
+//   - full neighbor list (no atomics overhead)
 // ---------------------------------------------------------------------------
 static __global__ void find_force_uf3_2b(
   const int N, const int N1, const int N2,
@@ -215,9 +226,7 @@ static __global__ void find_force_uf3_2b(
   float rc,
   const int* __restrict__ g_NN,
   const int* __restrict__ g_NL,
-  const double* __restrict__ g_x,
-  const double* __restrict__ g_y,
-  const double* __restrict__ g_z,
+  const float4* __restrict__ g_pos,
   double* g_pe,
   double* g_fx, double* g_fy, double* g_fz,
   double* g_virial)
@@ -232,7 +241,8 @@ static __global__ void find_force_uf3_2b(
   if (n1 >= N2) return;
 
   const int NN = g_NN[n1];
-  const double x1 = g_x[n1], y1 = g_y[n1], z1 = g_z[n1];
+  const float4 pos1 = g_pos[n1];
+  const float x1 = pos1.x, y1 = pos1.y, z1 = pos1.z;
   const float rc2 = rc * rc;
   const int nint_minus_1 = nint - 1;
 
@@ -241,10 +251,11 @@ static __global__ void find_force_uf3_2b(
   float sxx = 0, sxy = 0, sxz = 0, syx = 0, syy = 0, syz = 0, szx = 0, szy = 0, szz = 0;
 
   for (int i1 = 0; i1 < NN; ++i1) {
-    const int n2 = __ldg(&g_NL[n1 + N * i1]);
-    float x12 = float(__ldg(&g_x[n2]) - x1);
-    float y12 = float(__ldg(&g_y[n2]) - y1);
-    float z12 = float(__ldg(&g_z[n2]) - z1);
+    const int n2 = g_NL[n1 + N * i1];
+    const float4 pos2 = g_pos[n2];
+    float x12 = pos2.x - x1;
+    float y12 = pos2.y - y1;
+    float z12 = pos2.z - z1;
     apply_mic(box, x12, y12, z12);
     const float d2 = x12 * x12 + y12 * y12 + z12 * z12;
     if (d2 >= rc2) continue;
@@ -252,7 +263,6 @@ static __global__ void find_force_uf3_2b(
     const float rinv = rsqrtf(d2);
     const float r = d2 * rinv;
 
-    // Combined interval lookup and fractional u in one division-equivalent op
     const float t = (r - knot_min) * inv_knot_delta;
     int m = (int)t;
     if (m < 0) m = 0; else if (m > nint_minus_1) m = nint_minus_1;
@@ -275,17 +285,17 @@ static __global__ void find_force_uf3_2b(
     szx -= f12z * x12; szy -= f12z * y12; szz -= f12z * z12;
   }
 
-  g_pe[n1] += pe;
-  g_fx[n1] += fx; g_fy[n1] += fy; g_fz[n1] += fz;
-  g_virial[n1 + 0 * N] += sxx;
-  g_virial[n1 + 1 * N] += syy;
-  g_virial[n1 + 2 * N] += szz;
-  g_virial[n1 + 3 * N] += sxy;
-  g_virial[n1 + 4 * N] += sxz;
-  g_virial[n1 + 5 * N] += syz;
-  g_virial[n1 + 6 * N] += syx;
-  g_virial[n1 + 7 * N] += szx;
-  g_virial[n1 + 8 * N] += szy;
+  g_pe[n1] += (double)pe;
+  g_fx[n1] += (double)fx; g_fy[n1] += (double)fy; g_fz[n1] += (double)fz;
+  g_virial[n1 + 0 * N] += (double)sxx;
+  g_virial[n1 + 1 * N] += (double)syy;
+  g_virial[n1 + 2 * N] += (double)szz;
+  g_virial[n1 + 3 * N] += (double)sxy;
+  g_virial[n1 + 4 * N] += (double)sxz;
+  g_virial[n1 + 5 * N] += (double)syz;
+  g_virial[n1 + 6 * N] += (double)syx;
+  g_virial[n1 + 7 * N] += (double)szx;
+  g_virial[n1 + 8 * N] += (double)szy;
 }
 
 // ---------------------------------------------------------------------------
@@ -656,6 +666,7 @@ void UF3::initialize(const char* filename, const int number_of_atoms)
 
   // Allocate neighbor list and partial-force buffers
   neighbor.initialize(rc, number_of_atoms, max_neighbor_);
+  d_pos_packed.resize(number_of_atoms);
   if (has_3b) {
     f12x.resize(max_neighbor_ * number_of_atoms);
     f12y.resize(max_neighbor_ * number_of_atoms);
@@ -688,6 +699,18 @@ void UF3::compute(
 
   neighbor.find_neighbor_global(rc, box, type, position_per_atom);
 
+  // Pack positions double SoA → float4 AoS (fully coalesced, O(N))
+  {
+    const int grid_pack = (N - 1) / BLOCK_SIZE + 1;
+    pack_positions_float4<<<grid_pack, BLOCK_SIZE>>>(
+      N,
+      position_per_atom.data(),
+      position_per_atom.data() + N,
+      position_per_atom.data() + N * 2,
+      d_pos_packed.data());
+    GPU_CHECK_KERNEL
+  }
+
   if (has_2b) {
     find_force_uf3_2b<<<grid_size, BLOCK_SIZE>>>(
       N, N1, N2, box,
@@ -695,9 +718,7 @@ void UF3::compute(
       two_body.knot_min, two_body.inv_knot_delta,
       (float)two_body.rc,
       neighbor.NN.data(), neighbor.NL.data(),
-      position_per_atom.data(),
-      position_per_atom.data() + N,
-      position_per_atom.data() + N * 2,
+      d_pos_packed.data(),
       potential_per_atom.data(),
       force_per_atom.data(),
       force_per_atom.data() + N,

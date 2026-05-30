@@ -77,6 +77,9 @@ private:
   int max_neighbor_;
   Neighbor neighbor;
 
+  // Packed float4 positions (x,y,z,0) for coalesced gather in force kernel
+  GPU_Vector<float4> d_pos_packed;
+
   // Partial force buffers for 3B (Tersoff-style)
   GPU_Vector<float> f12x, f12y, f12z;
   GPU_Vector<int> NN_3b, NL_3b;  // local neighbor list (filtered to 3B cutoff)
