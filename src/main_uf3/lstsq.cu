@@ -15,6 +15,8 @@
 
 #include "lstsq.cuh"
 #include "utilities/gpu_macro.cuh"
+#include <algorithm>
+#include <cublas_v2.h>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -22,15 +24,18 @@
 #include <cstring>
 #include <vector>
 
-// ---- Cholesky decomposition (in-place) ----
-static bool cholesky(std::vector<float>& A, int n) {
+// ---- Cholesky decomposition (in-place, double precision) ----
+// Double precision is important: the 2B/3B normal matrix mixes well-constrained
+// columns with nearly-unconstrained 3B columns spanning many orders of
+// magnitude, where float Cholesky loses positive-definiteness.
+static bool cholesky(std::vector<double>& A, int n) {
   for (int j = 0; j < n; j++) {
-    float s = 0;
+    double s = 0;
     for (int k = 0; k < j; k++) s += A[j*n+k] * A[j*n+k];
-    float diag = A[j*n+j] - s;
+    double diag = A[j*n+j] - s;
     if (diag <= 0) { A[j*n+j] = 0; return false; }
-    A[j*n+j] = sqrtf(diag);
-    float invLjj = 1.0f / A[j*n+j];
+    A[j*n+j] = sqrt(diag);
+    double invLjj = 1.0 / A[j*n+j];
     for (int i = j+1; i < n; i++) {
       s = 0;
       for (int k = 0; k < j; k++) s += A[i*n+k] * A[j*n+k];
@@ -39,16 +44,16 @@ static bool cholesky(std::vector<float>& A, int n) {
   }
   return true;
 }
-static void solve_cholesky(const std::vector<float>& L, int n,
-                            const std::vector<float>& b, std::vector<float>& x) {
+static void solve_cholesky(const std::vector<double>& L, int n,
+                            const std::vector<double>& b, std::vector<double>& x) {
   x.resize(n);
   for (int i = 0; i < n; i++) {
-    float s = b[i];
+    double s = b[i];
     for (int j = 0; j < i; j++) s -= L[i*n+j] * x[j];
     x[i] = s / L[i*n+i];
   }
   for (int i = n-1; i >= 0; i--) {
-    float s = x[i];
+    double s = x[i];
     for (int j = i+1; j < n; j++) s -= L[j*n+i] * x[j];
     x[i] = s / L[i*n+i];
   }
@@ -78,151 +83,238 @@ __device__ inline float _dbval(int ci, int ni, float r, float km, float kd) {
   return ddu / kd;
 }
 
-// GPU kernel: multi-threaded per frame with shared memory atomicAdd.
-// blockDim threads cooperate: each handles a subset of atoms, atomically
-// accumulates basis contributions into per-block shared memory.
-static __global__ void lstsq_accumulate(
-  int nf, const int* __restrict__ fidx, const int* __restrict__ nat, const int* __restrict__ off,
+// ===========================================================================
+// Explicit weighted design-matrix construction (column-major) for cuBLAS.
+//
+// UF3 is linear in its coefficients, so least-squares is the right trainer.
+// We build A (M rows x nparam cols) and b (M), where rows are:
+//   - one ENERGY row per frame            (1-body counts + 0.5*2B + per-centre 3B)
+//   - three FORCE rows per real atom       (2B + 3B force features)
+// weighted to match the loss lambda_e*MSE_e_peratom + lambda_f*MSE_f, then form
+// the normal equations AtA / Atb via cuBLAS.  Force features include the 3B
+// term (the previous version omitted them, leaving 3B forces unconstrained and
+// huge).  Column-major layout: A[(size_t)col*M + row].
+// ===========================================================================
+
+// Energy rows: one block per frame.  Builds the feature vector in shared memory
+// then writes it (scaled by w_e) into the frame's row of A.
+static __global__ void lstsq_energy_rows(
+  int nf, int M, const int* __restrict__ fidx, const int* __restrict__ nat,
+  const int* __restrict__ nat_tot, const int* __restrict__ off,
   const int* __restrict__ typ, const float* __restrict__ x, const float* __restrict__ y, const float* __restrict__ z,
-  int ncoeff, int npairs, int nt, int nint, float kmin, float kd, float rc, int num_params_2b,
+  int ncoeff, int nt, int nint, float kmin, float kd, float rc, int num_params_2b,
   int has_3b, int nc0, int nc1, int nc2, int ni0, int ni1, int ni2,
   float k0, float kd0, float r0, float k1, float kd1, float r1, float k2, float kd2, float r2,
-  int nparam, float* __restrict__ basis_out,
-  double* __restrict__ d_ATA, double* __restrict__ d_ATb,
-  const float* __restrict__ d_target,
-  const float* __restrict__ d_fxref, const float* __restrict__ d_fyref, const float* __restrict__ d_fzref,
-  float lambda_f, int num_params_2b_only)
+  int nparam, int e0_off, int num_frames_total,
+  const float* __restrict__ d_target, float lambda_e,
+  const int* __restrict__ nn_off, const int* __restrict__ nn_lst, const int* __restrict__ nn_frame_off,
+  double* __restrict__ A, double* __restrict__ bvec)
 {
-  extern __shared__ float s_basis[]; // dynamically sized: nparam elements
-  int b = blockIdx.x; if (b >= nf) return;
+  extern __shared__ float s_basis[];
+  int row = blockIdx.x; if (row >= nf) return;
   int tid = threadIdx.x, stride = blockDim.x;
-  int fid = fidx[b], n = nat[fid], o = off[fid];
-
-  // Zero shared memory (parallel across threads)
-  for (int k = tid; k < nparam; k += stride) s_basis[k] = 0;
+  int fid = fidx[row], n = nat[fid], n_tot = nat_tot[fid], o = off[fid];
+  for (int k = tid; k < nparam; k += stride) s_basis[k] = 0.0f;
   __syncthreads();
 
-  // 2B: each thread handles atoms i = tid, tid+stride, ...
+  for (int i = tid; i < n; i += stride) atomicAdd(&s_basis[e0_off + typ[o+i]], 1.0f);
+
   for (int i = tid; i < n; i += stride) {
     int ti = typ[o+i];
-    for (int j = i+1; j < n; j++) {
+    for (int j = 0; j < n_tot; j++) {
+      if (j == i) continue;
       int tj = typ[o+j];
       float dx = x[o+i]-x[o+j], dy = y[o+i]-y[o+j], dz = z[o+i]-z[o+j];
-      float d2 = dx*dx+dy*dy+dz*dz; float r = sqrtf(d2); if (r >= rc) continue;
-      int pi = ti * nt + tj;
-      for (int c = 0; c < ncoeff; c++) {
-        float bv = _bval(c, nint, r, kmin, kd);
-        if (bv != 0) atomicAdd(&s_basis[pi * ncoeff + c], bv);
-      }
+      float r = sqrtf(dx*dx+dy*dy+dz*dz); if (r >= rc) continue;
+      int pi = ti*nt + tj;
+      for (int c = 0; c < ncoeff; c++) { float bv=_bval(c,nint,r,kmin,kd); if(bv!=0) atomicAdd(&s_basis[pi*ncoeff+c], 0.5f*bv); }
     }
   }
 
-  // 2B force equations (add to ATA/ATb with lambda_f weight, matching SNES loss)
-  if (d_fxref && lambda_f > 0) {
-    float fnorm = 1.0f / (3.0f * n); // per-component normalization (matching NEP)
-    float wf = lambda_f * fnorm;
+  if (has_3b) {
+    int nn_base = nn_frame_off[fid];
     for (int i = tid; i < n; i += stride) {
-      int ti = typ[o+i];
-      float fxi = d_fxref[o+i], fyi = d_fyref[o+i], fzi = d_fzref[o+i];
-      if (fxi == 0 && fyi == 0 && fzi == 0) continue;
-      for (int j = 0; j < n; j++) {
-        if (i == j) continue;
-        int tj = typ[o+j];
-        float dx = x[o+i]-x[o+j], dy = y[o+i]-y[o+j], dz = z[o+i]-z[o+j];
-        float d2 = dx*dx+dy*dy+dz*dz;
-        float inv_r = rsqrtf(d2);
-        float r = d2 * inv_r;
-        if (r >= rc) continue;
-        int pi = ti * nt + tj;
-        for (int c = 0; c < ncoeff; c++) {
-          float dbdr = _dbval(c, nint, r, kmin, kd);
-          float factor = -dbdr * inv_r;
-          int kk = pi * ncoeff + c;
-          float gx = factor * dx, gy = factor * dy, gz = factor * dz;
-          // Accumulate force contribution to ATb
-          double fcontrib = (double)gx*(double)fxi + (double)gy*(double)fyi + (double)gz*(double)fzi;
-          if (fcontrib != 0.0) atomicAdd(&d_ATb[kk], wf * fcontrib);
-          // Accumulate to ATA: ATA[kk][mm] += wf * (gx*gx' + gy*gy' + gz*gz')
-          for (int cc = 0; cc < ncoeff; cc++) {
-            int mm = pi * ncoeff + cc;
-            if (mm < kk) continue; // only upper triangle for efficiency
-            float dbdr2 = _dbval(cc, nint, r, kmin, kd);
-            float factor2 = -dbdr2 * inv_r;
-            float gx2 = factor2 * dx, gy2 = factor2 * dy, gz2 = factor2 * dz;
-            double gdot = (double)gx*gx2 + (double)gy*gy2 + (double)gz*gz2;
-            if (gdot != 0) {
-              atomicAdd(&d_ATA[kk * nparam + mm], wf * gdot);
-              if (kk != mm) atomicAdd(&d_ATA[mm * nparam + kk], wf * gdot);
-            }
-          }
+      int ti = typ[o+i]; int nn_start = nn_off[nn_base+i]; int nni = nn_off[nn_base+i+1]-nn_start;
+      for (int jj = 0; jj < nni; jj++) {
+        int j = nn_lst[nn_start+jj];
+        float dx12=x[o+j]-x[o+i],dy12=y[o+j]-y[o+i],dz12=z[o+j]-z[o+i];
+        float r12=sqrtf(dx12*dx12+dy12*dy12+dz12*dz12); if(r12>=r0)continue; int tj=typ[o+j];
+        for (int kk=jj+1; kk<nni; kk++) {
+          int k=nn_lst[nn_start+kk];
+          float dx13=x[o+k]-x[o+i],dy13=y[o+k]-y[o+i],dz13=z[o+k]-z[o+i];
+          float r13=sqrtf(dx13*dx13+dy13*dy13+dz13*dz13); if(r13>=r1)continue;
+          float dx23=x[o+k]-x[o+j],dy23=y[o+k]-y[o+j],dz23=z[o+k]-z[o+j];
+          float r23=sqrtf(dx23*dx23+dy23*dy23+dz23*dz23); if(r23>=r2)continue;
+          int tk=typ[o+k], trip=(ti*nt+tj)*nt+tk; int off3=num_params_2b+trip*nc0*nc1*nc2;
+          for(int p=0;p<nc0;p++){float bp=_bval(p,ni0,r12,k0,kd0);if(bp==0)continue;
+          for(int q=0;q<nc1;q++){float bq=_bval(q,ni1,r13,k1,kd1);if(bq==0)continue;float bpbq=bp*bq;
+          for(int r=0;r<nc2;r++){float br=_bval(r,ni2,r23,k2,kd2);if(br==0)continue;
+          atomicAdd(&s_basis[off3+p+q*nc0+r*nc0*nc1], bpbq*br);}}}
         }
       }
     }
   }
+  __syncthreads();
 
-  // 3B: each thread handles center atom i = tid, tid+stride, ...
+  float na=(float)n; if(na<1.0f) na=1.0f;
+  double we = sqrt((double)lambda_e/(double)num_frames_total)/(double)na;
+  for (int k = tid; k < nparam; k += stride) A[(size_t)k*M + row] = we * (double)s_basis[k];
+  if (tid == 0) bvec[row] = we * (double)d_target[fid];
+}
+
+// Force rows: set the RHS (b) and the 2B + 3B force features.  One block per
+// frame; threads stride over real centre atoms.  Force row index for real atom
+// (frame f, local i, component d) = nf + 3*(realbase[f]+i) + d.
+static __global__ void lstsq_force_rows(
+  int nf, int M, const int* __restrict__ fidx, const int* __restrict__ nat,
+  const int* __restrict__ nat_tot, const int* __restrict__ off, const int* __restrict__ realbase,
+  const int* __restrict__ parent,
+  const int* __restrict__ typ, const float* __restrict__ x, const float* __restrict__ y, const float* __restrict__ z,
+  int ncoeff, int nt, int nint, float kmin, float kd, float rc, int num_params_2b,
+  int has_3b, int nc0, int nc1, int nc2, int ni0, int ni1, int ni2,
+  float k0, float kd0, float r0, float k1, float kd1, float r1, float k2, float kd2, float r2,
+  int nparam, float wf,
+  const float* __restrict__ fxref, const float* __restrict__ fyref, const float* __restrict__ fzref,
+  const int* __restrict__ nn_off, const int* __restrict__ nn_lst, const int* __restrict__ nn_frame_off,
+  double* __restrict__ A, double* __restrict__ bvec)
+{
+  int blk = blockIdx.x; if (blk >= nf) return;
+  int tid = threadIdx.x, stride = blockDim.x;
+  int fid = fidx[blk], n = nat[fid], n_tot = nat_tot[fid], o = off[fid];
+  int rb = realbase[fid];
+
+  // RHS + 2B force features
+  for (int i = tid; i < n; i += stride) {
+    int rowx = nf + 3*(rb+i) + 0, rowy = rowx+1, rowz = rowx+2;
+    bvec[rowx] = (double)wf*(double)fxref[o+i];
+    bvec[rowy] = (double)wf*(double)fyref[o+i];
+    bvec[rowz] = (double)wf*(double)fzref[o+i];
+    int ti = typ[o+i];
+    for (int j = 0; j < n_tot; j++) {
+      if (j == i) continue;
+      int tj = typ[o+j];
+      float dx=x[o+i]-x[o+j],dy=y[o+i]-y[o+j],dz=z[o+i]-z[o+j];
+      float d2=dx*dx+dy*dy+dz*dz,invr=rsqrtf(d2),r=d2*invr; if(r>=rc)continue;
+      int pi=ti*nt+tj;
+      for (int c=0;c<ncoeff;c++){ float db=_dbval(c,nint,r,kmin,kd); if(db==0)continue;
+        // F_i = -phi'(r)*rinv*dx ;  per-coeff feature = -db*rinv*dx
+        double f = -(double)db*(double)invr*(double)wf; int col=pi*ncoeff+c;
+        atomicAdd(&A[(size_t)col*M+rowx], f*(double)dx);
+        atomicAdd(&A[(size_t)col*M+rowy], f*(double)dy);
+        atomicAdd(&A[(size_t)col*M+rowz], f*(double)dz);
+      }
+    }
+  }
+
+  // 3B force features (per-centre triplets; scatter to i, parent_j, parent_k).
   if (has_3b) {
+    int nn_base = nn_frame_off[fid];
     for (int i = tid; i < n; i += stride) {
-      int ti = typ[o+i];
-      for (int j = i+1; j < n; j++) {
-        float dx12=x[o+j]-x[o+i], dy12=y[o+j]-y[o+i], dz12=z[o+j]-z[o+i];
-        float r12=sqrtf(dx12*dx12+dy12*dy12+dz12*dz12); if (r12>=r0) continue;
-        int tj=typ[o+j];
-        for (int k=j+1;k<n;k++){
-          float dx13=x[o+k]-x[o+i], dy13=y[o+k]-y[o+i], dz13=z[o+k]-z[o+i];
-          float r13=sqrtf(dx13*dx13+dy13*dy13+dz13*dz13); if (r13>=r1) continue;
-          float dx23=x[o+k]-x[o+j], dy23=y[o+k]-y[o+j], dz23=z[o+k]-z[o+j];
-          float r23=sqrtf(dx23*dx23+dy23*dy23+dz23*dz23); if (r23>=r2) continue;
-          int tk=typ[o+k], trip=(ti*nt+tj)*nt+tk;
-          int off3 = num_params_2b + trip * nc0 * nc1 * nc2;
-          for(int p=0;p<nc0;p++){ float bp=_bval(p,ni0,r12,k0,kd0); if(bp==0)continue;
-          for(int q=0;q<nc1;q++){ float bq=_bval(q,ni1,r13,k1,kd1); if(bq==0)continue;
-          float bpbq=bp*bq;
-          for(int r=0;r<nc2;r++){ float br=_bval(r,ni2,r23,k2,kd2); if(br==0)continue;
-          atomicAdd(&s_basis[off3 + p + q*nc0 + r*nc0*nc1], bpbq * br);
+      int ti=typ[o+i]; int nn_start=nn_off[nn_base+i]; int nni=nn_off[nn_base+i+1]-nn_start;
+      int rowi = nf + 3*(rb+i);
+      for (int jj=0; jj<nni; jj++) {
+        int j=nn_lst[nn_start+jj];
+        float dx12=x[o+j]-x[o+i],dy12=y[o+j]-y[o+i],dz12=z[o+j]-z[o+i];
+        float d12=dx12*dx12+dy12*dy12+dz12*dz12,inv12=rsqrtf(d12),r12=d12*inv12; if(r12>=r0)continue;
+        int tj=typ[o+j]; int pj=parent[o+j]; int rowj=nf+3*(rb+pj);
+        int m0=(int)((r12-k0)/kd0); if(m0<0)m0=0; if(m0>=ni0)m0=ni0-1; float u0=(r12-(k0+m0*kd0))/kd0;
+        float b0[4],db0[4]; { float u=u0,u2=u*u,u3=u2*u; b0[0]=(1-3*u+3*u2-u3)/6;b0[1]=(4-6*u2+3*u3)/6;b0[2]=(1+3*u+3*u2-3*u3)/6;b0[3]=u3/6;
+          float om=1-u; db0[0]=-om*om*0.5f/kd0; db0[1]=u*(3*u-4)*0.5f/kd0; db0[2]=(-3*u2+2*u+1)*0.5f/kd0; db0[3]=u2*0.5f/kd0; }
+        int p0=m0-3; if(p0<0)p0=0;
+        for (int kk=jj+1; kk<nni; kk++) {
+          int k=nn_lst[nn_start+kk];
+          float dx13=x[o+k]-x[o+i],dy13=y[o+k]-y[o+i],dz13=z[o+k]-z[o+i];
+          float d13=dx13*dx13+dy13*dy13+dz13*dz13,inv13=rsqrtf(d13),r13=d13*inv13; if(r13>=r1)continue;
+          float dx23=x[o+k]-x[o+j],dy23=y[o+k]-y[o+j],dz23=z[o+k]-z[o+j];
+          float d23=dx23*dx23+dy23*dy23+dz23*dz23,inv23=rsqrtf(d23),r23=d23*inv23; if(r23>=r2)continue;
+          int tk=typ[o+k]; int pk=parent[o+k]; int rowk=nf+3*(rb+pk);
+          int trip=(ti*nt+tj)*nt+tk; int off3=num_params_2b+trip*nc0*nc1*nc2;
+          int m1=(int)((r13-k1)/kd1); if(m1<0)m1=0; if(m1>=ni1)m1=ni1-1; float u1=(r13-(k1+m1*kd1))/kd1;
+          int m2=(int)((r23-k2)/kd2); if(m2<0)m2=0; if(m2>=ni2)m2=ni2-1; float u2=(r23-(k2+m2*kd2))/kd2;
+          float b1[4],db1[4],b2[4],db2[4];
+          { float u=u1,uu=u*u,uuu=uu*u; b1[0]=(1-3*u+3*uu-uuu)/6;b1[1]=(4-6*uu+3*uuu)/6;b1[2]=(1+3*u+3*uu-3*uuu)/6;b1[3]=uuu/6;
+            float om=1-u; db1[0]=-om*om*0.5f/kd1; db1[1]=u*(3*u-4)*0.5f/kd1; db1[2]=(-3*uu+2*u+1)*0.5f/kd1; db1[3]=uu*0.5f/kd1; }
+          { float u=u2,uu=u*u,uuu=uu*u; b2[0]=(1-3*u+3*uu-uuu)/6;b2[1]=(4-6*uu+3*uuu)/6;b2[2]=(1+3*u+3*uu-3*uuu)/6;b2[3]=uuu/6;
+            float om=1-u; db2[0]=-om*om*0.5f/kd2; db2[1]=u*(3*u-4)*0.5f/kd2; db2[2]=(-3*uu+2*u+1)*0.5f/kd2; db2[3]=uu*0.5f/kd2; }
+          int p1=m1-3; if(p1<0)p1=0; int p2=m2-3; if(p2<0)p2=0;
+          for(int dp=0;dp<4;dp++){int p=p0+dp; if(p>=nc0)break; float Bp=b0[dp],dBp=db0[dp];
+          for(int dq=0;dq<4;dq++){int q=p1+dq; if(q>=nc1)break; float Bq=b1[dq],dBq=db1[dq];
+          for(int dr=0;dr<4;dr++){int rr=p2+dr; if(rr>=nc2)break;
+            int col=off3+p+q*nc0+rr*nc0*nc1;
+            float G12=dBp*Bq*b2[dr];          // d(dE/dr12)/dC
+            float G13=Bp*dBq*b2[dr];
+            float G23=Bp*Bq*db2[dr];
+            // F_i = G12*inv12*dx12 + G13*inv13*dx13 (per coeff), scaled by wf.
+            double fix=(double)wf*((double)G12*inv12*dx12+(double)G13*inv13*dx13);
+            double fiy=(double)wf*((double)G12*inv12*dy12+(double)G13*inv13*dy13);
+            double fiz=(double)wf*((double)G12*inv12*dz12+(double)G13*inv13*dz13);
+            atomicAdd(&A[(size_t)col*M+rowi+0],fix); atomicAdd(&A[(size_t)col*M+rowi+1],fiy); atomicAdd(&A[(size_t)col*M+rowi+2],fiz);
+            double fjx=(double)wf*(-(double)G12*inv12*dx12+(double)G23*inv23*dx23);
+            double fjy=(double)wf*(-(double)G12*inv12*dy12+(double)G23*inv23*dy23);
+            double fjz=(double)wf*(-(double)G12*inv12*dz12+(double)G23*inv23*dz23);
+            atomicAdd(&A[(size_t)col*M+rowj+0],fjx); atomicAdd(&A[(size_t)col*M+rowj+1],fjy); atomicAdd(&A[(size_t)col*M+rowj+2],fjz);
+            double fkx=(double)wf*(-(double)G13*inv13*dx13-(double)G23*inv23*dx23);
+            double fky=(double)wf*(-(double)G13*inv13*dy13-(double)G23*inv23*dy23);
+            double fkz=(double)wf*(-(double)G13*inv13*dz13-(double)G23*inv23*dz23);
+            atomicAdd(&A[(size_t)col*M+rowk+0],fkx); atomicAdd(&A[(size_t)col*M+rowk+1],fky); atomicAdd(&A[(size_t)col*M+rowk+2],fkz);
           }}}
         }
       }
     }
   }
-  __syncthreads();
-
-  // All threads: atomically accumulate basis into ATA/ATb (distributed)
-  // Thread k handles rows k, k+stride, ... of the ATA matrix
-  if (d_ATA && d_ATb) {
-    float targ = d_target[fid];
-    for (int k = tid; k < nparam; k += stride) {
-      float bk = s_basis[k]; if (bk == 0) continue;
-      atomicAdd(&d_ATb[k], (double)bk * (double)targ);
-      for (int m = 0; m < nparam; m++) {
-        float bm = s_basis[m]; if (bm == 0) continue;
-        atomicAdd(&d_ATA[k * nparam + m], (double)bk * (double)bm);
-      }
-    }
-  }
-
-  // Also write basis to global output (for debug/download)
-  if (tid == 0) {
-    float* g_basis = basis_out + b * nparam;
-    for (int kk = 0; kk < nparam; kk++) g_basis[kk] = s_basis[kk];
-  }
 }
 
-// GPU reduction: accumulate basis vectors into ATA matrix and ATb vector
-static __global__ void lstsq_reduce_ata(
-  int nf, int nparam, const float* __restrict__ basis, const float* __restrict__ target,
-  double* __restrict__ d_ATA, double* __restrict__ d_ATb)
+// ---- Curvature (second-difference) regularization --------------------------
+// Adds lambda * (D2 c)^T (D2 c) penalties to the normal matrix, where D2 is the
+// discrete second-difference operator along a coefficient sequence.  This is
+// what keeps the under-constrained 3B spline grid smooth and physical — without
+// it the energy-only 3B fit produces wildly oscillating coefficients and absurd
+// forces.  Indices id[0..2] are the three stencil positions in the global
+// parameter vector; the stencil weights are (1, -2, 1).
+static inline void add_curvature_stencil(std::vector<double>& ATA, int nparam,
+                                         int i0, int i1, int i2, double lam)
 {
-  int idx = blockIdx.x * blockDim.x + threadIdx.x;
-  if (idx >= nparam) return;
-  int k = idx; // This thread handles row k of ATA
+  const int idx[3] = {i0, i1, i2};
+  const double w[3] = {1.0, -2.0, 1.0};
+  for (int a = 0; a < 3; a++)
+    for (int b = 0; b < 3; b++)
+      ATA[(size_t)idx[a] * nparam + idx[b]] += lam * w[a] * w[b];
+}
 
-  // For row k, accumulate contributions from all frames
-  // This is O(nparam * nf) per block — let's use a different decomposition.
-  // Actually, let each block handle one frame: atomicAdd d_ATA[basis_k][basis_m]
-  // and d_ATb[basis_k] * target.
-  // We'll use a simple approach: blocks process frames, threads process coefficients.
-  // For now: CPU path below is the fallback.
+// 2B: penalize curvature along each pair's 1D coefficient sequence.
+// 3B: penalize curvature along each of the three grid axes independently.
+static void add_curvature_regularization(
+  std::vector<double>& ATA, int nparam,
+  int npairs, int ncoeff,
+  bool has_3b, int num_params_2b, int num_trips, int nc0, int nc1, int nc2,
+  double lam2b, double lam3b)
+{
+  if (lam2b > 0.0) {
+    for (int p = 0; p < npairs; p++) {
+      int base = p * ncoeff;
+      for (int c = 1; c < ncoeff - 1; c++)
+        add_curvature_stencil(ATA, nparam, base + c - 1, base + c, base + c + 1, lam2b);
+    }
+  }
+  if (has_3b && lam3b > 0.0) {
+    int gsz = nc0 * nc1 * nc2;
+    for (int t = 0; t < num_trips; t++) {
+      int base = num_params_2b + t * gsz;
+      auto gidx = [&](int a, int b, int c) { return base + a + b * nc0 + c * nc0 * nc1; };
+      for (int c = 0; c < nc2; c++)
+        for (int b = 0; b < nc1; b++)
+          for (int a = 1; a < nc0 - 1; a++)
+            add_curvature_stencil(ATA, nparam, gidx(a-1,b,c), gidx(a,b,c), gidx(a+1,b,c), lam3b);
+      for (int c = 0; c < nc2; c++)
+        for (int a = 0; a < nc0; a++)
+          for (int b = 1; b < nc1 - 1; b++)
+            add_curvature_stencil(ATA, nparam, gidx(a,b-1,c), gidx(a,b,c), gidx(a,b+1,c), lam3b);
+      for (int b = 0; b < nc1; b++)
+        for (int a = 0; a < nc0; a++)
+          for (int c = 1; c < nc2 - 1; c++)
+            add_curvature_stencil(ATA, nparam, gidx(a,b,c-1), gidx(a,b,c), gidx(a,b,c+1), lam3b);
+    }
+  }
 }
 
 void run_lstsq(
@@ -258,43 +350,110 @@ void run_lstsq(
   auto t0 = std::chrono::high_resolution_clock::now();
 
   // Use pre-loaded GPU data directly — NO H2D upload
-
   std::vector<int> h_bidx(use_frames);
   for (int i = 0; i < use_frames; i++) h_bidx[i] = i;
   GPU_Vector<int> d_bidx(use_frames);
   d_bidx.copy_from_host(h_bidx.data());
 
-  GPU_Vector<float> d_basis(use_frames * nparam);
-  GPU_Vector<double> d_ATA(nparam * nparam), d_ATb(nparam);
-  // Zero ATA/ATb on GPU
-  cudaMemset(d_ATA.data(), 0, nparam * nparam * sizeof(double));
-  cudaMemset(d_ATb.data(), 0, nparam * sizeof(double));
+  // e0 (1-body) columns live at the end of the parameter vector.
+  int e0_off = nparam - nt;
 
-  // Launch GPU kernel: 1 frame per block, 64 threads per block, shared memory
+  // Per-frame real-atom base offsets (compacted real-atom force-row indexing).
+  std::vector<int> h_realbase(use_frames);
+  int total_real = 0;
+  for (int i = 0; i < use_frames; i++) { h_realbase[i] = total_real; total_real += ds.h_natoms[i]; }
+  if (total_real < 1) total_real = 1;
+  GPU_Vector<int> d_realbase(use_frames);
+  d_realbase.copy_from_host(h_realbase.data());
+
+  // Design matrix A (column-major, M x nparam) and RHS b.
+  long long M = (long long)use_frames + 3LL * total_real;
+  float lambda_e = (float)para.lambda_e, lambda_f = (float)para.lambda_f;
+  float wf = (lambda_f > 0.0f) ? sqrtf(lambda_f / (3.0f * (float)total_real)) : 0.0f;
+
+  GPU_Vector<double> d_A((size_t)M * nparam), d_b(M);
+  cudaMemset(d_A.data(), 0, (size_t)M * nparam * sizeof(double));
+  cudaMemset(d_b.data(), 0, (size_t)M * sizeof(double));
+
   const int BLK = 64;
   size_t smem = nparam * sizeof(float);
-  lstsq_accumulate<<<use_frames, BLK, smem>>>(
-    use_frames, d_bidx.data(), ds.d_natoms.data(), ds.d_offsets.data(),
+  lstsq_energy_rows<<<use_frames, BLK, smem>>>(
+    use_frames, (int)M, d_bidx.data(), ds.d_natoms.data(), ds.d_natoms_tot.data(), ds.d_offsets.data(),
     ds.d_types.data(), ds.d_x.data(), ds.d_y.data(), ds.d_z.data(),
-    ncoeff, npairs, nt, nint, kmin, kd, rc, num_params_2b,
+    ncoeff, nt, nint, kmin, kd, rc, num_params_2b,
     has_3b ? 1 : 0, nc3[0], nc3[1], nc3[2], ni3[0], ni3[1], ni3[2],
     k3[0], kd3[0], r3[0], k3[1], kd3[1], r3[1], k3[2], kd3[2], r3[2],
-    nparam, d_basis.data(), d_ATA.data(), d_ATb.data(), ds.d_energy_ref.data(),
-    ds.d_fx_ref.data(), ds.d_fy_ref.data(), ds.d_fz_ref.data(), (float)para.lambda_f, num_params_2b);
+    nparam, e0_off, use_frames, ds.d_energy_ref.data(), lambda_e,
+    ds.d_nn_off.data(), ds.d_nn_lst.data(), ds.d_nn_frame_off.data(),
+    d_A.data(), d_b.data());
   GPU_CHECK_KERNEL
 
-  // Download ATA and ATb from GPU (already accumulated atomically)
-  std::vector<double> ATA(nparam * nparam), ATb(nparam);
-  cudaMemcpy(ATA.data(), d_ATA.data(), nparam*nparam*sizeof(double), cudaMemcpyDeviceToHost);
-  cudaMemcpy(ATb.data(), d_ATb.data(), nparam*sizeof(double), cudaMemcpyDeviceToHost);
+  if (lambda_f > 0.0f) {
+    lstsq_force_rows<<<use_frames, BLK>>>(
+      use_frames, (int)M, d_bidx.data(), ds.d_natoms.data(), ds.d_natoms_tot.data(),
+      ds.d_offsets.data(), d_realbase.data(), ds.d_parent.data(),
+      ds.d_types.data(), ds.d_x.data(), ds.d_y.data(), ds.d_z.data(),
+      ncoeff, nt, nint, kmin, kd, rc, num_params_2b,
+      has_3b ? 1 : 0, nc3[0], nc3[1], nc3[2], ni3[0], ni3[1], ni3[2],
+      k3[0], kd3[0], r3[0], k3[1], kd3[1], r3[1], k3[2], kd3[2], r3[2],
+      nparam, wf, ds.d_fx_ref.data(), ds.d_fy_ref.data(), ds.d_fz_ref.data(),
+      ds.d_nn_off.data(), ds.d_nn_lst.data(), ds.d_nn_frame_off.data(),
+      d_A.data(), d_b.data());
+    GPU_CHECK_KERNEL
+  }
 
-  for (int k = 0; k < nparam; k++) ATA[k*nparam + k] += 1e-6;
-  std::vector<float> ATAf(nparam*nparam), ATbf(nparam);
-  for (int i = 0; i < nparam; i++) { ATbf[i] = (float)ATb[i];
-    for (int j = 0; j < nparam; j++) ATAf[i*nparam+j] = (float)ATA[i*nparam+j]; }
-  bool ok = cholesky(ATAf, nparam);
-  if (!ok) printf("  lstsq: ATA not PD\n");
-  std::vector<float> x; solve_cholesky(ATAf, nparam, ATbf, x);
+  // Normal equations via cuBLAS: ATA = A^T A (nparam x nparam), ATb = A^T b.
+  GPU_Vector<double> d_ATA((size_t)nparam * nparam), d_ATb(nparam);
+  cublasHandle_t cb; cublasCreate(&cb);
+  double one = 1.0, zero = 0.0;
+  // syrk fills one triangle in cuBLAS col-major order; CUBLAS_FILL_MODE_UPPER
+  // maps to the LOWER triangle of our row-major host copy, which is the triangle
+  // the Cholesky routine reads.
+  cublasDsyrk(cb, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_T, nparam, (int)M,
+              &one, d_A.data(), (int)M, &zero, d_ATA.data(), nparam);
+  cublasDgemv(cb, CUBLAS_OP_T, (int)M, nparam, &one, d_A.data(), (int)M,
+              d_b.data(), 1, &zero, d_ATb.data(), 1);
+  cublasDestroy(cb);
+
+  std::vector<double> ATA((size_t)nparam * nparam), ATb(nparam);
+  cudaMemcpy(ATA.data(), d_ATA.data(), (size_t)nparam*nparam*sizeof(double), cudaMemcpyDeviceToHost);
+  cudaMemcpy(ATb.data(), d_ATb.data(), nparam*sizeof(double), cudaMemcpyDeviceToHost);
+  // Valid data is in the host lower triangle — mirror it to the upper triangle.
+  for (int i = 0; i < nparam; i++)
+    for (int j = i + 1; j < nparam; j++)
+      ATA[(size_t)i*nparam + j] = ATA[(size_t)j*nparam + i];
+
+  // Tikhonov ridge.  Two components: (1) a relative term so well-constrained
+  // columns are barely perturbed, and (2) a per-column floor proportional to
+  // the mean diagonal so nearly-unconstrained 3B columns (diagonal ~0, e.g.
+  // triplets/basis that never activate) stay positive-definite and solve to ~0.
+  double diag_mean = 0.0;
+  for (int k = 0; k < nparam; k++) diag_mean += ATA[k*nparam + k];
+  diag_mean /= std::max(1, nparam);
+  double ridge_rel = 1e-8;
+  double ridge_floor = 1e-6 * (diag_mean > 0.0 ? diag_mean : 1.0);
+  for (int k = 0; k < nparam; k++) {
+    double dk = ATA[k*nparam + k];
+    ATA[k*nparam + k] = dk + ridge_rel * dk + ridge_floor;
+  }
+
+  // Curvature regularization (scaled relative to the mean diagonal so it is
+  // invariant to the absolute weighting scale).  3B needs much stronger
+  // smoothing than 2B since the energy-only 3B fit is heavily under-constrained.
+  double dm = (diag_mean > 0.0 ? diag_mean : 1.0);
+  double lam2b = 1e-4 * dm;
+  double lam3b = 1e-3 * dm;
+  if (const char* e = getenv("UF3_C2")) lam2b = atof(e) * dm;
+  if (const char* e = getenv("UF3_C3")) lam3b = atof(e) * dm;
+  add_curvature_regularization(ATA, nparam, npairs, ncoeff,
+                               has_3b, num_params_2b, fitness.model()->num_triplets(),
+                               nc3[0], nc3[1], nc3[2], lam2b, lam3b);
+
+  bool ok = cholesky(ATA, nparam);   // in-place Cholesky in double
+  if (!ok) printf("  lstsq: ATA not PD (after ridge)\n");
+  std::vector<double> xd; solve_cholesky(ATA, nparam, ATb, xd);
+  std::vector<float> x(nparam);
+  for (int i = 0; i < nparam; i++) x[i] = (float)xd[i];
   fitness.model()->set_parameters(x.data());
 
   auto t1 = std::chrono::high_resolution_clock::now();

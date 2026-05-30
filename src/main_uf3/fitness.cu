@@ -90,7 +90,10 @@ Uf3Fitness::Uf3Fitness(
   h_loss_sum_pinned_[1] = 0.0f;
 
   if (!para.test_data.empty() && para.test_data != "none") {
-    test_set_ = load_uf3_frames(para.test_data.c_str(), para.elements, 0.0f);
+    float nn_cut = para.n_max_3b[0] > 0
+                     ? (float)std::max(para.rc_3b[0], para.rc_3b[1]) : 0.0f;
+    float ghost_cut = std::max((float)para.rc_2b, nn_cut);
+    test_set_ = load_uf3_frames(para.test_data.c_str(), para.elements, nn_cut, ghost_cut);
     test_set_size_ = (int)test_set_.size();
     printf("Loaded %d test frames.\n", test_set_size_);
   } else {
@@ -249,12 +252,28 @@ void Uf3Fitness::evaluate_test_set(int /*generation*/, int /*stage_id*/)
   model_->evaluate(test_set_, tidx, d_energy_test_);
   d_energy_test_.copy_to_host(h_energy_test_.data());
 
-  cudaMemcpy(h_fx_test_.data(), model_->d_fx.data(), t_total * sizeof(float),
-             cudaMemcpyDeviceToHost);
-  cudaMemcpy(h_fy_test_.data(), model_->d_fy.data(), t_total * sizeof(float),
-             cudaMemcpyDeviceToHost);
-  cudaMemcpy(h_fz_test_.data(), model_->d_fz.data(), t_total * sizeof(float),
-             cudaMemcpyDeviceToHost);
+  // Forces are laid out at EXPANDED (real+ghost) offsets in model_->d_fx; gather
+  // the real-atom forces (first n_real of each frame's expanded block) into the
+  // contiguous per-frame layout the RMSE loop below expects.
+  int t_exp = 0;
+  for (int i = 0; i < ntest; i++) t_exp += test_set_[i].num_total;
+  std::vector<float> exp_fx(t_exp), exp_fy(t_exp), exp_fz(t_exp);
+  cudaMemcpy(exp_fx.data(), model_->d_fx.data(), t_exp * sizeof(float), cudaMemcpyDeviceToHost);
+  cudaMemcpy(exp_fy.data(), model_->d_fy.data(), t_exp * sizeof(float), cudaMemcpyDeviceToHost);
+  cudaMemcpy(exp_fz.data(), model_->d_fz.data(), t_exp * sizeof(float), cudaMemcpyDeviceToHost);
+  {
+    int eoff = 0, roff = 0;
+    for (int i = 0; i < ntest; i++) {
+      int nr = test_set_[i].num_atoms;
+      for (int j = 0; j < nr; j++) {
+        h_fx_test_[roff + j] = exp_fx[eoff + j];
+        h_fy_test_[roff + j] = exp_fy[eoff + j];
+        h_fz_test_[roff + j] = exp_fz[eoff + j];
+      }
+      eoff += test_set_[i].num_total;
+      roff += nr;
+    }
+  }
 
   double te_sum2 = 0;
   for (int i = 0; i < ntest; i++) {
@@ -361,10 +380,12 @@ void Uf3Fitness::compute_loss_population(
 {
   if (pop <= 0) return;
 
-  // 3B fallback: pop kernels currently only cover 2B.  Use the existing
-  // single-individual path one at a time.  The duplicate-logging guard in
-  // compute_loss_for_params ensures only one row is written per checkpoint.
-  if (model_->has_3b()) {
+  // Correctness-first: the 2B population fast-path predates the PBC ghost-atom
+  // and 1-body (e0) changes and would evaluate the wrong model, so route every
+  // individual through the fully-correct single-individual path for now.  The
+  // performance phase will restore a correct *parallel* population kernel
+  // (ghost-aware 2B+3B+e0) — the priority path for SNES.
+  if (true || model_->has_3b()) {
     int nparam = model_->num_parameters();
     for (int p = 0; p < pop; p++) {
       out_loss_total[p] = compute_loss_for_params(

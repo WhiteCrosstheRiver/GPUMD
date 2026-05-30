@@ -164,12 +164,80 @@ static ColLayout parse_properties(const std::string& prop_str)
 }
 
 // ---------------------------------------------------------------------------
+// Periodic ghost-atom expansion
+// ---------------------------------------------------------------------------
+// Append periodic images of the real atoms that fall within `cutoff` of any
+// real atom.  After this, all interactions within `cutoff` can be found by
+// plain distance computation over [0, num_total) with no PBC math in kernels.
+// Correct even when the cell is smaller than 2*cutoff (multiple images of the
+// same atom are added), unlike minimum-image convention.
+static void generate_ghosts(Uf3Frame& f, float cutoff)
+{
+  const float* H = f.box;            // columns a,b,c
+  const float ax = H[0], ay = H[1], az = H[2];   // a = column 0
+  const float bx = H[3], by = H[4], bz = H[5];   // b = column 1
+  const float cx = H[6], cy = H[7], cz = H[8];   // c = column 2
+
+  // Perpendicular spacings (interplanar distances) to bound the image range.
+  auto cross = [](float ux, float uy, float uz, float vx, float vy, float vz,
+                  float& rx, float& ry, float& rz) {
+    rx = uy * vz - uz * vy;
+    ry = uz * vx - ux * vz;
+    rz = ux * vy - uy * vx;
+  };
+  float nx, ny, nz;
+  cross(bx, by, bz, cx, cy, cz, nx, ny, nz);
+  float vol = std::fabs(ax * nx + ay * ny + az * nz);
+  if (vol < 1e-6f) return;  // degenerate cell
+
+  auto perp = [&](float ux, float uy, float uz, float vx, float vy, float vz) {
+    float rx, ry, rz;
+    cross(ux, uy, uz, vx, vy, vz, rx, ry, rz);
+    float area = std::sqrt(rx * rx + ry * ry + rz * rz);
+    return vol / std::max(area, 1e-6f);
+  };
+  int N1 = (int)std::ceil(cutoff / perp(bx, by, bz, cx, cy, cz));
+  int N2 = (int)std::ceil(cutoff / perp(ax, ay, az, cx, cy, cz));
+  int N3 = (int)std::ceil(cutoff / perp(ax, ay, az, bx, by, bz));
+
+  int n_real = f.num_atoms;
+  const float cut2 = cutoff * cutoff;
+  for (int i1 = -N1; i1 <= N1; i1++) {
+    for (int i2 = -N2; i2 <= N2; i2++) {
+      for (int i3 = -N3; i3 <= N3; i3++) {
+        if (i1 == 0 && i2 == 0 && i3 == 0) continue;
+        float sx = i1 * ax + i2 * bx + i3 * cx;
+        float sy = i1 * ay + i2 * by + i3 * cy;
+        float sz = i1 * az + i2 * bz + i3 * cz;
+        for (int i = 0; i < n_real; i++) {
+          float gx = f.x[i] + sx, gy = f.y[i] + sy, gz = f.z[i] + sz;
+          // Keep ghost only if within cutoff of at least one real atom.
+          bool keep = false;
+          for (int j = 0; j < n_real; j++) {
+            float dx = gx - f.x[j], dy = gy - f.y[j], dz = gz - f.z[j];
+            if (dx * dx + dy * dy + dz * dz < cut2) { keep = true; break; }
+          }
+          if (!keep) continue;
+          f.x.push_back(gx);
+          f.y.push_back(gy);
+          f.z.push_back(gz);
+          f.types.push_back(f.types[i]);
+          f.parent.push_back(i);
+        }
+      }
+    }
+  }
+  f.num_total = (int)f.x.size();
+}
+
+// ---------------------------------------------------------------------------
 // Main loader
 // ---------------------------------------------------------------------------
 std::vector<Uf3Frame> load_uf3_frames(
   const char* filename,
   const std::vector<std::string>& elements,
-  float nn_cutoff)
+  float nn_cutoff,
+  float ghost_cutoff)
 {
   std::ifstream input(filename);
   if (!input.is_open()) {
@@ -277,47 +345,57 @@ std::vector<Uf3Frame> load_uf3_frames(
       }
     }
 
-    // ---- 3B neighbor list (with PBC if lattice is available) ---------------
+    if (!frame_ok) continue;
+
+    // ---- Periodic ghost-atom expansion ------------------------------------
+    // Real atoms occupy [0, num_atoms); periodic images are appended so that
+    // every interaction within the cutoff is reachable by a plain distance
+    // computation (correct even for cells smaller than 2*cutoff).
+    f.num_total = natoms;
+    f.parent.resize(natoms);
+    for (int i = 0; i < natoms; i++) f.parent[i] = i;
+    float gcut = std::max(ghost_cutoff, nn_cutoff);
+    if (f.has_lattice && gcut > 0.0f) {
+      generate_ghosts(f, gcut);
+    }
+
+    // ---- 3B neighbor list (over expanded atoms; raw distances) ------------
+    // Centers are the real atoms [0, num_atoms); neighbors range over the full
+    // expanded set [0, num_total), so ghost images are ordinary neighbors.
     if (nn_cutoff > 0.0f) {
+      int ntot = f.num_total;
       f.nn_counts.assign(natoms, 0);
       f.nn_offset.resize(natoms + 1, 0);
 
       // Pass 1: count
       for (int i = 0; i < natoms; i++) {
-        for (int j = i + 1; j < natoms; j++) {
+        for (int j = 0; j < ntot; j++) {
+          if (j == i) continue;
           float dx = f.x[j] - f.x[i];
           float dy = f.y[j] - f.y[i];
           float dz = f.z[j] - f.z[i];
-          if (f.has_lattice) apply_mic(f.box, f.box_inv, dx, dy, dz);
-          if (dx*dx + dy*dy + dz*dz < cutoff_sq) {
-            f.nn_counts[i]++;
-            f.nn_counts[j]++;
-          }
+          if (dx*dx + dy*dy + dz*dz < cutoff_sq) f.nn_counts[i]++;
         }
       }
-
       for (int i = 0; i < natoms; i++)
         f.nn_offset[i + 1] = f.nn_offset[i] + f.nn_counts[i];
-      int total_nn = f.nn_offset[natoms];
-      f.nn_list.resize(total_nn);
+      f.nn_list.resize(f.nn_offset[natoms]);
 
       // Pass 2: fill
       std::vector<int> counters(natoms, 0);
       for (int i = 0; i < natoms; i++) {
-        for (int j = i + 1; j < natoms; j++) {
+        for (int j = 0; j < ntot; j++) {
+          if (j == i) continue;
           float dx = f.x[j] - f.x[i];
           float dy = f.y[j] - f.y[i];
           float dz = f.z[j] - f.z[i];
-          if (f.has_lattice) apply_mic(f.box, f.box_inv, dx, dy, dz);
-          if (dx*dx + dy*dy + dz*dz < cutoff_sq) {
+          if (dx*dx + dy*dy + dz*dz < cutoff_sq)
             f.nn_list[f.nn_offset[i] + counters[i]++] = j;
-            f.nn_list[f.nn_offset[j] + counters[j]++] = i;
-          }
         }
       }
     }
 
-    if (frame_ok) frames.push_back(std::move(f));
+    frames.push_back(std::move(f));
   }
 
   input.close();

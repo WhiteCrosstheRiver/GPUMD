@@ -18,10 +18,19 @@
 #include <vector>
 
 struct Uf3Frame {
-  int num_atoms = 0;
+  int num_atoms = 0;   // number of REAL atoms (energy/forces centered on these)
+  int num_total = 0;   // real + periodic ghost images (neighbors only).
+                       //   == num_atoms for non-periodic frames.
+
+  // Per-atom arrays.  Indices [0, num_atoms)        -> real atoms.
+  //                    Indices [num_atoms, num_total) -> ghost images.
+  // x/y/z/types/parent are sized to num_total; fx/fy/fz to num_atoms (real only).
   std::vector<int> types;
   std::vector<float> x, y, z;
   std::vector<float> fx, fy, fz;
+  // parent[i] = real-atom index that ghost i is an image of (parent[i]=i for
+  // real atoms).  Used to scatter ghost force contributions back to real atoms.
+  std::vector<int> parent;
   float energy = 0.0f;
 
   // Lattice matrix (column-major, same convention as main_nep):
@@ -31,15 +40,20 @@ struct Uf3Frame {
   float box_inv[9] = {};
   bool has_lattice = false;
 
-  // Pre-built neighbor list within 3B cutoff (indices of atoms)
+  // Pre-built neighbor list within 3B cutoff.  Entries index into the expanded
+  // [0, num_total) atom array, so ghost images appear as ordinary neighbors and
+  // distances can be computed directly from x/y/z (no PBC math in the kernel).
   std::vector<int> nn_counts;
   std::vector<int> nn_offset;
   std::vector<int> nn_list;
 };
 
 // elements: ordered list from UF3_Parameters (e.g. {"Si","Ge"}).
-// nn_cutoff > 0 triggers neighbor-list construction with PBC.
+// ghost_cutoff > 0 triggers periodic ghost-atom expansion (images within
+//   ghost_cutoff of any real atom are appended for correct PBC neighbor finding).
+// nn_cutoff > 0 additionally builds the 3B neighbor list (over expanded atoms).
 std::vector<Uf3Frame> load_uf3_frames(
   const char* filename,
   const std::vector<std::string>& elements,
-  float nn_cutoff = 0.0f);
+  float nn_cutoff = 0.0f,
+  float ghost_cutoff = 0.0f);

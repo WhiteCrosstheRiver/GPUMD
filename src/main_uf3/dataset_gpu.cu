@@ -25,20 +25,25 @@ void Uf3DatasetGPU::load(const std::vector<Uf3Frame>& frames, bool has_3b_flag,
   has_3b = has_3b_flag;
   if (num_frames == 0) return;
 
-  // Count total atoms & build flat host arrays
-  total_atoms = 0;
-  h_natoms.resize(num_frames);
+  // Count atoms & build flat host arrays.  Per-atom arrays use the EXPANDED
+  // (real + ghost) count so periodic neighbors are addressable; per-frame
+  // metadata tracks the real count (centers / loss) separately.
+  total_atoms = 0;            // sum of expanded counts
+  h_natoms.resize(num_frames);       // real atoms per frame
+  std::vector<int> h_natoms_tot(num_frames);  // expanded atoms per frame
   h_offsets.resize(num_frames + 1);
   h_offsets[0] = 0;
   for (int i = 0; i < num_frames; i++) {
     h_natoms[i] = frames[i].num_atoms;
-    total_atoms += h_natoms[i];
+    h_natoms_tot[i] = frames[i].num_total;
+    total_atoms += h_natoms_tot[i];
     h_offsets[i + 1] = total_atoms;
   }
 
   std::vector<int> h_types(total_atoms);
+  std::vector<int> h_parent(total_atoms);
   std::vector<float> h_x(total_atoms), h_y(total_atoms), h_z(total_atoms);
-  std::vector<float> h_fx(total_atoms), h_fy(total_atoms), h_fz(total_atoms);
+  std::vector<float> h_fx(total_atoms, 0.0f), h_fy(total_atoms, 0.0f), h_fz(total_atoms, 0.0f);
   std::vector<float> h_energy(num_frames);
   std::vector<int> h_nn_off, h_nn_lst, h_nn_foff;
 
@@ -57,10 +62,13 @@ void Uf3DatasetGPU::load(const std::vector<Uf3Frame>& frames, bool has_3b_flag,
   for (int i = 0; i < num_frames; i++) {
     const auto& f = frames[i];
     int off = h_offsets[i];
+    // Expanded per-atom arrays (real + ghost).
     std::copy(f.types.begin(), f.types.end(), h_types.begin() + off);
     std::copy(f.x.begin(), f.x.end(), h_x.begin() + off);
     std::copy(f.y.begin(), f.y.end(), h_y.begin() + off);
     std::copy(f.z.begin(), f.z.end(), h_z.begin() + off);
+    std::copy(f.parent.begin(), f.parent.end(), h_parent.begin() + off);
+    // Reference forces exist for real atoms only; ghosts stay 0.
     std::copy(f.fx.begin(), f.fx.end(), h_fx.begin() + off);
     std::copy(f.fy.begin(), f.fy.end(), h_fy.begin() + off);
     std::copy(f.fz.begin(), f.fz.end(), h_fz.begin() + off);
@@ -83,11 +91,15 @@ void Uf3DatasetGPU::load(const std::vector<Uf3Frame>& frames, bool has_3b_flag,
   // Upload to GPU
   d_natoms.resize(num_frames);
   d_natoms.copy_from_host(h_natoms.data());
+  d_natoms_tot.resize(num_frames);
+  d_natoms_tot.copy_from_host(h_natoms_tot.data());
   d_offsets.resize(num_frames + 1);
   d_offsets.copy_from_host(h_offsets.data());
 
   d_types.resize(total_atoms);
   d_types.copy_from_host(h_types.data());
+  d_parent.resize(total_atoms);
+  d_parent.copy_from_host(h_parent.data());
   d_x.resize(total_atoms); d_x.copy_from_host(h_x.data());
   d_y.resize(total_atoms); d_y.copy_from_host(h_y.data());
   d_z.resize(total_atoms); d_z.copy_from_host(h_z.data());

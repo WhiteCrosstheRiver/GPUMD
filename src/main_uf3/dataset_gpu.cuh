@@ -33,12 +33,15 @@ struct Uf3DatasetGPU
   int max_batch_atoms = 0;  // max sum-of-atoms across all batches
 
   // --- Per-frame metadata (GPU, size = num_frames) ---
-  GPU_Vector<int> d_natoms;
-  GPU_Vector<int> d_offsets;     // cumulative atom offsets (num_frames+1)
+  GPU_Vector<int> d_natoms;      // REAL atoms per frame (centers / loss / 1-body)
+  GPU_Vector<int> d_natoms_tot;  // real + ghost atoms per frame (neighbor bound)
+  GPU_Vector<int> d_offsets;     // cumulative EXPANDED atom offsets (num_frames+1)
 
-  // --- Per-atom data (GPU, size = total_atoms) ---
+  // --- Per-atom data (GPU, size = total_atoms = sum of expanded counts) ---
+  // Layout per frame: real atoms [0,n_real) first, then ghost images.
   GPU_Vector<int> d_types;
   GPU_Vector<float> d_x, d_y, d_z;
+  GPU_Vector<int> d_parent;      // frame-local real index a ghost images (self for real)
 
   // --- Reference data (GPU) ---
   GPU_Vector<float> d_energy_ref;  // per-frame total energy (num_frames)

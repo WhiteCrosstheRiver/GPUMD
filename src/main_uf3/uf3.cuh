@@ -182,6 +182,14 @@ private:
   std::vector<float> knots_3b_[3];
   std::vector<float> coeffs_3b_;
   int num_params_3b_;
+
+  // 1-body: one constant energy offset per element type.  Stored at the END of
+  // the parameter vector (offset e0_offset_) so 2B/3B parameter indices used by
+  // the gradient kernels are unchanged.  A pure 2B/3B model cannot represent a
+  // constant per-atom energy, so this term is essential for fitting raw DFT
+  // energies (matches reference UF3 offset_1b).
+  std::vector<float> coeffs_e0_;
+  int e0_offset_;
   int num_params_total_;
 
   // ---- Pre-allocated GPU buffers (never resized after init) ----
@@ -201,6 +209,7 @@ public:  // (optimizers access these directly)
   GPU_Vector<float>  d_fx, d_fy, d_fz;         // per-atom forces
   GPU_Vector<float>  d_raw_coeffs_2b;          // [num_types_*num_types_ * ncoeff_2b_]
   GPU_Vector<float4> d_coeff_2b;
+  GPU_Vector<float>  d_e0;                      // [num_types_] 1-body energy offsets
   GPU_Vector<float>  d_tensor_3b;
   GPU_Vector<float4> d_basis_3b_all;
   int basis_offsets_[3];

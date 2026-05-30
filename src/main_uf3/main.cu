@@ -143,7 +143,10 @@ int main(int argc, char* argv[])
 
   printf("Loading data...\n");
   float nn_cutoff = para.n_max_3b[0] > 0 ? (float)std::max(para.rc_3b[0], para.rc_3b[1]) : 0.0f;
-  auto train_frames = load_uf3_frames(para.train_data.c_str(), para.elements, nn_cutoff);
+  // Ghost-atom expansion must cover the largest interaction cutoff (2B or 3B)
+  // so periodic neighbors are present for both the 2B and 3B kernels.
+  float ghost_cutoff = std::max((float)para.rc_2b, nn_cutoff);
+  auto train_frames = load_uf3_frames(para.train_data.c_str(), para.elements, nn_cutoff, ghost_cutoff);
   printf("Loaded %zu training frames.\n", train_frames.size());
 
   bool has_3b = para.n_max_3b[0] > 0;

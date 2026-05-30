@@ -48,25 +48,34 @@ __device__ inline void uf3_bspline4_deriv(float u, float inv_kd, float db[4]) {
 }
 
 // ---- 2B kernel (multi-threaded: each thread handles some atoms) -----------
+// Periodic: centers on real atoms [0,n), neighbours range over the expanded
+// set [0,n_tot) (real + ghost images).  Energy uses the 0.5 pair factor so each
+// physical bond — real-real or real-image — is counted once.  Adds the 1-body
+// (per-element) energy offset for each real atom.
 static __global__ void uf3_eval_2b(
   int nf, const int* __restrict__ fidx, const int* __restrict__ nat,
+  const int* __restrict__ nat_tot,
   const int* __restrict__ off, const int* __restrict__ typ,
   const float* __restrict__ x, const float* __restrict__ y, const float* __restrict__ z,
   const float4* __restrict__ coeff, int np, int nint, float kmin, float kd, float rc,
-  const int* __restrict__ tmap, int nt, float* __restrict__ ene)
+  const int* __restrict__ tmap, int nt, const float* __restrict__ e0,
+  float* __restrict__ ene)
 {
   int b = blockIdx.x; if (b >= nf) return;
   int tid = threadIdx.x, stride = blockDim.x;
-  int fid = fidx[b], n = nat[fid], o = off[fid];
+  int fid = fidx[b], n = nat[fid], n_tot = nat_tot[fid], o = off[fid];
   float pe = 0;
   for (int i = tid; i < n; i += stride) {
-    for (int j = i+1; j < n; j++) {
+    pe += e0[typ[o+i]];                 // 1-body offset (once per real atom)
+    int ti = typ[o+i];
+    for (int j = 0; j < n_tot; j++) {
+      if (j == i) continue;
       float dx = x[o+i]-x[o+j], dy = y[o+i]-y[o+j], dz = z[o+i]-z[o+j];
       float r = sqrtf(dx*dx+dy*dy+dz*dz); if (r >= rc) continue;
       int m = uf3_find_interval(r, kmin, kd, nint);
       float u = (r - (kmin + m*kd)) / kd;
-      float4 c = __ldg(&coeff[tmap[typ[o+i]*nt+typ[o+j]] * nint + m]);
-      pe += uf3_eval_cubic(c, u);
+      float4 c = __ldg(&coeff[tmap[ti*nt+typ[o+j]] * nint + m]);
+      pe += 0.5f * uf3_eval_cubic(c, u);
     }
   }
   // Warp/block reduction
@@ -80,8 +89,12 @@ static __global__ void uf3_eval_2b(
 }
 
 // ---- 2B force kernel (multi-threaded) -----------------------------------
+// Periodic: force on real atom i = -dE/dr summed over all neighbours j in the
+// expanded set (real + ghost images).  No scatter needed — each real atom's
+// force is computed directly from all of its images' neighbours.
 static __global__ void uf3_eval_2b_force(
   int nf, const int* __restrict__ fidx, const int* __restrict__ nat,
+  const int* __restrict__ nat_tot,
   const int* __restrict__ off, const int* __restrict__ typ,
   const float* __restrict__ x, const float* __restrict__ y, const float* __restrict__ z,
   const float4* __restrict__ coeff, int np, int nint, float kmin, float kd, float rc,
@@ -90,11 +103,12 @@ static __global__ void uf3_eval_2b_force(
 {
   int b = blockIdx.x; if (b >= nf) return;
   int tid = threadIdx.x, stride = blockDim.x;
-  int fid = fidx[b], n = nat[fid], o = off[fid];
+  int fid = fidx[b], n = nat[fid], n_tot = nat_tot[fid], o = off[fid];
 
   for (int i = tid; i < n; i += stride) {
+    int ti = typ[o+i];
     float fxi = 0, fyi = 0, fzi = 0;
-    for (int j = 0; j < n; j++) {
+    for (int j = 0; j < n_tot; j++) {
       if (i == j) continue;
       float dx = x[o+i]-x[o+j], dy = y[o+i]-y[o+j], dz = z[o+i]-z[o+j];
       float d2 = dx*dx+dy*dy+dz*dz;
@@ -103,8 +117,9 @@ static __global__ void uf3_eval_2b_force(
       if (r >= rc) continue;
       int m = uf3_find_interval(r, kmin, kd, nint);
       float u = (r - (kmin + m*kd)) / kd;
-      float4 c = __ldg(&coeff[tmap[typ[o+i]*nt+typ[o+j]] * nint + m]);
-      float f = (c.y + u * (2.0f*c.z + u * 3.0f*c.w)) * (rinv / kd);
+      float4 c = __ldg(&coeff[tmap[ti*nt+typ[o+j]] * nint + m]);
+      // Force = -dE/dr_i.  dr/dx_i = (x_i-x_j)/r = dx*rinv, so F_i = -phi'(r)*dx*rinv.
+      float f = -(c.y + u * (2.0f*c.z + u * 3.0f*c.w)) * (rinv / kd);
       fxi += f * dx; fyi += f * dy; fzi += f * dz;
     }
     fx[o+i] = fxi; fy[o+i] = fyi; fz[o+i] = fzi;
@@ -181,7 +196,8 @@ static __global__ void uf3_eval_2b_force_pop(
       int m = uf3_find_interval(r, kmin, kd, nint);
       float u = (r - (kmin + m*kd)) / kd;
       float4 c = __ldg(&coeff_p[tmap[typ[o+i]*nt + typ[o+j]] * nint + m]);
-      float f = (c.y + u * (2.0f*c.z + u * 3.0f*c.w)) * (rinv / kd);
+      // Force = -dE/dr_i.  dr/dx_i = (x_i-x_j)/r = dx*rinv, so F_i = -phi'(r)*dx*rinv.
+      float f = -(c.y + u * (2.0f*c.z + u * 3.0f*c.w)) * (rinv / kd);
       fxi += f * dx; fyi += f * dy; fzi += f * dz;
     }
     fx_p[o+i] = fxi; fy_p[o+i] = fyi; fz_p[o+i] = fzi;
@@ -303,9 +319,10 @@ static __global__ void uf3_eval_reduce_2b_pop(
       float4 c = __ldg(&coeff_p[tmap[typ[o+i]*nt + typ[o+j]] * nint + m]);
       // Energy: count each pair once (j > i)
       if (j > i) pe += uf3_eval_cubic(c, u);
-      // Force on atom i from atom j (register accumulation, no global write)
+      // Force on atom i from atom j (register accumulation, no global write).
+      // F_i = -dE/dr_i = -phi'(r) * dx / r.
       float deriv = (c.y + u * (2.0f*c.z + u * 3.0f*c.w)) / kd;
-      float f = deriv / r;
+      float f = -deriv / r;
       fxi += f * dx; fyi += f * dy; fzi += f * dz;
     }
     // Immediately reduce into force MSE — no per-atom storage needed
@@ -361,10 +378,10 @@ static __global__ void uf3_eval_3b(
     int nni = nn_off[nn_base + i + 1] - nn_off[nn_base + i];
     int nn_start = nn_off[nn_base + i];
 
-    // Iterate over all pairs (j,k) from i's neighbor list
+    // Per-center triplets: each unordered neighbour pair (jj<kk) of real centre
+    // i forms one triangle.  Neighbours may be periodic ghost images.
     for (int jj = 0; jj < nni; jj++) {
       int j = nn_lst[nn_start + jj];
-      if (j <= i) continue; // unique triplets: i < j < k
       float dx12=x[o+j]-x[o+i], dy12=y[o+j]-y[o+i], dz12=z[o+j]-z[o+i];
       float d12sq = dx12*dx12+dy12*dy12+dz12*dz12;
       float r12 = d12sq * rsqrtf(d12sq);
@@ -379,7 +396,6 @@ static __global__ void uf3_eval_3b(
 
       for (int kk = jj+1; kk < nni; kk++) {
         int k = nn_lst[nn_start + kk];
-        if (k <= j) continue;
         float dx13=x[o+k]-x[o+i], dy13=y[o+k]-y[o+i], dz13=z[o+k]-z[o+i];
         float d13sq = dx13*dx13+dy13*dy13+dz13*dz13;
         float r13 = d13sq * rsqrtf(d13sq);
@@ -432,7 +448,7 @@ static __global__ void uf3_eval_3b_force(
   float km0,float kd0,float rc0, float km1,float kd1,float rc1,
   float km2,float kd2,float rc2, const int* __restrict__ tmap, int ntr,int nt,
   const int* __restrict__ nn_off, const int* __restrict__ nn_lst,
-  const int* __restrict__ nn_frame_off,
+  const int* __restrict__ nn_frame_off, const int* __restrict__ parent,
   float* __restrict__ fx, float* __restrict__ fy, float* __restrict__ fz)
 {
   int b = blockIdx.x; if (b >= nf) return;
@@ -447,13 +463,13 @@ static __global__ void uf3_eval_3b_force(
 
     for (int jj = 0; jj < nni; jj++) {
       int j = nn_lst[nn_start + jj];
-      if (j <= i) continue;
       float dx12=x[o+j]-x[o+i], dy12=y[o+j]-y[o+i], dz12=z[o+j]-z[o+i];
       float d12sq = dx12*dx12+dy12*dy12+dz12*dz12;
       float inv12 = rsqrtf(d12sq);
       float r12 = d12sq * inv12;
       if (r12>=rc0) continue;
       int tj=typ[o+j];
+      int pj = parent[o+j];   // real atom this neighbour (maybe ghost) belongs to
 
       // ij-basis: hoisted out of inner kk-loop (r12 fixed in jj-loop)
       int m0 = uf3_find_interval(r12, km0, kd0, ni0);
@@ -465,7 +481,6 @@ static __global__ void uf3_eval_3b_force(
 
       for (int kk = jj+1; kk < nni; kk++) {
         int k = nn_lst[nn_start + kk];
-        if (k <= j) continue;
         float dx13=x[o+k]-x[o+i], dy13=y[o+k]-y[o+i], dz13=z[o+k]-z[o+i];
         float d13sq = dx13*dx13+dy13*dy13+dz13*dz13;
         float inv13 = rsqrtf(d13sq);
@@ -477,6 +492,7 @@ static __global__ void uf3_eval_3b_force(
         float r23 = d23sq * inv23;
         if (r23>=rc2) continue;
         int tk=typ[o+k];
+        int pk = parent[o+k];   // real atom for neighbour k (maybe ghost)
 
         int m1=uf3_find_interval(r13,km1,kd1,ni1), m2=uf3_find_interval(r23,km2,kd2,ni2);
         float u1=(r13-(km1+m1*kd1))/kd1, u2=(r23-(km2+m2*kd2))/kd2;
@@ -513,20 +529,23 @@ static __global__ void uf3_eval_3b_force(
           }
         }
 
-        float fix = -(dv12*inv12*dx12 + dv13*inv13*dx13);
-        float fiy = -(dv12*inv12*dy12 + dv13*inv13*dy13);
-        float fiz = -(dv12*inv12*dz12 + dv13*inv13*dz13);
+        // Force = -dE/dx.  dv12=dE/dr12, dv13=dE/dr13, dv23=dE/dr23.
+        // (Signs below are the negative gradient; verified by finite difference.)
+        float fix = dv12*inv12*dx12 + dv13*inv13*dx13;
+        float fiy = dv12*inv12*dy12 + dv13*inv13*dy13;
+        float fiz = dv12*inv12*dz12 + dv13*inv13*dz13;
         atomicAdd(&fx[o+i], fix); atomicAdd(&fy[o+i], fiy); atomicAdd(&fz[o+i], fiz);
 
-        float fjx = dv12*inv12*dx12 - dv23*inv23*dx23;
-        float fjy = dv12*inv12*dy12 - dv23*inv23*dy23;
-        float fjz = dv12*inv12*dz12 - dv23*inv23*dz23;
-        atomicAdd(&fx[o+j], fjx); atomicAdd(&fy[o+j], fjy); atomicAdd(&fz[o+j], fjz);
+        // j and k may be ghost images -> accumulate onto their real parents.
+        float fjx = -dv12*inv12*dx12 + dv23*inv23*dx23;
+        float fjy = -dv12*inv12*dy12 + dv23*inv23*dy23;
+        float fjz = -dv12*inv12*dz12 + dv23*inv23*dz23;
+        atomicAdd(&fx[o+pj], fjx); atomicAdd(&fy[o+pj], fjy); atomicAdd(&fz[o+pj], fjz);
 
-        float fkx = dv13*inv13*dx13 + dv23*inv23*dx23;
-        float fky = dv13*inv13*dy13 + dv23*inv23*dy23;
-        float fkz = dv13*inv13*dz13 + dv23*inv23*dz23;
-        atomicAdd(&fx[o+k], fkx); atomicAdd(&fy[o+k], fky); atomicAdd(&fz[o+k], fkz);
+        float fkx = -dv13*inv13*dx13 - dv23*inv23*dx23;
+        float fky = -dv13*inv13*dy13 - dv23*inv23*dy23;
+        float fkz = -dv13*inv13*dz13 - dv23*inv23*dz23;
+        atomicAdd(&fx[o+pk], fkx); atomicAdd(&fy[o+pk], fky); atomicAdd(&fz[o+pk], fkz);
       }
     }
   }
@@ -675,7 +694,9 @@ Uf3Model::Uf3Model(UF3_Parameters& para)
   }else{num_trips_=0;num_params_3b_=0;}
   // num_params_3b_ computed above
   num_params_2b_=num_types_*num_types_*ncoeff_2b_;
-  num_params_total_=num_params_2b_+num_params_3b_;
+  // 1-body offsets live at the end of the parameter vector.
+  e0_offset_=num_params_2b_+num_params_3b_;
+  num_params_total_=num_params_2b_+num_params_3b_+num_types_;
   build_knots();
 
   // Init coefficients (random)
@@ -683,7 +704,8 @@ Uf3Model::Uf3Model(UF3_Parameters& para)
   for(size_t p=0;p<coeffs_2b_.size();p++){coeffs_2b_[p].resize(ncoeff_2b_);
     for(int c=0;c<ncoeff_2b_;c++)coeffs_2b_[p][c]=(rand()/(float)RAND_MAX-.5f)*.1f;}
   if(has_3b_){coeffs_3b_.resize(num_params_3b_);
-    for(int i=0;i<num_params_3b_;i++)coeffs_3b_[i]=(rand()/(float)RAND_MAX-.5f)*.001f;}
+    for(int i=0;i<num_params_3b_;i++)coeffs_3b_[i]=(rand()/(float)RAND_MAX-.5f)*.1f;}
+  coeffs_e0_.assign(num_types_, 0.0f);
 
   // Pre-allocate ALL GPU buffers ONCE
   // Use explicit cudaMalloc to avoid GPU_Vector resize() overhead
@@ -717,6 +739,8 @@ void Uf3Model::prealloc_gpu(const UF3_Parameters& para)
   gpu_max_coeff_2b_ = np2 * nint_2b_;
   d_coeff_2b.resize(gpu_max_coeff_2b_);
   d_raw_coeffs_2b.resize(np2 * ncoeff_2b_);
+  d_e0.resize(num_types_);
+  d_e0.copy_from_host(coeffs_e0_.data());
   upload_2b_coeffs_gpu(stream_);
   // First upload sees the random init — synchronize so subsequent legacy
   // callers (e.g. lstsq evaluate) see a fully built table.
@@ -821,13 +845,18 @@ void Uf3Model::get_parameters(float* params) const {
   int idx=0;
   for(size_t p=0;p<coeffs_2b_.size();p++)for(int c=0;c<ncoeff_2b_;c++)params[idx++]=coeffs_2b_[p][c];
   for(size_t i=0;i<coeffs_3b_.size();i++)params[idx++]=coeffs_3b_[i];
+  for(int t=0;t<num_types_;t++)params[idx++]=coeffs_e0_[t];
 }
 
 void Uf3Model::set_parameters_async(const float* params, cudaStream_t stream) {
   int idx=0;
   for(size_t p=0;p<coeffs_2b_.size();p++)for(int c=0;c<ncoeff_2b_;c++)coeffs_2b_[p][c]=params[idx++];
   for(size_t i=0;i<coeffs_3b_.size();i++)coeffs_3b_[i]=params[idx++];
+  for(int t=0;t<num_types_;t++)coeffs_e0_[t]=params[idx++];
   upload_2b_coeffs_gpu(stream);
+  CHECK(cudaMemcpyAsync(d_e0.data(), coeffs_e0_.data(),
+                        num_types_ * sizeof(float),
+                        cudaMemcpyHostToDevice, stream));
   if (has_3b_) {
     // 3B coeffs are already in raw form on host; just async-H2D into d_tensor_3b.
     CHECK(cudaMemcpyAsync(d_tensor_3b.data(), coeffs_3b_.data(),
@@ -847,14 +876,14 @@ void Uf3Model::evaluate(
   GPU_Vector<float>& d_energy)
 {
   int B = (int)batch_indices.size();
-  int total=0; int max_nn=0;
-  for(int b=0;b<B;b++){const auto& f=frames[batch_indices[b]]; total+=f.num_atoms;
+  int total=0; int max_nn=0;          // total = expanded (real+ghost) atom count
+  for(int b=0;b<B;b++){const auto& f=frames[batch_indices[b]]; total+=f.num_total;
     if(has_3b_ && (int)f.nn_list.size()>max_nn) max_nn=(int)f.nn_list.size();}
   ensure_batch_buffers(total, B);
 
   // Build host batch arrays + neighbor list data for 3B
-  std::vector<int> h_bnatoms(B),h_boffsets(B+1);
-  std::vector<int> h_btypes(total);
+  std::vector<int> h_bnatoms(B),h_bnatoms_tot(B),h_boffsets(B+1);
+  std::vector<int> h_btypes(total),h_parent(total);
   std::vector<float> h_bx(total),h_by(total),h_bz(total);
   // 3B: neighbor list flat arrays
   std::vector<int> h_nn_offset;     // per-atom offsets into nn_list
@@ -864,9 +893,10 @@ void Uf3Model::evaluate(
 
   h_boffsets[0]=0; int nn_global_off=0;
   {int off=0; for(int b=0;b<B;b++){const Uf3Frame& f = frames[batch_indices[b]];
-    h_bnatoms[b]=f.num_atoms;h_boffsets[b+1]=h_boffsets[b]+f.num_atoms;
-    for(int i=0;i<f.num_atoms;i++){h_btypes[off+i]=f.types[i];h_bx[off+i]=f.x[i];h_by[off+i]=f.y[i];h_bz[off+i]=f.z[i];}
-    // 3B: append neighbor list for this frame (always add entry, even if empty)
+    h_bnatoms[b]=f.num_atoms; h_bnatoms_tot[b]=f.num_total;
+    h_boffsets[b+1]=h_boffsets[b]+f.num_total;
+    for(int i=0;i<f.num_total;i++){h_btypes[off+i]=f.types[i];h_bx[off+i]=f.x[i];h_by[off+i]=f.y[i];h_bz[off+i]=f.z[i];h_parent[off+i]=f.parent[i];}
+    // 3B: append neighbor list for this frame (centers = real atoms only)
     if(has_3b_){
       h_nn_frame_off.push_back((int)h_nn_offset.size());
       for(int i=0;i<f.num_atoms;i++){
@@ -877,7 +907,7 @@ void Uf3Model::evaluate(
         }
       }
     }
-    off+=f.num_atoms;}}
+    off+=f.num_total;}}
   if(has_3b_) h_nn_frame_off.push_back((int)h_nn_offset.size()); // trailing
 
   // Upload using grow_copy (only reallocate when growing, raw cudaMemcpy)
@@ -887,18 +917,22 @@ void Uf3Model::evaluate(
   grow_copy(d_batch_idx, B, h_bidx.data());
   grow_copy(d_bnatoms, B, h_bnatoms.data());
   grow_copy(d_boffsets, B+1, h_boffsets.data());
+  // Local-path expanded-count + parent buffers (slow test path; ad-hoc alloc).
+  GPU_Vector<int> d_bnatoms_tot_loc(B), d_parent_loc(total);
+  d_bnatoms_tot_loc.copy_from_host(h_bnatoms_tot.data());
+  d_parent_loc.copy_from_host(h_parent.data());
 
   // 2B: multi-threaded (BLOCK_SIZE threads per frame, each handles some atoms)
   const int BLK = 64;
   float kmin2=knots_2b_[0], kd2=(knots_2b_.back()-knots_2b_[0])/nint_2b_;
-  uf3_eval_2b<<<B, BLK>>>(B,d_batch_idx.data(),d_bnatoms.data(),d_boffsets.data(),
+  uf3_eval_2b<<<B, BLK>>>(B,d_batch_idx.data(),d_bnatoms.data(),d_bnatoms_tot_loc.data(),d_boffsets.data(),
     d_types.data(),d_x.data(),d_y.data(),d_z.data(),
     d_coeff_2b.data(),num_types_*num_types_,nint_2b_,kmin2,kd2,rc_2b_,
-    d_type_map.data(),num_types_,d_energy_buf.data());
+    d_type_map.data(),num_types_,d_e0.data(),d_energy_buf.data());
   GPU_CHECK_KERNEL
 
   // 2B forces
-  uf3_eval_2b_force<<<B, BLK>>>(B,d_batch_idx.data(),d_bnatoms.data(),d_boffsets.data(),
+  uf3_eval_2b_force<<<B, BLK>>>(B,d_batch_idx.data(),d_bnatoms.data(),d_bnatoms_tot_loc.data(),d_boffsets.data(),
     d_types.data(),d_x.data(),d_y.data(),d_z.data(),
     d_coeff_2b.data(),num_types_*num_types_,nint_2b_,kmin2,kd2,rc_2b_,
     d_type_map.data(),num_types_,d_fx.data(),d_fy.data(),d_fz.data());
@@ -918,7 +952,7 @@ void Uf3Model::evaluate(
       knots_3b_[2][0],(knots_3b_[2].back()-knots_3b_[2][0])/nint_3b_[2],rc_3b_[2],
       d_trip_map.data(),num_trips_,num_types_,
       d_nn_off.data(),d_nn_lst.data(),d_nn_frame_off.data(),
-      d_energy_buf.data());
+      d_energy_buf.data());  // 3B energy (per-center; ghosts in neighbour list)
     GPU_CHECK_KERNEL
 
     // 3B forces
@@ -932,7 +966,7 @@ void Uf3Model::evaluate(
       knots_3b_[1][0], (knots_3b_[1].back()-knots_3b_[1][0])/nint_3b_[1], rc_3b_[1],
       knots_3b_[2][0], (knots_3b_[2].back()-knots_3b_[2][0])/nint_3b_[2], rc_3b_[2],
       d_trip_map.data(), num_trips_, num_types_,
-      d_nn_off.data(), d_nn_lst.data(), d_nn_frame_off.data(),
+      d_nn_off.data(), d_nn_lst.data(), d_nn_frame_off.data(), d_parent_loc.data(),
       d_fx.data(), d_fy.data(), d_fz.data());
     GPU_CHECK_KERNEL
   }
@@ -1224,14 +1258,16 @@ void Uf3Model::evaluate_batch(
   cudaStream_t s = stream_;
 
   // 2B energy
-  uf3_eval_2b<<<B, BLK, 0, s>>>(B, d_fidx, ds.d_natoms.data(), ds.d_offsets.data(),
+  uf3_eval_2b<<<B, BLK, 0, s>>>(B, d_fidx, ds.d_natoms.data(), ds.d_natoms_tot.data(),
+    ds.d_offsets.data(),
     ds.d_types.data(), ds.d_x.data(), ds.d_y.data(), ds.d_z.data(),
     d_coeff_2b.data(), num_types_ * num_types_, nint_2b_, kmin2, kd2, rc_2b_,
-    d_type_map.data(), num_types_, d_energy_buf.data());
+    d_type_map.data(), num_types_, d_e0.data(), d_energy_buf.data());
   GPU_CHECK_KERNEL
 
   // 2B forces
-  uf3_eval_2b_force<<<B, BLK, 0, s>>>(B, d_fidx, ds.d_natoms.data(), ds.d_offsets.data(),
+  uf3_eval_2b_force<<<B, BLK, 0, s>>>(B, d_fidx, ds.d_natoms.data(), ds.d_natoms_tot.data(),
+    ds.d_offsets.data(),
     ds.d_types.data(), ds.d_x.data(), ds.d_y.data(), ds.d_z.data(),
     d_coeff_2b.data(), num_types_ * num_types_, nint_2b_, kmin2, kd2, rc_2b_,
     d_type_map.data(), num_types_, d_fx.data(), d_fy.data(), d_fz.data());
@@ -1263,7 +1299,7 @@ void Uf3Model::evaluate_batch(
       knots_3b_[1][0], (knots_3b_[1].back() - knots_3b_[1][0]) / nint_3b_[1], rc_3b_[1],
       knots_3b_[2][0], (knots_3b_[2].back() - knots_3b_[2][0]) / nint_3b_[2], rc_3b_[2],
       d_trip_map.data(), num_trips_, num_types_,
-      ds.d_nn_off.data(), ds.d_nn_lst.data(), ds.d_nn_frame_off.data(),
+      ds.d_nn_off.data(), ds.d_nn_lst.data(), ds.d_nn_frame_off.data(), ds.d_parent.data(),
       d_fx.data(), d_fy.data(), d_fz.data());
     GPU_CHECK_KERNEL
   }
