@@ -26,6 +26,7 @@ GPU-accelerated B-spline coefficient optimization with selectable optimizer.
 #include "utilities/error.cuh"
 #include "utilities/gpu_macro.cuh"
 #include "utilities/main_common.cuh"
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -157,6 +158,18 @@ int main(int argc, char* argv[])
   float ghost_cutoff = std::max((float)para.rc_2b, nn_cutoff);
   auto train_frames = load_uf3_frames(para.train_data.c_str(), para.elements, nn_cutoff, ghost_cutoff);
   printf("Loaded %zu training frames.\n", train_frames.size());
+
+  // Drop tiny frames (< min_atoms): their per-atom energy residual dominates the
+  // per-atom RMSE.  Matches reference UF3 (min_atoms=3).
+  if (para.min_atoms > 1) {
+    size_t before = train_frames.size();
+    train_frames.erase(
+      std::remove_if(train_frames.begin(), train_frames.end(),
+                     [&](const Uf3Frame& f) { return f.num_atoms < para.min_atoms; }),
+      train_frames.end());
+    printf("Filtered frames with < %d atoms: %zu -> %zu\n",
+           para.min_atoms, before, train_frames.size());
+  }
 
   bool has_3b = para.n_max_3b[0] > 0;
   Uf3DatasetGPU ds;

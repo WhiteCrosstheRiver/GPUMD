@@ -52,6 +52,11 @@ struct UF3_Parameters {
   double r_min_2b = 0.0;
   double r_min_3b = 0.0;
 
+  // Drop training/test frames with fewer than min_atoms atoms.  Tiny cells
+  // (1-2 atoms, often isolated atoms/dimers) dominate the per-atom energy RMSE
+  // (residual/na with na=1) and wreck the reported metric.  Reference UF3 uses 3.
+  int min_atoms = 1;
+
   int batch = 1000;  // computed from stage max batch
   double lambda_e = 1.0;
   double lambda_f = 1.0;

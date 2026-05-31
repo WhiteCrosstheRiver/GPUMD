@@ -805,16 +805,23 @@ static void grow_copy(GPU_Vector<T>& gv, size_t n, const T* host_data) {
 }
 
 void Uf3Model::build_knots() {
-  // 2B knots over [r_min_2b, rc].
-  knots_2b_.resize(nknots_2b_);
-  float d2=(rc_2b_-r_min_2b_)/(nknots_2b_-1);
-  for(int i=0;i<nknots_2b_;i++)knots_2b_[i]=r_min_2b_ + i*d2;
-  // 3B knots: ij/ik legs over [r_min_3b, rc]; jk leg over [0, rc] (neighbours of
-  // the centre can be arbitrarily close).
+  // Uniform B-spline knots placed so the *valid* support [knots[3], knots[nc]]
+  // is exactly [r_min, rc] (nc = ncoeff = n_max+3 -> n_max intervals over the
+  // physical range, matching reference UF3's clamped B-spline resolution).  The
+  // outer 3 knots on each side extend past [r_min, rc] so every coefficient is
+  // meaningful over the whole physical range — without this the edges clamp to
+  // constants and the 3B jk leg (3-4 A) falls in a dead region.  Spacing stays
+  // uniform, so the eval kernels (uniform find_interval) need no change.
+  {
+    float delta = (rc_2b_ - r_min_2b_) / (float)(ncoeff_2b_ - 3);
+    knots_2b_.resize(nknots_2b_);
+    for(int i=0;i<nknots_2b_;i++) knots_2b_[i] = r_min_2b_ + (i - 3) * delta;
+  }
   for(int dim=0;dim<3;dim++){if(!has_3b_)break;
     float rmin = (dim<2) ? r_min_3b_ : 0.0f;
-    knots_3b_[dim].resize(nk_3b_[dim]); float d=(rc_3b_[dim]-rmin)/(nk_3b_[dim]-1);
-    for(int i=0;i<nk_3b_[dim];i++)knots_3b_[dim][i]=rmin + i*d;}
+    float delta = (rc_3b_[dim] - rmin) / (float)(nc_3b_[dim] - 3);
+    knots_3b_[dim].resize(nk_3b_[dim]);
+    for(int i=0;i<nk_3b_[dim];i++) knots_3b_[dim][i] = rmin + (i - 3) * delta;}
 }
 void Uf3Model::init_3b_basis() {
   std::vector<float4> all;

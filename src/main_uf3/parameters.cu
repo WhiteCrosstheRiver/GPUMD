@@ -64,6 +64,8 @@ static void apply_global_token(UF3_Parameters& para, const std::vector<std::stri
     para.r_min_2b = get_double_from_token(tokens[1], __FILE__, __LINE__);
   } else if (tokens[0] == "r_min_3b") {
     para.r_min_3b = get_double_from_token(tokens[1], __FILE__, __LINE__);
+  } else if (tokens[0] == "min_atoms") {
+    para.min_atoms = get_int_from_token(tokens[1], __FILE__, __LINE__);
   } else if (tokens[0] == "knot_type") {
     para.knot_type_str = tokens[1];
     para.knot_type = (tokens[1] == "uk") ? 1 : 0;

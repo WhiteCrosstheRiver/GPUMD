@@ -94,6 +94,12 @@ Uf3Fitness::Uf3Fitness(
                      ? (float)std::max(para.rc_3b[0], para.rc_3b[1]) : 0.0f;
     float ghost_cut = std::max((float)para.rc_2b, nn_cut);
     test_set_ = load_uf3_frames(para.test_data.c_str(), para.elements, nn_cut, ghost_cut);
+    if (para.min_atoms > 1) {
+      test_set_.erase(
+        std::remove_if(test_set_.begin(), test_set_.end(),
+                       [&](const Uf3Frame& f) { return f.num_atoms < para.min_atoms; }),
+        test_set_.end());
+    }
     test_set_size_ = (int)test_set_.size();
     printf("Loaded %d test frames.\n", test_set_size_);
   } else {

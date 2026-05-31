@@ -106,7 +106,7 @@ static __global__ void lstsq_energy_rows(
   int has_3b, int nc0, int nc1, int nc2, int ni0, int ni1, int ni2,
   float k0, float kd0, float r0, float k1, float kd1, float r1, float k2, float kd2, float r2,
   int nparam, int e0_off, int num_frames_total,
-  const float* __restrict__ d_target, float lambda_e,
+  const float* __restrict__ d_target, float we_global,
   const int* __restrict__ nn_off, const int* __restrict__ nn_lst, const int* __restrict__ nn_frame_off,
   double* __restrict__ A, double* __restrict__ bvec)
 {
@@ -156,8 +156,10 @@ static __global__ void lstsq_energy_rows(
   }
   __syncthreads();
 
-  float na=(float)n; if(na<1.0f) na=1.0f;
-  double we = sqrt((double)lambda_e/(double)num_frames_total)/(double)na;
+  // Total-energy row, weighted by the reference-UF3 variance-normalized weight
+  // we_global = sqrt(weight / (n_e * Var(E_total))).  No per-frame /na (the
+  // 1-body term absorbs cell-size dependence).
+  double we = (double)we_global;
   for (int k = tid; k < nparam; k += stride) A[(size_t)k*M + row] = we * (double)s_basis[k];
   if (tid == 0) bvec[row] = we * (double)d_target[fid];
 }
@@ -357,7 +359,38 @@ void run_lstsq(
   for (int i = 0; i < use_frames; i++) total_real += ds.h_natoms[i];
   if (total_real < 1) total_real = 1;
   float lambda_e = (float)para.lambda_e, lambda_f = (float)para.lambda_f;
-  float wf = (lambda_f > 0.0f) ? sqrtf(lambda_f / (3.0f * (float)total_real)) : 0.0f;
+
+  // Reference-UF3 variance-normalized weighting: energy block weight^2 =
+  //   weight / (n_e * Var(E_total)),  force block = (1-weight) / (n_f * Var(F)).
+  // The variance normalization makes the energy<->force balance scale-invariant
+  // (the missing ingredient vs plain lambda_e/lambda_f).  `weight` is derived
+  // from lambda_e/lambda_f (0.5 when equal).
+  std::vector<float> h_Eref(use_frames);
+  cudaMemcpy(h_Eref.data(), ds.d_energy_ref.data(), use_frames * sizeof(float), cudaMemcpyDeviceToHost);
+  double me = 0; for (int i = 0; i < use_frames; i++) me += h_Eref[i]; me /= std::max(1, use_frames);
+  double ve = 0; for (int i = 0; i < use_frames; i++) { double d = h_Eref[i] - me; ve += d * d; }
+  ve /= std::max(1, use_frames); if (ve < 1e-12) ve = 1.0;
+  // Force variance over real atoms (ghost entries are 0 and excluded).
+  std::vector<float> h_fx(ds.total_atoms), h_fy(ds.total_atoms), h_fz(ds.total_atoms);
+  cudaMemcpy(h_fx.data(), ds.d_fx_ref.data(), ds.total_atoms * sizeof(float), cudaMemcpyDeviceToHost);
+  cudaMemcpy(h_fy.data(), ds.d_fy_ref.data(), ds.total_atoms * sizeof(float), cudaMemcpyDeviceToHost);
+  cudaMemcpy(h_fz.data(), ds.d_fz_ref.data(), ds.total_atoms * sizeof(float), cudaMemcpyDeviceToHost);
+  double sf = 0, sf2 = 0; long long nf_comp = 0;
+  for (int f = 0; f < use_frames; f++) {
+    int o = ds.h_offsets[f], n = ds.h_natoms[f];
+    for (int a = 0; a < n; a++) {
+      float fv[3] = {h_fx[o+a], h_fy[o+a], h_fz[o+a]};
+      for (int d = 0; d < 3; d++) { sf += fv[d]; sf2 += (double)fv[d]*fv[d]; nf_comp++; }
+    }
+  }
+  if (nf_comp < 1) nf_comp = 1;
+  double vf = sf2 / nf_comp - (sf / nf_comp) * (sf / nf_comp); if (vf < 1e-12) vf = 1.0;
+
+  double wsum = (double)lambda_e + (double)lambda_f;
+  double weight_bal = (wsum > 0) ? (double)lambda_e / wsum : 0.5;
+  float we_global = (float)sqrt(weight_bal / ((double)use_frames * ve));
+  float wf = (lambda_f > 0.0f)
+               ? (float)sqrt((1.0 - weight_bal) / ((double)(3LL * total_real) * vf)) : 0.0f;
 
   // The full design matrix A (M x nparam) can exceed GPU memory for big datasets
   // with 3B.  Build it in row-chunks of frames and accumulate the normal
@@ -409,7 +442,7 @@ void run_lstsq(
       ncoeff, nt, nint, kmin, kd, rc, num_params_2b,
       has_3b ? 1 : 0, nc3[0], nc3[1], nc3[2], ni3[0], ni3[1], ni3[2],
       k3[0], kd3[0], r3[0], k3[1], kd3[1], r3[1], k3[2], kd3[2], r3[2],
-      nparam, e0_off, use_frames, ds.d_energy_ref.data(), lambda_e,
+      nparam, e0_off, use_frames, ds.d_energy_ref.data(), we_global,
       ds.d_nn_off.data(), ds.d_nn_lst.data(), ds.d_nn_frame_off.data(),
       d_A.data(), d_b.data());
     GPU_CHECK_KERNEL
