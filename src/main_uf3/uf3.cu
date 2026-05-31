@@ -684,10 +684,13 @@ static void precompute_3b_basis(int ni, std::vector<float4>& out) {
 Uf3Model::Uf3Model(UF3_Parameters& para)
 {
   num_types_=para.num_types; elements_=para.elements;
-  ncoeff_2b_=para.n_max_2b; nknots_2b_=ncoeff_2b_+4; nint_2b_=nknots_2b_-1; rc_2b_=(float)para.rc_2b;
+  // UF3 convention: ncoeff = n_max + degree (degree=3 for cubic B-splines)
+  // nknots = ncoeff + 4 = n_max + 7 (matches UF3: resolution + 2*degree + 1)
+  ncoeff_2b_=para.n_max_2b+3; nknots_2b_=ncoeff_2b_+4; nint_2b_=nknots_2b_-1; rc_2b_=(float)para.rc_2b;
+  r_min_2b_=(float)para.r_min_2b; r_min_3b_=(float)para.r_min_3b;
   has_3b_=(para.n_max_3b[0]>0);
   if(has_3b_){
-    for(int d=0;d<3;d++){nc_3b_[d]=para.n_max_3b[d];nk_3b_[d]=nc_3b_[d]+4;nint_3b_[d]=nk_3b_[d]-1;}
+    for(int d=0;d<3;d++){nc_3b_[d]=para.n_max_3b[d]+3;nk_3b_[d]=nc_3b_[d]+4;nint_3b_[d]=nk_3b_[d]-1;}
     rc_3b_[0]=(float)para.rc_3b[0];rc_3b_[1]=(float)para.rc_3b[1];rc_3b_[2]=rc_3b_[0];
     num_trips_=num_types_*num_types_*num_types_;
     num_params_3b_=num_trips_*nc_3b_[0]*nc_3b_[1]*nc_3b_[2];
@@ -802,11 +805,16 @@ static void grow_copy(GPU_Vector<T>& gv, size_t n, const T* host_data) {
 }
 
 void Uf3Model::build_knots() {
-  knots_2b_.resize(nknots_2b_); float d2=rc_2b_/(nknots_2b_-1);
-  for(int i=0;i<nknots_2b_;i++)knots_2b_[i]=i*d2;
+  // 2B knots over [r_min_2b, rc].
+  knots_2b_.resize(nknots_2b_);
+  float d2=(rc_2b_-r_min_2b_)/(nknots_2b_-1);
+  for(int i=0;i<nknots_2b_;i++)knots_2b_[i]=r_min_2b_ + i*d2;
+  // 3B knots: ij/ik legs over [r_min_3b, rc]; jk leg over [0, rc] (neighbours of
+  // the centre can be arbitrarily close).
   for(int dim=0;dim<3;dim++){if(!has_3b_)break;
-    knots_3b_[dim].resize(nk_3b_[dim]); float d=rc_3b_[dim]/(nk_3b_[dim]-1);
-    for(int i=0;i<nk_3b_[dim];i++)knots_3b_[dim][i]=i*d;}
+    float rmin = (dim<2) ? r_min_3b_ : 0.0f;
+    knots_3b_[dim].resize(nk_3b_[dim]); float d=(rc_3b_[dim]-rmin)/(nk_3b_[dim]-1);
+    for(int i=0;i<nk_3b_[dim];i++)knots_3b_[dim][i]=rmin + i*d;}
 }
 void Uf3Model::init_3b_basis() {
   std::vector<float4> all;

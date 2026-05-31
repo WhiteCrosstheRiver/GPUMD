@@ -41,6 +41,17 @@ struct UF3_Parameters {
   int trim_2b = 3;
   int trim_3b = 0;
 
+  // Inner knot bounds.  Placing knots over [r_min, rc] instead of [0, rc]
+  // concentrates B-spline resolution in the physical bonding range (matches
+  // reference UF3 and markedly improves the fit).  r < r_min clamps to the first
+  // interval in both trainer and MD (consistent).  The 3B jk leg keeps r_min=0
+  // (two neighbours of a centre can be arbitrarily close).
+  // Default 0 (knots from 0) — safe for distorted training cells with short
+  // contacts.  Set to ~1.5-2.0 for clean/equilibrium data to concentrate
+  // resolution (matches reference UF3).
+  double r_min_2b = 0.0;
+  double r_min_3b = 0.0;
+
   int batch = 1000;  // computed from stage max batch
   double lambda_e = 1.0;
   double lambda_f = 1.0;

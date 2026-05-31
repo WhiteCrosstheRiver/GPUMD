@@ -174,6 +174,7 @@ private:
   int ncoeff_2b_, nknots_2b_, nint_2b_;
   int num_types_;
   float rc_2b_;
+  float r_min_2b_ = 0.0f, r_min_3b_ = 0.0f;
   std::vector<std::string> elements_;
   std::vector<float> knots_2b_;
   std::vector<std::vector<float>> coeffs_2b_;

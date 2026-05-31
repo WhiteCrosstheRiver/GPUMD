@@ -181,7 +181,7 @@ static __global__ void lstsq_force_rows(
   int blk = blockIdx.x; if (blk >= nf) return;
   int tid = threadIdx.x, stride = blockDim.x;
   int fid = fidx[blk], n = nat[fid], n_tot = nat_tot[fid], o = off[fid];
-  int rb = realbase[fid];
+  int rb = realbase[blk];   // chunk-local real-atom base (block position, not global fid)
 
   // RHS + 2B force features
   for (int i = tid; i < n; i += stride) {
@@ -349,70 +349,92 @@ void run_lstsq(
 
   auto t0 = std::chrono::high_resolution_clock::now();
 
-  // Use pre-loaded GPU data directly — NO H2D upload
-  std::vector<int> h_bidx(use_frames);
-  for (int i = 0; i < use_frames; i++) h_bidx[i] = i;
-  GPU_Vector<int> d_bidx(use_frames);
-  d_bidx.copy_from_host(h_bidx.data());
-
   // e0 (1-body) columns live at the end of the parameter vector.
   int e0_off = nparam - nt;
 
-  // Per-frame real-atom base offsets (compacted real-atom force-row indexing).
-  std::vector<int> h_realbase(use_frames);
+  // Global totals (for consistent loss-matching weights across chunks).
   int total_real = 0;
-  for (int i = 0; i < use_frames; i++) { h_realbase[i] = total_real; total_real += ds.h_natoms[i]; }
+  for (int i = 0; i < use_frames; i++) total_real += ds.h_natoms[i];
   if (total_real < 1) total_real = 1;
-  GPU_Vector<int> d_realbase(use_frames);
-  d_realbase.copy_from_host(h_realbase.data());
-
-  // Design matrix A (column-major, M x nparam) and RHS b.
-  long long M = (long long)use_frames + 3LL * total_real;
   float lambda_e = (float)para.lambda_e, lambda_f = (float)para.lambda_f;
   float wf = (lambda_f > 0.0f) ? sqrtf(lambda_f / (3.0f * (float)total_real)) : 0.0f;
 
-  GPU_Vector<double> d_A((size_t)M * nparam), d_b(M);
-  cudaMemset(d_A.data(), 0, (size_t)M * nparam * sizeof(double));
-  cudaMemset(d_b.data(), 0, (size_t)M * sizeof(double));
-
+  // The full design matrix A (M x nparam) can exceed GPU memory for big datasets
+  // with 3B.  Build it in row-chunks of frames and accumulate the normal
+  // equations AtA / Atb with cuBLAS (beta=1) — mathematically identical to a
+  // single solve, but bounded memory (O(maxM x nparam) instead of O(M x nparam)).
   const int BLK = 64;
   size_t smem = nparam * sizeof(float);
-  lstsq_energy_rows<<<use_frames, BLK, smem>>>(
-    use_frames, (int)M, d_bidx.data(), ds.d_natoms.data(), ds.d_natoms_tot.data(), ds.d_offsets.data(),
-    ds.d_types.data(), ds.d_x.data(), ds.d_y.data(), ds.d_z.data(),
-    ncoeff, nt, nint, kmin, kd, rc, num_params_2b,
-    has_3b ? 1 : 0, nc3[0], nc3[1], nc3[2], ni3[0], ni3[1], ni3[2],
-    k3[0], kd3[0], r3[0], k3[1], kd3[1], r3[1], k3[2], kd3[2], r3[2],
-    nparam, e0_off, use_frames, ds.d_energy_ref.data(), lambda_e,
-    ds.d_nn_off.data(), ds.d_nn_lst.data(), ds.d_nn_frame_off.data(),
-    d_A.data(), d_b.data());
-  GPU_CHECK_KERNEL
+  GPU_Vector<double> d_ATA((size_t)nparam * nparam), d_ATb(nparam);
+  cudaMemset(d_ATA.data(), 0, (size_t)nparam * nparam * sizeof(double));
+  cudaMemset(d_ATb.data(), 0, nparam * sizeof(double));
+  cublasHandle_t cb; cublasCreate(&cb);
+  double one = 1.0;
 
-  if (lambda_f > 0.0f) {
-    lstsq_force_rows<<<use_frames, BLK>>>(
-      use_frames, (int)M, d_bidx.data(), ds.d_natoms.data(), ds.d_natoms_tot.data(),
-      ds.d_offsets.data(), d_realbase.data(), ds.d_parent.data(),
+  // Row budget per chunk (cap the A buffer ~3 GB).
+  size_t budget = (size_t)3ull << 30;
+  long long maxM = (long long)(budget / ((size_t)nparam * sizeof(double)));
+  if (maxM < 4096) maxM = 4096;
+  if (const char* e = getenv("UF3_MAXM")) maxM = atoll(e);  // testing: force chunking
+
+  GPU_Vector<double> d_A, d_b;       // reused across chunks (grown as needed)
+  GPU_Vector<int> d_cbidx, d_crealbase;
+  int n_chunks = 0;
+  for (int f0 = 0; f0 < use_frames; ) {
+    // Greedily grow a chunk until its row count would exceed maxM.
+    std::vector<int> cb_idx, cb_realbase;
+    long long Mc = 0; int creal = 0; int f1 = f0;
+    while (f1 < use_frames) {
+      int na = ds.h_natoms[f1];
+      long long add = 1 + 3LL * na;
+      if (Mc + add > maxM && f1 > f0) break;
+      cb_idx.push_back(f1); cb_realbase.push_back(creal);
+      creal += na; Mc += add; f1++;
+    }
+    int ncf = f1 - f0;
+    long long Mchunk = (long long)ncf + 3LL * creal;
+    n_chunks++;
+
+    if ((int)d_cbidx.size() < ncf) { d_cbidx.resize(ncf); d_crealbase.resize(ncf); }
+    d_cbidx.copy_from_host(cb_idx.data());
+    d_crealbase.copy_from_host(cb_realbase.data());
+    if ((long long)d_A.size() < Mchunk * nparam) d_A.resize((size_t)Mchunk * nparam);
+    if ((long long)d_b.size() < Mchunk) d_b.resize((size_t)Mchunk);
+    cudaMemset(d_A.data(), 0, (size_t)Mchunk * nparam * sizeof(double));
+    cudaMemset(d_b.data(), 0, (size_t)Mchunk * sizeof(double));
+
+    lstsq_energy_rows<<<ncf, BLK, smem>>>(
+      ncf, (int)Mchunk, d_cbidx.data(), ds.d_natoms.data(), ds.d_natoms_tot.data(), ds.d_offsets.data(),
       ds.d_types.data(), ds.d_x.data(), ds.d_y.data(), ds.d_z.data(),
       ncoeff, nt, nint, kmin, kd, rc, num_params_2b,
       has_3b ? 1 : 0, nc3[0], nc3[1], nc3[2], ni3[0], ni3[1], ni3[2],
       k3[0], kd3[0], r3[0], k3[1], kd3[1], r3[1], k3[2], kd3[2], r3[2],
-      nparam, wf, ds.d_fx_ref.data(), ds.d_fy_ref.data(), ds.d_fz_ref.data(),
+      nparam, e0_off, use_frames, ds.d_energy_ref.data(), lambda_e,
       ds.d_nn_off.data(), ds.d_nn_lst.data(), ds.d_nn_frame_off.data(),
       d_A.data(), d_b.data());
     GPU_CHECK_KERNEL
-  }
 
-  // Normal equations via cuBLAS: ATA = A^T A (nparam x nparam), ATb = A^T b.
-  GPU_Vector<double> d_ATA((size_t)nparam * nparam), d_ATb(nparam);
-  cublasHandle_t cb; cublasCreate(&cb);
-  double one = 1.0, zero = 0.0;
-  // syrk fills one triangle in cuBLAS col-major order; CUBLAS_FILL_MODE_UPPER
-  // maps to the LOWER triangle of our row-major host copy, which is the triangle
-  // the Cholesky routine reads.
-  cublasDsyrk(cb, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_T, nparam, (int)M,
-              &one, d_A.data(), (int)M, &zero, d_ATA.data(), nparam);
-  cublasDgemv(cb, CUBLAS_OP_T, (int)M, nparam, &one, d_A.data(), (int)M,
-              d_b.data(), 1, &zero, d_ATb.data(), 1);
+    if (lambda_f > 0.0f) {
+      lstsq_force_rows<<<ncf, BLK>>>(
+        ncf, (int)Mchunk, d_cbidx.data(), ds.d_natoms.data(), ds.d_natoms_tot.data(),
+        ds.d_offsets.data(), d_crealbase.data(), ds.d_parent.data(),
+        ds.d_types.data(), ds.d_x.data(), ds.d_y.data(), ds.d_z.data(),
+        ncoeff, nt, nint, kmin, kd, rc, num_params_2b,
+        has_3b ? 1 : 0, nc3[0], nc3[1], nc3[2], ni3[0], ni3[1], ni3[2],
+        k3[0], kd3[0], r3[0], k3[1], kd3[1], r3[1], k3[2], kd3[2], r3[2],
+        nparam, wf, ds.d_fx_ref.data(), ds.d_fy_ref.data(), ds.d_fz_ref.data(),
+        ds.d_nn_off.data(), ds.d_nn_lst.data(), ds.d_nn_frame_off.data(),
+        d_A.data(), d_b.data());
+      GPU_CHECK_KERNEL
+    }
+
+    // Accumulate normal equations: AtA += A_chunk^T A_chunk, Atb += A_chunk^T b.
+    cublasDsyrk(cb, CUBLAS_FILL_MODE_UPPER, CUBLAS_OP_T, nparam, (int)Mchunk,
+                &one, d_A.data(), (int)Mchunk, &one, d_ATA.data(), nparam);
+    cublasDgemv(cb, CUBLAS_OP_T, (int)Mchunk, nparam, &one, d_A.data(), (int)Mchunk,
+                d_b.data(), 1, &one, d_ATb.data(), 1);
+    f0 = f1;
+  }
   cublasDestroy(cb);
 
   std::vector<double> ATA((size_t)nparam * nparam), ATb(nparam);
