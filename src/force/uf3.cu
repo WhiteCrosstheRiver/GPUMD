@@ -305,10 +305,13 @@ static __global__ void find_force_uf3_2b(
     const float val = eval_cubic(c, u);
     const float deriv = eval_cubic_deriv(c, u) * inv_knot_delta;
 
-    const float fpair_half = 0.5f * deriv * rinv;
-    const float f12x = fpair_half * x12;
-    const float f12y = fpair_half * y12;
-    const float f12z = fpair_half * z12;
+    // Force factor matches the trainer convention: each atom's force from a
+    // pair is the full -dE/dr_i derivative — no 0.5 factor (the symmetric
+    // neighbor list stores each pair once per center atom, not once total).
+    const float fpair = deriv * rinv;
+    const float f12x = fpair * x12;
+    const float f12y = fpair * y12;
+    const float f12z = fpair * z12;
 
     fx += f12x; fy += f12y; fz += f12z;
     pe += 0.5f * val;
@@ -462,8 +465,9 @@ static __global__ void find_force_uf3_3b(
 
       pe += val / 3.0f;  // each triplet counted 3× (once per center atom)
 
-      const float fij_s = dv_d12 * inv_r12 * 0.5f;
-      const float fik_s = dv_d13 * inv_r13 * 0.5f;
+      // Force partials match trainer convention: full dE/dr * dr/dx (no 0.5).
+      const float fij_s = dv_d12 * inv_r12;
+      const float fik_s = dv_d13 * inv_r13;
 
       const int idx_12 = j1 * N + n1;
       g_f12x[idx_12] += fij_s * x12;

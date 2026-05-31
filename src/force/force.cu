@@ -184,8 +184,8 @@ void Force::parse_potential(
     potential.reset(new LJ(fid_potential, num_types, number_of_atoms));
   } else if (
       strcmp(potential_name, "uf3") == 0 ||
-      potential_name[0] == '#' && strstr(param[1], ".uf3") != nullptr) {
-    // UF3 files start with "#UF3" comment; detect by extension or explicit "uf3" keyword
+      strstr(param[1], ".uf3") != nullptr) {
+    // UF3 detected by explicit "uf3" keyword or .uf3 extension
     int max_neigh = 400;
     if (num_param == 3) {
       if (!is_valid_int(param[2], &max_neigh) || max_neigh <= 0 || max_neigh > 1024) {
@@ -233,9 +233,18 @@ void Force::parse_potential(
 
 int Force::get_number_of_types(FILE* fid_potential)
 {
+  // UF3 files start with "uf3 N elem1 ..." instead of just "N".
   int num_of_types;
   int count = fscanf(fid_potential, "%d", &num_of_types);
-  PRINT_SCANF_ERROR(count, 1, "Reading error for number of types.");
+  if (count != 1) {
+    // Not the standard format — try UF3 header: "uf3 N elem1 ..."
+    char buf[64]; rewind(fid_potential);
+    if (fscanf(fid_potential, "%63s %d", buf, &num_of_types) == 2
+        && strcmp(buf, "uf3") == 0) {
+      return num_of_types;
+    }
+    PRINT_SCANF_ERROR(count, 1, "Reading error for number of types.");
+  }
   return num_of_types;
 }
 
