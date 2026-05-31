@@ -761,7 +761,7 @@ void UF3::compute(
       three_body.knot_min_jk, three_body.knot_delta_jk, three_body.inv_knot_delta_jk,
       (float)three_body.rc_ij, (float)three_body.rc_ik, (float)three_body.rc_jk,
       neighbor.NN.data(), neighbor.NL.data(),
-      type.data(), d_e0.data(),
+      type.data(), nullptr,        // 1-body already added by the 2B kernel (avoid double count)
       d_pos_packed.data(),
       potential_per_atom.data(),
       force_per_atom.data(),
