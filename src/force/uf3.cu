@@ -617,11 +617,11 @@ void UF3::initialize(const char* filename, const int number_of_atoms)
       (void)trailing_trim;
 
       li++;
-      // cutoffs and knot counts: rc_jk rc_ik rc_ij nk_jk nk_ik nk_ij
+      // cutoffs and knot counts, forward order: rc_ij rc_ik rc_jk nk_ij nk_ik nk_jk
       {
         std::istringstream iss2(lines[li]);
-        iss2 >> three_body.rc_jk >> three_body.rc_ik >> three_body.rc_ij
-             >> three_body.nk_jk >> three_body.nk_ik >> three_body.nk_ij;
+        iss2 >> three_body.rc_ij >> three_body.rc_ik >> three_body.rc_jk
+             >> three_body.nk_ij >> three_body.nk_ik >> three_body.nk_jk;
         three_body.nint_ij = three_body.nk_ij - 1;
         three_body.nint_ik = three_body.nk_ik - 1;
         three_body.nint_jk = three_body.nk_jk - 1;
@@ -631,34 +631,37 @@ void UF3::initialize(const char* filename, const int number_of_atoms)
         if (rc3 > rc_max) rc_max = rc3;
       }
 
-      // Read 3 knot vectors
+      // Read 3 knot vectors, forward order: ij, ik, jk
       std::vector<float> k_ij(three_body.nk_ij);
       std::vector<float> k_ik(three_body.nk_ik);
       std::vector<float> k_jk(three_body.nk_jk);
 
       li++; { std::istringstream iss2(lines[li]);
-        for (int i = 0; i < three_body.nk_jk; i++) iss2 >> k_jk[i]; }
+        for (int i = 0; i < three_body.nk_ij; i++) iss2 >> k_ij[i]; }
       li++; { std::istringstream iss2(lines[li]);
         for (int i = 0; i < three_body.nk_ik; i++) iss2 >> k_ik[i]; }
       li++; { std::istringstream iss2(lines[li]);
-        for (int i = 0; i < three_body.nk_ij; i++) iss2 >> k_ij[i]; }
+        for (int i = 0; i < three_body.nk_jk; i++) iss2 >> k_jk[i]; }
 
       li++;
-      // coefficient dimensions: dim1 dim2 dim3
+      // coefficient dimensions: nc_ij nc_ik nc_jk
       {
         std::istringstream iss2(lines[li]);
         iss2 >> three_body.nc_ij >> three_body.nc_ik >> three_body.nc_jk;
       }
 
-      // Read coefficient tensor rows
-      int total_rows = three_body.nc_ij * three_body.nc_ik;
-      int row_len = three_body.nc_jk;
-      std::vector<float> tensor(total_rows * row_len, 0.0f);
-      for (int r = 0; r < total_rows; r++) {
+      // Read coefficient tensor.  File rows are (ij outer, ik inner) with jk
+      // along each row; store in the kernel's layout idx = p + q*nc_ij +
+      // r*nc_ij*nc_ik  (ij fastest, then ik, then jk) so find_force_uf3_3b reads
+      // it correctly.
+      int nci = three_body.nc_ij, nck = three_body.nc_ik, ncj = three_body.nc_jk;
+      std::vector<float> tensor((size_t)nci * nck * ncj, 0.0f);
+      for (int r = 0; r < nci * nck; r++) {
+        int p = r / nck;   // ij index
+        int q = r % nck;   // ik index
         li++;
         std::istringstream iss2(lines[li]);
-        int offset = r * row_len;
-        for (int c = 0; c < row_len; c++) iss2 >> tensor[offset + c];
+        for (int c = 0; c < ncj; c++) iss2 >> tensor[p + q * nci + (size_t)c * nci * nck];
       }
 
       // Upload coefficient tensor

@@ -100,8 +100,9 @@ static void write_uf3_file(UF3_Parameters& para, Uf3Model* model)
       int ti = t / (nt * nt), tj = (t / nt) % nt, tk = t % nt;
       out << "3B " << elements[ti] << " " << elements[tj] << " " << elements[tk]
           << " 0 3 uk\n";
-      float rc_jk = model->rc_3b(2);   // rc_jk == rc_ij by construction; was wrongly ×2
-      out << std::fixed << rc_jk << " " << model->rc_3b(1) << " " << model->rc_3b(0)
+      // Forward axis order (ij, ik, jk) for rc, knot-counts, knots, dims and the
+      // coefficient tensor — must match the MD parser in src/force/uf3.cu.
+      out << std::fixed << model->rc_3b(0) << " " << model->rc_3b(1) << " " << model->rc_3b(2)
           << " " << model->nknots_3b(0) << " " << model->nknots_3b(1) << " " << model->nknots_3b(2) << "\n";
       auto& k0 = model->knots_3b(0), &k1 = model->knots_3b(1), &k2 = model->knots_3b(2);
       for (size_t i = 0; i < k0.size(); i++) {
