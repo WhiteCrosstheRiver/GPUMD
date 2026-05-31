@@ -72,6 +72,14 @@ static void write_uf3_file(UF3_Parameters& para, Uf3Model* model)
   std::vector<float> coeffs(model->num_parameters());
   model->get_parameters(coeffs.data());
 
+  // 1-body per-element constant energy offsets
+  int e0_off = model->num_params_2b() + model->num_params_3b();
+  out << "1B";
+  for (int n = 0; n < para.num_types; n++) {
+    out << " " << coeffs[e0_off + n];
+  }
+  out << "\n";
+
   for (int p = 0; p < np; p++) {
     int ti = p / nt, tj = p % nt;
     out << "2B " << elements[ti] << " " << elements[tj] << " 0 3 uk\n";

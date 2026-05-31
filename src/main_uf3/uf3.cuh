@@ -138,6 +138,8 @@ public:
   int nknots_2b() const { return nknots_2b_; }
   int num_pairs() const { return num_types_ * num_types_; }
   int num_types() const { return num_types_; }
+  int num_params_2b() const { return num_params_2b_; }
+  int num_params_3b() const { return num_params_3b_; }
 
   // 3B accessors
   bool has_3b() const { return has_3b_; }

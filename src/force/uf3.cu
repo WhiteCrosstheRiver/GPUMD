@@ -259,6 +259,8 @@ static __global__ void find_force_uf3_2b(
   float rc,
   const int* __restrict__ g_NN,
   const int* __restrict__ g_NL,
+  const int* __restrict__ g_type,                   // atom types [N]
+  const float* __restrict__ g_e0,                   // 1-body energy offsets [ntypes]
   const float4* __restrict__ g_pos,
   double* g_pe,
   double* g_fx, double* g_fy, double* g_fz,
@@ -280,6 +282,7 @@ static __global__ void find_force_uf3_2b(
   const int nint_minus_1 = nint - 1;
 
   float pe = 0.0f;
+  if (g_e0) pe += g_e0[g_type[n1]];                // 1-body energy per atom
   float fx = 0.0f, fy = 0.0f, fz = 0.0f;
   float sxx = 0, sxy = 0, sxz = 0, syx = 0, syy = 0, syz = 0, szx = 0, szy = 0, szz = 0;
 
@@ -359,9 +362,11 @@ static __global__ void find_force_uf3_3b(
   float rc_ij, float rc_ik, float rc_jk,
   const int* __restrict__ g_NN,
   const int* __restrict__ g_NL,
-  const float4* __restrict__ g_pos,        // packed float4 positions (x,y,z,0)
-  float* g_f12x, float* g_f12y, float* g_f12z,
-  double* g_pe)
+  const int* __restrict__ g_type,                   // atom types [N]
+  const float* __restrict__ g_e0,                   // 1-body offsets
+  const float4* __restrict__ g_pos,
+  double* g_pe,                                     // per-atom energy
+  double* g_fx, double* g_fy, double* g_fz)         // per-atom forces (atomicAdd)
 {
   int n1 = blockIdx.x * blockDim.x + threadIdx.x + N1;
   if (n1 >= N2) return;
@@ -370,6 +375,7 @@ static __global__ void find_force_uf3_3b(
   const float4 pos1 = g_pos[n1];
   const float x1 = pos1.x, y1 = pos1.y, z1 = pos1.z;
   float pe = 0.0f;
+  if (g_e0) pe += g_e0[g_type[n1]];                // 1-body energy per atom
 
   for (int j1 = 0; j1 < NN; ++j1) {
     const int n2 = g_NL[n1 + N * j1];
@@ -381,7 +387,6 @@ static __global__ void find_force_uf3_3b(
     const float r12 = d12sq * inv_r12;
     if (r12 >= rc_ij) continue;
 
-    // ij-basis: hoisted here — only r12 (j-loop outer var) determines these
     int mi = (int)((r12 - knot_min_ij) * inv_knot_delta_ij);
     if (mi < 0) mi = 0; else if (mi >= nint_ij) mi = nint_ij - 1;
     const float ui = (r12 - knot_min_ij - mi * knot_delta_ij) * inv_knot_delta_ij;
@@ -400,7 +405,6 @@ static __global__ void find_force_uf3_3b(
       const float r13 = d13sq * inv_r13;
       if (r13 >= rc_ik) continue;
 
-      // n2-n3 distance from raw positions (independent of MIC-corrected x12/x13)
       float x23 = pos3.x - pos2.x, y23 = pos3.y - pos2.y, z23 = pos3.z - pos2.z;
       apply_mic(box, x23, y23, z23);
       const float d23sq = x23*x23 + y23*y23 + z23*z23;
@@ -408,7 +412,6 @@ static __global__ void find_force_uf3_3b(
       const float r23 = d23sq * inv_r23;
       if (r23 >= rc_jk) continue;
 
-      // ik-basis
       int mk = (int)((r13 - knot_min_ik) * inv_knot_delta_ik);
       if (mk < 0) mk = 0; else if (mk >= nint_ik) mk = nint_ik - 1;
       const float uk = (r13 - knot_min_ik - mk * knot_delta_ik) * inv_knot_delta_ik;
@@ -417,7 +420,6 @@ static __global__ void find_force_uf3_3b(
       eval_bspline4_deriv(uk, inv_knot_delta_ik, db_ik);
       const int q0 = (mk >= 3) ? mk - 3 : 0;
 
-      // jk-basis
       int mj = (int)((r23 - knot_min_jk) * inv_knot_delta_jk);
       if (mj < 0) mj = 0; else if (mj >= nint_jk) mj = nint_jk - 1;
       const float uj = (r23 - knot_min_jk - mj * knot_delta_jk) * inv_knot_delta_jk;
@@ -426,61 +428,51 @@ static __global__ void find_force_uf3_3b(
       eval_bspline4_deriv(uj, inv_knot_delta_jk, db_jk);
       const int r0 = (mj >= 3) ? mj - 3 : 0;
 
-      // Tensor contraction with middle-loop product precompute + inner row-sums.
-      // val/dv_d12/dv_d13 share the same jk row-sum Rv = Σ_r C·b_jk[r].
-      // dv_d23 uses Rd23 = Σ_r C·db_jk[r].  Middle-loop computes 3 products
-      // (bpbq, dbpbq, bpdbq) once per (dp,dq) pair instead of 4 per (dp,dq,dr).
-      float val = 0, dv_d12 = 0, dv_d13 = 0, dv_d23 = 0;
+      float val = 0, dv12 = 0, dv13 = 0, dv23 = 0;
       #pragma unroll 4
       for (int dp = 0; dp < 4; dp++) {
-        const int p = p0 + dp;
-        if (p >= nc_ij) break;
+        const int p = p0 + dp; if (p >= nc_ij) break;
         const float bp = b_ij[dp], dbp = db_ij[dp];
-
         #pragma unroll 4
         for (int dq = 0; dq < 4; dq++) {
-          const int q = q0 + dq;
-          if (q >= nc_ik) break;
-          const float bpbq  = bp  * b_ik[dq];
-          const float dbpbq = dbp * b_ik[dq];
-          const float bpdbq = bp  * db_ik[dq];
-          const int pq_off  = p + q * nc_ij;
-
+          const int q = q0 + dq; if (q >= nc_ik) break;
+          const float bpbq = bp * b_ik[dq], dbpbq = dbp * b_ik[dq], bpdbq = bp * db_ik[dq];
+          const int pq_off = p + q * nc_ij;
           float Rv = 0, Rd23 = 0;
           #pragma unroll 4
           for (int dr = 0; dr < 4; dr++) {
-            const int r = r0 + dr;
-            if (r >= nc_jk) break;
+            const int r = r0 + dr; if (r >= nc_jk) break;
             const float C = __ldg(&d_tensor[pq_off + r * nc_ij * nc_ik]);
-            Rv   += C * b_jk[dr];
-            Rd23 += C * db_jk[dr];
+            Rv += C * b_jk[dr]; Rd23 += C * db_jk[dr];
           }
-
-          val    += bpbq  * Rv;
-          dv_d12 += dbpbq * Rv;
-          dv_d13 += bpdbq * Rv;
-          dv_d23 += bpbq  * Rd23;
+          val   += bpbq  * Rv;
+          dv12  += dbpbq * Rv;
+          dv13  += bpdbq * Rv;
+          dv23  += bpbq  * Rd23;
         }
       }
 
-      pe += val / 3.0f;  // each triplet counted 3× (once per center atom)
+      pe += val;   // per-centre (no /3 — matches trainer convention)
 
-      // Force partials match trainer convention: full dE/dr * dr/dx (no 0.5).
-      const float fij_s = dv_d12 * inv_r12;
-      const float fik_s = dv_d13 * inv_r13;
+      // All three force legs — direct atomicAdd into per-atom force arrays.
+      // Sign convention FD-verified against trainer (see /tmp/fd3b.cpp).
+      double f1x = (double)( dv12 * inv_r12 * x12 + dv13 * inv_r13 * x13);
+      double f1y = (double)( dv12 * inv_r12 * y12 + dv13 * inv_r13 * y13);
+      double f1z = (double)( dv12 * inv_r12 * z12 + dv13 * inv_r13 * z13);
+      atomicAdd(&g_fx[n1], f1x); atomicAdd(&g_fy[n1], f1y); atomicAdd(&g_fz[n1], f1z);
 
-      const int idx_12 = j1 * N + n1;
-      g_f12x[idx_12] += fij_s * x12;
-      g_f12y[idx_12] += fij_s * y12;
-      g_f12z[idx_12] += fij_s * z12;
+      double f2x = (double)(-dv12 * inv_r12 * x12 + dv23 * inv_r23 * x23);
+      double f2y = (double)(-dv12 * inv_r12 * y12 + dv23 * inv_r23 * y23);
+      double f2z = (double)(-dv12 * inv_r12 * z12 + dv23 * inv_r23 * z23);
+      atomicAdd(&g_fx[n2], f2x); atomicAdd(&g_fy[n2], f2y); atomicAdd(&g_fz[n2], f2z);
 
-      const int idx_13 = k1 * N + n1;
-      g_f12x[idx_13] += fik_s * x13;
-      g_f12y[idx_13] += fik_s * y13;
-      g_f12z[idx_13] += fik_s * z13;
+      double f3x = (double)(-dv13 * inv_r13 * x13 - dv23 * inv_r23 * x23);
+      double f3y = (double)(-dv13 * inv_r13 * y13 - dv23 * inv_r23 * y23);
+      double f3z = (double)(-dv13 * inv_r13 * z13 - dv23 * inv_r23 * z23);
+      atomicAdd(&g_fx[n3], f3x); atomicAdd(&g_fy[n3], f3y); atomicAdd(&g_fz[n3], f3z);
     }
   }
-  g_pe[n1] += pe;
+  g_pe[n1] += (double)pe;
 }
 
 // ---------------------------------------------------------------------------
@@ -524,14 +516,25 @@ void UF3::initialize(const char* filename, const int number_of_atoms)
       std::istringstream iss_test(lines[li]);
       std::string first;
       iss_test >> first;
-      if (first == "uf3") { li++; continue; } // GPUMD header line
+      if (first == "uf3") {
+        int nt_header;
+        iss_test >> nt_header;
+        if (!d_e0.size()) d_e0.resize(nt_header); // allocate e0 if no 1B line
+        li++; continue;
+      } // GPUMD header line
     }
 
     std::istringstream iss(lines[li]);
     std::string body_type;
     iss >> body_type;
 
-    if (body_type == "2B") {
+    if (body_type == "1B") {
+      int ntypes = (int)d_e0.size();
+      std::vector<float> e0(ntypes);
+      for (int n = 0; n < ntypes; n++) iss >> e0[n];
+      d_e0.copy_from_host(e0.data());
+    }
+    else if (body_type == "2B") {
       // Format: 2B elem1 elem2 leading_trim trailing_trim knot_type
       std::string e1, e2;
       int leading_trim, trailing_trim;
@@ -684,14 +687,13 @@ void UF3::initialize(const char* filename, const int number_of_atoms)
     exit(1);
   }
 
-  // Allocate neighbor list and partial-force buffers
+  // If no 1B line was present, initialize e0 to zeros.
+  if (!d_e0.size()) d_e0.resize(1); // at least 1 type as fallback
+  cudaMemset(d_e0.data(), 0, d_e0.size() * sizeof(float));
+
+  // Allocate neighbor list and position buffer.
   neighbor.initialize(rc, number_of_atoms, max_neighbor_);
   d_pos_packed.resize(number_of_atoms);
-  if (has_3b) {
-    f12x.resize(max_neighbor_ * number_of_atoms);
-    f12y.resize(max_neighbor_ * number_of_atoms);
-    f12z.resize(max_neighbor_ * number_of_atoms);
-  }
 
   printf("Use UF3 potential.\n");
   if (has_2b) {
@@ -738,6 +740,7 @@ void UF3::compute(
       two_body.knot_min, two_body.inv_knot_delta,
       (float)two_body.rc,
       neighbor.NN.data(), neighbor.NL.data(),
+      type.data(), d_e0.data(),
       d_pos_packed.data(),
       potential_per_atom.data(),
       force_per_atom.data(),
@@ -758,21 +761,12 @@ void UF3::compute(
       three_body.knot_min_jk, three_body.knot_delta_jk, three_body.inv_knot_delta_jk,
       (float)three_body.rc_ij, (float)three_body.rc_ik, (float)three_body.rc_jk,
       neighbor.NN.data(), neighbor.NL.data(),
-      d_pos_packed.data(),       // float4 packed positions (x,y,z,0)
-      f12x.data(), f12y.data(), f12z.data(),
-      potential_per_atom.data());
+      type.data(), d_e0.data(),
+      d_pos_packed.data(),
+      potential_per_atom.data(),
+      force_per_atom.data(),
+      force_per_atom.data() + N,
+      force_per_atom.data() + N * 2);
     GPU_CHECK_KERNEL
-
-    find_properties_many_body(
-      box,
-      neighbor.NN.data(),
-      neighbor.NL.data(),
-      f12x.data(),
-      f12y.data(),
-      f12z.data(),
-      false,
-      position_per_atom,
-      force_per_atom,
-      virial_per_atom);
   }
 }
