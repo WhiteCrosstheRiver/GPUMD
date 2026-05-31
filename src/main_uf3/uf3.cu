@@ -16,6 +16,7 @@
 #include "uf3.cuh"
 #include "utilities/error.cuh"
 #include "utilities/gpu_macro.cuh"
+#include <algorithm>
 #include <cmath>
 
 // ---- GPU helpers ----------------------------------------------------------
@@ -707,6 +708,11 @@ Uf3Model::Uf3Model(UF3_Parameters& para)
     for(int i=0;i<num_params_3b_;i++)coeffs_3b_[i]=(rand()/(float)RAND_MAX-.5f)*.1f;}
   coeffs_e0_.assign(num_types_, 0.0f);
 
+  // Build the frozen-edge mask and zero those coefficients so the splines go
+  // smoothly to 0 at the cutoffs (no force discontinuity / energy drift in MD).
+  build_frozen_mask(para.trim_2b, para.trim_3b);
+  project_frozen();
+
   // Pre-allocate ALL GPU buffers ONCE
   // Use explicit cudaMalloc to avoid GPU_Vector resize() overhead
   prealloc_gpu(para);
@@ -841,6 +847,44 @@ void Uf3Model::upload_3b_coeffs() {
   d_tensor_3b.copy_from_host(coeffs_3b_.data());  // no resize
 }
 
+void Uf3Model::build_frozen_mask(int trim_2b, int trim_3b) {
+  frozen_.assign(num_params_total_, 0);
+  // 2B: freeze the trailing `trim_2b` coefficients of every pair so the spline
+  // decays to 0 at rc.  Clamp to leave at least one free coefficient.
+  int t2 = trim_2b; if (t2 > ncoeff_2b_ - 1) t2 = ncoeff_2b_ - 1; if (t2 < 0) t2 = 0;
+  int np2 = num_types_ * num_types_;
+  for (int p = 0; p < np2; p++)
+    for (int c = ncoeff_2b_ - t2; c < ncoeff_2b_; c++)
+      frozen_[p * ncoeff_2b_ + c] = 1;
+  // 3B: freeze a shell of width `trim_3b` at both ends of each grid axis.
+  if (has_3b_ && trim_3b > 0) {
+    int t0 = std::min(trim_3b, (nc_3b_[0] - 1) / 2);
+    int t1 = std::min(trim_3b, (nc_3b_[1] - 1) / 2);
+    int t2b = std::min(trim_3b, (nc_3b_[2] - 1) / 2);
+    int gsz = nc_3b_[0] * nc_3b_[1] * nc_3b_[2];
+    for (int tr = 0; tr < num_trips_; tr++) {
+      int base = num_params_2b_ + tr * gsz;
+      for (int a = 0; a < nc_3b_[0]; a++)
+        for (int b = 0; b < nc_3b_[1]; b++)
+          for (int c = 0; c < nc_3b_[2]; c++) {
+            bool fr = a < t0 || a >= nc_3b_[0] - t0 || b < t1 || b >= nc_3b_[1] - t1 ||
+                      c < t2b || c >= nc_3b_[2] - t2b;
+            if (fr) frozen_[base + a + b * nc_3b_[0] + c * nc_3b_[0] * nc_3b_[1]] = 1;
+          }
+    }
+  }
+}
+
+void Uf3Model::project_frozen() {
+  if (frozen_.empty()) return;
+  for (int k = 0; k < num_params_total_; k++) {
+    if (!frozen_[k]) continue;
+    if (k < num_params_2b_) coeffs_2b_[k / ncoeff_2b_][k % ncoeff_2b_] = 0.0f;
+    else if (k < num_params_2b_ + num_params_3b_) coeffs_3b_[k - num_params_2b_] = 0.0f;
+    else coeffs_e0_[k - e0_offset_] = 0.0f;
+  }
+}
+
 void Uf3Model::get_parameters(float* params) const {
   int idx=0;
   for(size_t p=0;p<coeffs_2b_.size();p++)for(int c=0;c<ncoeff_2b_;c++)params[idx++]=coeffs_2b_[p][c];
@@ -853,6 +897,7 @@ void Uf3Model::set_parameters_async(const float* params, cudaStream_t stream) {
   for(size_t p=0;p<coeffs_2b_.size();p++)for(int c=0;c<ncoeff_2b_;c++)coeffs_2b_[p][c]=params[idx++];
   for(size_t i=0;i<coeffs_3b_.size();i++)coeffs_3b_[i]=params[idx++];
   for(int t=0;t<num_types_;t++)coeffs_e0_[t]=params[idx++];
+  project_frozen();   // enforce frozen-edge coefficients = 0 (smooth cutoff)
   upload_2b_coeffs_gpu(stream);
   CHECK(cudaMemcpyAsync(d_e0.data(), coeffs_e0_.data(),
                         num_types_ * sizeof(float),

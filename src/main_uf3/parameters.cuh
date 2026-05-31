@@ -34,6 +34,13 @@ struct UF3_Parameters {
   int num_types = 1;
   std::string knot_type_str = "uk";
 
+  // Edge-coefficient trimming for smooth cutoffs (frozen to 0).  2B freezes the
+  // last `trim_2b` coefficients so the pair spline -> 0 at rc (avoids force
+  // discontinuities / energy drift in MD).  3B freezes the first/last `trim_3b`
+  // along each grid axis (only safe when the 3B grid is large enough).
+  int trim_2b = 3;
+  int trim_3b = 0;
+
   int batch = 1000;  // computed from stage max batch
   double lambda_e = 1.0;
   double lambda_f = 1.0;

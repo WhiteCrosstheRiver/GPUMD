@@ -56,6 +56,10 @@ static void apply_global_token(UF3_Parameters& para, const std::vector<std::stri
       para.rc_3b[0] = get_double_from_token(tokens[1], __FILE__, __LINE__);
       para.rc_3b[1] = get_double_from_token(tokens[2], __FILE__, __LINE__);
     }
+  } else if (tokens[0] == "trim_2b") {
+    para.trim_2b = get_int_from_token(tokens[1], __FILE__, __LINE__);
+  } else if (tokens[0] == "trim_3b") {
+    para.trim_3b = get_int_from_token(tokens[1], __FILE__, __LINE__);
   } else if (tokens[0] == "knot_type") {
     para.knot_type_str = tokens[1];
     para.knot_type = (tokens[1] == "uk") ? 1 : 0;

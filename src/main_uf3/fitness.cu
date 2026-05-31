@@ -344,6 +344,10 @@ void Uf3Fitness::compute_gradient(int batch_id, int generation,
     dataset_, bid, loss_e, loss_f, lambda_e_, lambda_f_,
     d_grad_, d_ediff_, grad);
   accumulate_regularization_gradient(grad);
+  // Keep frozen (edge) coefficients fixed at 0 for smooth cutoffs.
+  const std::vector<char>& fr = model_->frozen();
+  for (int i = 0; i < (int)grad.size() && i < (int)fr.size(); i++)
+    if (fr[i]) grad[i] = 0.0f;
 }
 
 // ---------------------------------------------------------------------------

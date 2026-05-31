@@ -153,6 +153,10 @@ public:
   float rc_2b() const { return rc_2b_; }
   float rc_3b(int d) const { return rc_3b_[d]; }
 
+  // Per-parameter frozen mask (1 = held at 0 for smooth cutoffs).  Used by the
+  // lstsq solve and Adam to keep edge coefficients at zero.
+  const std::vector<char>& frozen() const { return frozen_; }
+
 private:
   void build_knots();
   void prealloc_gpu(const UF3_Parameters& para);
@@ -193,6 +197,12 @@ private:
   std::vector<float> coeffs_e0_;
   int e0_offset_;
   int num_params_total_;
+
+  // Frozen-parameter mask (size num_params_total_): 1 => held at 0 for smooth
+  // cutoffs (trailing 2B edge, optional 3B edge shell).  Built in the ctor.
+  std::vector<char> frozen_;
+  void build_frozen_mask(int trim_2b, int trim_3b);
+  void project_frozen();   // zero all frozen coefficients in host storage
 
   // ---- Pre-allocated GPU buffers (never resized after init) ----
   int gpu_max_atoms_ = 0;        // capacity for d_types/x/y/z (batch-local layout)

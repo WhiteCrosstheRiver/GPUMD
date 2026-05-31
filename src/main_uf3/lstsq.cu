@@ -449,6 +449,19 @@ void run_lstsq(
                                has_3b, num_params_2b, fitness.model()->num_triplets(),
                                nc3[0], nc3[1], nc3[2], lam2b, lam3b);
 
+  // Constrain frozen (edge) coefficients to 0: decouple their row/column so the
+  // free coefficients are solved as if the frozen ones do not contribute, and
+  // the frozen ones solve to exactly 0.  Gives smooth spline cutoffs.
+  {
+    const std::vector<char>& fr = fitness.model()->frozen();
+    for (int k = 0; k < nparam; k++) {
+      if (!fr[k]) continue;
+      for (int j = 0; j < nparam; j++) { ATA[(size_t)k*nparam + j] = 0.0; ATA[(size_t)j*nparam + k] = 0.0; }
+      ATA[(size_t)k*nparam + k] = (ridge_floor > 0.0 ? ridge_floor : 1.0);
+      ATb[k] = 0.0;
+    }
+  }
+
   bool ok = cholesky(ATA, nparam);   // in-place Cholesky in double
   if (!ok) printf("  lstsq: ATA not PD (after ridge)\n");
   std::vector<double> xd; solve_cholesky(ATA, nparam, ATb, xd);
