@@ -34,6 +34,7 @@ cubic polynomial: V(u) = A + u*(B + u*(C + u*D)).
 #include <fstream>
 #include <iostream>
 #include <sstream>
+#include <type_traits>
 #include <vector>
 
 // ---------------------------------------------------------------------------
@@ -212,10 +213,11 @@ __device__ __forceinline__ int find_interval(float r, float knot_min, float inv_
   return i;
 }
 
-// Maximum 2B intervals that fit in shared memory cache.  A typical UF3 model
-// uses ~10-40 intervals (nknots-1).  64 covers all realistic cases and uses
-// only 1 KB of shared per block.
-static constexpr int UF3_2B_SHARED_INTERVALS = 64;
+// Maximum number of 2B float4 coefficients (num_pairs * nint) that fit in the
+// shared-memory cache.  A single-element model uses ~10-40; a 2-element model
+// (4 pairs) ~40-160.  1024 float4 = 16 KB covers realistic multi-element cases.
+// When the table is larger the kernel falls back to L2-cached global reads.
+static constexpr int UF3_2B_SHARED_COEFFS = 1024;
 
 // Non-uniform: binary search
 __device__ __forceinline__ int find_interval_nu(float r, const float* knots, int nk)
@@ -250,12 +252,20 @@ static __global__ void pack_positions_float4(
 //   - inv_knot_delta pre-computed, rsqrtf, __fmaf_rn
 //   - full neighbor list (no atomics overhead)
 // ---------------------------------------------------------------------------
+// UNIFORM=true  -> O(1) interval lookup (r-knot_min)*inv_knot_delta (GPUMD trainer
+//                  always emits uniform "uk" knots; this is the hot path).
+// UNIFORM=false -> binary search over the (non-uniform) knot vector, per-interval
+//                  width for the derivative scaling.  Lets the MD engine consume
+//                  reference-UF3 models exported with lammps/non-uniform knots.
+template <bool UNIFORM>
 static __global__ void find_force_uf3_2b(
   const int N, const int N1, const int N2,
   const Box box,
-  const float4* __restrict__ d_coeff,
+  const float4* __restrict__ d_coeff,               // [num_pairs * nint]
+  int num_pairs, int num_types,
   int nint,
   float knot_min, float inv_knot_delta,
+  const float* __restrict__ d_knots, int nknots,    // used only when !UNIFORM
   float rc,
   const int* __restrict__ g_NN,
   const int* __restrict__ g_NL,
@@ -266,23 +276,31 @@ static __global__ void find_force_uf3_2b(
   double* g_fx, double* g_fy, double* g_fz,
   double* g_virial)
 {
-  __shared__ float4 s_coeff[UF3_2B_SHARED_INTERVALS];
-  for (int idx = threadIdx.x; idx < nint; idx += blockDim.x) {
-    s_coeff[idx] = __ldg(&d_coeff[idx]);
+  // Cache the full per-pair coefficient table in shared memory when it fits;
+  // otherwise read from L2-cached global memory (use_shared = false).
+  __shared__ float4 s_coeff[UF3_2B_SHARED_COEFFS];
+  const int ncoeff_total = num_pairs * nint;
+  const bool use_shared = (ncoeff_total <= UF3_2B_SHARED_COEFFS);
+  if (use_shared) {
+    for (int idx = threadIdx.x; idx < ncoeff_total; idx += blockDim.x) {
+      s_coeff[idx] = __ldg(&d_coeff[idx]);
+    }
+    __syncthreads();
   }
-  __syncthreads();
+  const float4* coeff_tab = use_shared ? s_coeff : d_coeff;
 
   int n1 = blockIdx.x * blockDim.x + threadIdx.x + N1;
   if (n1 >= N2) return;
 
   const int NN = g_NN[n1];
+  const int type1 = g_type[n1];
   const float4 pos1 = g_pos[n1];
   const float x1 = pos1.x, y1 = pos1.y, z1 = pos1.z;
   const float rc2 = rc * rc;
   const int nint_minus_1 = nint - 1;
 
   float pe = 0.0f;
-  if (g_e0) pe += g_e0[g_type[n1]];                // 1-body energy per atom
+  if (g_e0) pe += g_e0[type1];                     // 1-body energy per atom
   float fx = 0.0f, fy = 0.0f, fz = 0.0f;
   float sxx = 0, sxy = 0, sxz = 0, syx = 0, syy = 0, syz = 0, szx = 0, szy = 0, szz = 0;
 
@@ -299,14 +317,27 @@ static __global__ void find_force_uf3_2b(
     const float rinv = rsqrtf(d2);
     const float r = d2 * rinv;
 
-    const float t = (r - knot_min) * inv_knot_delta;
-    int m = (int)t;
-    if (m < 0) m = 0; else if (m > nint_minus_1) m = nint_minus_1;
-    const float u = t - (float)m;
+    int m;
+    float u, inv_h;
+    if (UNIFORM) {
+      const float t = (r - knot_min) * inv_knot_delta;
+      m = (int)t;
+      if (m < 0) m = 0; else if (m > nint_minus_1) m = nint_minus_1;
+      u = t - (float)m;
+      inv_h = inv_knot_delta;
+    } else {
+      m = find_interval_nu(r, d_knots, nknots);    // largest m with knots[m] <= r
+      const float lo = d_knots[m];
+      inv_h = 1.0f / (d_knots[m + 1] - lo);
+      u = (r - lo) * inv_h;
+    }
 
-    const float4 c = s_coeff[m];
+    // Select the coefficient table for this ordered type pair (matches the
+    // trainer's pair index = type1*num_types + type2).
+    const int pair = type1 * num_types + g_type[n2];
+    const float4 c = coeff_tab[pair * nint + m];
     const float val = eval_cubic(c, u);
-    const float deriv = eval_cubic_deriv(c, u) * inv_knot_delta;
+    const float deriv = eval_cubic_deriv(c, u) * inv_h;
 
     // Force factor matches the trainer convention: each atom's force from a
     // pair is the full -dE/dr_i derivative — no 0.5 factor (the symmetric
@@ -338,7 +369,7 @@ static __global__ void find_force_uf3_2b(
 }
 
 // ---------------------------------------------------------------------------
-// 3-body kernel v2 — optimized (Tersoff-style partial force accumulation)
+// 3-body kernel v3 — optimized (Tersoff-style partial force accumulation)
 //
 // Key improvements over v1:
 //   1. float4 packed positions — 1×128-bit read vs 3×64-bit double per atom.
@@ -349,11 +380,27 @@ static __global__ void find_force_uf3_2b(
 //      every interval; no GPU table lookups needed.
 //   5. Middle-loop product precompute (bpbq, dbpbq, bpdbq) + inner row-sum
 //      (Rv = Σ C·b_jk, Rd23 = Σ C·db_jk) reduces inner-loop muls by ~50%.
+//
+// v3 force-accumulation rewrite — the dominant cost in 3B-heavy models was
+// global atomic traffic: v2 issued 9 atomicAdds per triplet (~9·NN²/2 per
+// centre), and the centre-atom (n1) legs all hit the *same* address from the
+// *same* thread → fully serialized.  v3 keeps forces in registers as far as
+// each leg's atom is constant:
+//   • f1 (centre n1) — constant over the whole j,k loop → 1 atomicAdd/atom.
+//   • f2 (neighbour n2) — constant over the inner k-loop → 1 atomicAdd/j.
+//   • f3 (neighbour n3) — varies every inner iter → atomicAdd/triplet (but to
+//     scattered addresses, so far less contended than the old n1 legs).
+// This cuts atomic count ~3× and removes the worst serialization entirely.
+//
+// v3 tensor layout — d_tensor is stored jk-fastest (idx = r + (p + q·nc_ij)·nc_jk)
+// so the innermost dr-loop reads 4 *contiguous* coefficients (one cache line)
+// instead of 4 reads strided by nc_ij·nc_ik (4 separate lines).
 // ---------------------------------------------------------------------------
 static __global__ void find_force_uf3_3b(
   const int N, const int N1, const int N2,
   const Box box,
-  const float* __restrict__ d_tensor,
+  const float* __restrict__ d_tensor,               // [num_trips * tensor_stride]
+  int num_types, int tensor_stride,
   int nc_ij, int nc_ik, int nc_jk,
   int nint_ij, int nint_ik, int nint_jk,
   float knot_min_ij, float knot_delta_ij, float inv_knot_delta_ij,
@@ -372,13 +419,20 @@ static __global__ void find_force_uf3_3b(
   if (n1 >= N2) return;
 
   const int NN = g_NN[n1];
+  const int type1 = g_type[n1];
   const float4 pos1 = g_pos[n1];
   const float x1 = pos1.x, y1 = pos1.y, z1 = pos1.z;
   float pe = 0.0f;
-  if (g_e0) pe += g_e0[g_type[n1]];                // 1-body energy per atom
+  if (g_e0) pe += g_e0[type1];                     // 1-body energy per atom
+
+  // Centre-atom (n1) force accumulates in registers across the whole j,k
+  // double loop — its address is constant, so a single atomicAdd at the end
+  // replaces the ~NN²/2 same-address (serialized) atomics of the v2 kernel.
+  float f1x = 0.0f, f1y = 0.0f, f1z = 0.0f;
 
   for (int j1 = 0; j1 < NN; ++j1) {
     const int n2 = g_NL[n1 + N * j1];
+    const int type2 = g_type[n2];
     const float4 pos2 = __ldg(&g_pos[n2]);
     float x12 = pos2.x - x1, y12 = pos2.y - y1, z12 = pos2.z - z1;
     apply_mic(box, x12, y12, z12);
@@ -395,8 +449,18 @@ static __global__ void find_force_uf3_3b(
     eval_bspline4_deriv(ui, inv_knot_delta_ij, db_ij);
     const int p0 = (mi >= 3) ? mi - 3 : 0;
 
+    // Neighbour n2 force accumulates over the inner k-loop (its address is
+    // constant for fixed j) — 1 atomicAdd per j instead of per triplet.
+    float f2x = 0.0f, f2y = 0.0f, f2z = 0.0f;
+
     for (int k1 = j1 + 1; k1 < NN; ++k1) {
       const int n3 = g_NL[n1 + N * k1];
+      const int type3 = g_type[n3];
+      // Coefficient tensor for this type triplet (matches the trainer's index
+      // (type1*num_types + type2)*num_types + type3).  The j/k loop visits each
+      // unordered neighbour pair once with n2 on the ij leg and n3 on the ik leg.
+      const float* __restrict__ tensor_t =
+        d_tensor + (size_t)((type1 * num_types + type2) * num_types + type3) * tensor_stride;
       const float4 pos3 = __ldg(&g_pos[n3]);
       float x13 = pos3.x - x1, y13 = pos3.y - y1, z13 = pos3.z - z1;
       apply_mic(box, x13, y13, z13);
@@ -437,12 +501,13 @@ static __global__ void find_force_uf3_3b(
         for (int dq = 0; dq < 4; dq++) {
           const int q = q0 + dq; if (q >= nc_ik) break;
           const float bpbq = bp * b_ik[dq], dbpbq = dbp * b_ik[dq], bpdbq = bp * db_ik[dq];
-          const int pq_off = p + q * nc_ij;
+          // jk-fastest layout: 4 inner coeffs are contiguous (one cache line).
+          const float* __restrict__ C4 = &tensor_t[(p + q * nc_ij) * nc_jk + r0];
           float Rv = 0, Rd23 = 0;
           #pragma unroll 4
           for (int dr = 0; dr < 4; dr++) {
-            const int r = r0 + dr; if (r >= nc_jk) break;
-            const float C = __ldg(&d_tensor[pq_off + r * nc_ij * nc_ik]);
+            if (r0 + dr >= nc_jk) break;
+            const float C = __ldg(&C4[dr]);
             Rv += C * b_jk[dr]; Rd23 += C * db_jk[dr];
           }
           val   += bpbq  * Rv;
@@ -454,24 +519,29 @@ static __global__ void find_force_uf3_3b(
 
       pe += val;   // per-centre (no /3 — matches trainer convention)
 
-      // All three force legs — direct atomicAdd into per-atom force arrays.
-      // Sign convention FD-verified against trainer (see /tmp/fd3b.cpp).
-      double f1x = (double)( dv12 * inv_r12 * x12 + dv13 * inv_r13 * x13);
-      double f1y = (double)( dv12 * inv_r12 * y12 + dv13 * inv_r13 * y13);
-      double f1z = (double)( dv12 * inv_r12 * z12 + dv13 * inv_r13 * z13);
-      atomicAdd(&g_fx[n1], f1x); atomicAdd(&g_fy[n1], f1y); atomicAdd(&g_fz[n1], f1z);
+      // Force legs (sign convention FD-verified against trainer):
+      //   f1 = +a12 +a13      f2 = -a12 +a23      f3 = -a13 -a23
+      // where a12 = dv12·inv_r12·r12vec, etc.  Identical algebra to v2, only
+      // the accumulation target (register vs atomic) differs per leg.
+      const float t12 = dv12 * inv_r12, t13 = dv13 * inv_r13, t23 = dv23 * inv_r23;
+      const float a12x = t12 * x12, a12y = t12 * y12, a12z = t12 * z12;
+      const float a13x = t13 * x13, a13y = t13 * y13, a13z = t13 * z13;
+      const float a23x = t23 * x23, a23y = t23 * y23, a23z = t23 * z23;
 
-      double f2x = (double)(-dv12 * inv_r12 * x12 + dv23 * inv_r23 * x23);
-      double f2y = (double)(-dv12 * inv_r12 * y12 + dv23 * inv_r23 * y23);
-      double f2z = (double)(-dv12 * inv_r12 * z12 + dv23 * inv_r23 * z23);
-      atomicAdd(&g_fx[n2], f2x); atomicAdd(&g_fy[n2], f2y); atomicAdd(&g_fz[n2], f2z);
+      f1x += a12x + a13x; f1y += a12y + a13y; f1z += a12z + a13z;
+      f2x += a23x - a12x; f2y += a23y - a12y; f2z += a23z - a12z;
 
-      double f3x = (double)(-dv13 * inv_r13 * x13 - dv23 * inv_r23 * x23);
-      double f3y = (double)(-dv13 * inv_r13 * y13 - dv23 * inv_r23 * y23);
-      double f3z = (double)(-dv13 * inv_r13 * z13 - dv23 * inv_r23 * z23);
-      atomicAdd(&g_fx[n3], f3x); atomicAdd(&g_fy[n3], f3y); atomicAdd(&g_fz[n3], f3z);
+      atomicAdd(&g_fx[n3], (double)(-a13x - a23x));
+      atomicAdd(&g_fy[n3], (double)(-a13y - a23y));
+      atomicAdd(&g_fz[n3], (double)(-a13z - a23z));
     }
+    atomicAdd(&g_fx[n2], (double)f2x);
+    atomicAdd(&g_fy[n2], (double)f2y);
+    atomicAdd(&g_fz[n2], (double)f2z);
   }
+  atomicAdd(&g_fx[n1], (double)f1x);
+  atomicAdd(&g_fy[n1], (double)f1y);
+  atomicAdd(&g_fz[n1], (double)f1z);
   g_pe[n1] += (double)pe;
 }
 
@@ -507,18 +577,44 @@ void UF3::initialize(const char* filename, const int number_of_atoms)
   }
   input.close();
 
+  // Map an element symbol to its type index (position in the header element
+  // list).  Returns -1 if not found.
+  auto symbol_to_type = [this](const std::string& s) -> int {
+    for (int t = 0; t < (int)elements_.size(); t++)
+      if (elements_[t] == s) return t;
+    return -1;
+  };
+
+  // Host accumulators for the full multi-type coefficient tables.  Allocated
+  // lazily on the first 2B / 3B block (once nint / tensor dims are known).
+  std::vector<float4> h_coeff_all;   // [num_pairs * nint]
+  std::vector<float> h_tensor_all;   // [num_trips * tensor_stride]
+
   double rc_max = 0.0;
   size_t li = 0;
   while (li < lines.size()) {
-    // Skip comments, empty lines, and the GPUMD header ("uf3 N elem1 ...")
+    // Skip comments and empty lines.
     if (lines[li].empty() || lines[li][0] == '#') { li++; continue; }
     {
       std::istringstream iss_test(lines[li]);
       std::string first;
       iss_test >> first;
       if (first == "uf3") {
+        // Header: "uf3 N elem1 elem2 ...".  The element order defines the atom
+        // type indices used by the kernels and by model.xyz / run.in.
         int nt_header;
         iss_test >> nt_header;
+        num_types_ = nt_header;
+        elements_.clear();
+        for (int n = 0; n < nt_header; n++) {
+          std::string el;
+          if (iss_test >> el) elements_.push_back(el);
+        }
+        if ((int)elements_.size() != nt_header) {
+          std::cout << "UF3 header lists " << elements_.size()
+                    << " elements but declares " << nt_header << "." << std::endl;
+          exit(1);
+        }
         if (!d_e0.size()) d_e0.resize(nt_header); // allocate e0 if no 1B line
         li++; continue;
       } // GPUMD header line
@@ -542,6 +638,12 @@ void UF3::initialize(const char* filename, const int number_of_atoms)
       iss >> e1 >> e2 >> leading_trim >> trailing_trim >> kt_str;
       int knot_type = (kt_str == "uk") ? 1 : 0;
       (void)trailing_trim; // always 3 for cubic
+      int ti = symbol_to_type(e1), tj = symbol_to_type(e2);
+      if (ti < 0 || tj < 0) {
+        std::cout << "UF3 2B block references unknown element (" << e1 << ","
+                  << e2 << ")." << std::endl;
+        exit(1);
+      }
 
       li++;
       // cutoff and knot count
@@ -580,26 +682,30 @@ void UF3::initialize(const char* filename, const int number_of_atoms)
         for (int i = 0; i < ncoeff; i++) iss2 >> coeffs[i];
       }
 
-      // Pre-compute per-interval combined cubic polynomials
-      {
-        std::vector<float4> h_coeff;
-        // Always use uniform precomputation (non-uniform knots are approx uniform)
-        // The key difference is handled at GPU runtime via binary search interval lookup
+      // Pre-compute per-interval combined cubic polynomials for this pair.
+      // knot_type 1 ("uk") -> uniform basis (GPUMD trainer default, hot path);
+      // knot_type 0 ("nk") -> general non-uniform basis via de Boor sampling
+      // (lets the MD engine consume reference-UF3 models with lammps knots).
+      std::vector<float4> h_coeff;
+      if (knot_type == 1)
         precompute_2b_uniform(knots, coeffs, leading_trim, h_coeff);
-        two_body.d_coeff.resize(h_coeff.size());
-        two_body.d_coeff.copy_from_host(h_coeff.data());
-      }
+      else
+        precompute_2b_nonuniform(knots, coeffs, h_coeff);
 
-      // Store knot info for GPU
+      // Lazily size the full per-pair table on the first 2B block.
+      two_body.num_pairs = num_types_ * num_types_;
+      if (h_coeff_all.empty()) {
+        h_coeff_all.assign((size_t)two_body.num_pairs * two_body.nint,
+                           make_float4(0.f, 0.f, 0.f, 0.f));
+      }
+      int pair = ti * num_types_ + tj;
+      for (int m = 0; m < two_body.nint; m++)
+        h_coeff_all[(size_t)pair * two_body.nint + m] = h_coeff[m];
+
+      // Store knot info for GPU (shared uniform grid across all pairs).
       two_body.knot_min = knots[0];
       two_body.knot_delta = (knots[two_body.nknots - 1] - knots[0]) / (two_body.nknots - 1);
       two_body.inv_knot_delta = 1.0f / two_body.knot_delta;
-      if (two_body.nint > UF3_2B_SHARED_INTERVALS) {
-        std::cout << "UF3 2B intervals=" << two_body.nint
-                  << " exceeds shared-memory cache (" << UF3_2B_SHARED_INTERVALS
-                  << "). Recompile with a larger UF3_2B_SHARED_INTERVALS." << std::endl;
-        exit(1);
-      }
       {
         two_body.d_knots.resize(two_body.nknots);
         two_body.d_knots.copy_from_host(knots.data());
@@ -615,6 +721,22 @@ void UF3::initialize(const char* filename, const int number_of_atoms)
       iss >> e1 >> e2 >> e3 >> leading_trim >> trailing_trim >> kt_str;
       int knot_type = (kt_str == "uk") ? 1 : 0;
       (void)trailing_trim;
+      int ti = symbol_to_type(e1), tj = symbol_to_type(e2), tk = symbol_to_type(e3);
+      if (ti < 0 || tj < 0 || tk < 0) {
+        std::cout << "UF3 3B block references unknown element (" << e1 << ","
+                  << e2 << "," << e3 << ")." << std::endl;
+        exit(1);
+      }
+      // The 3B kernel evaluates the uniform cubic B-spline basis directly
+      // (eval_bspline4), which is only valid for uniform knots.  Non-uniform 3B
+      // would need per-interval basis tables — refuse rather than silently
+      // produce wrong energies/forces.
+      if (knot_type != 1) {
+        std::cout << "UF3: non-uniform (nk) 3B knots are not supported by the MD "
+                     "engine (uniform basis only). Re-export with uniform knots."
+                  << std::endl;
+        exit(1);
+      }
 
       li++;
       // cutoffs and knot counts, forward order: rc_ij rc_ik rc_jk nk_ij nk_ik nk_jk
@@ -651,22 +773,26 @@ void UF3::initialize(const char* filename, const int number_of_atoms)
       }
 
       // Read coefficient tensor.  File rows are (ij outer, ik inner) with jk
-      // along each row; store in the kernel's layout idx = p + q*nc_ij +
-      // r*nc_ij*nc_ik  (ij fastest, then ik, then jk) so find_force_uf3_3b reads
-      // it correctly.
+      // along each row; store in the kernel's jk-fastest layout
+      // idx = r + (p + q*nc_ij)*nc_jk  (jk fastest, then ij, then ik) so the
+      // innermost dr-loop in find_force_uf3_3b reads 4 contiguous coefficients.
       int nci = three_body.nc_ij, nck = three_body.nc_ik, ncj = three_body.nc_jk;
-      std::vector<float> tensor((size_t)nci * nck * ncj, 0.0f);
-      for (int r = 0; r < nci * nck; r++) {
-        int p = r / nck;   // ij index
-        int q = r % nck;   // ik index
+      three_body.tensor_stride = nci * nck * ncj;
+      three_body.num_trips = num_types_ * num_types_ * num_types_;
+      // Lazily size the full per-triplet tensor on the first 3B block.
+      if (h_tensor_all.empty()) {
+        h_tensor_all.assign((size_t)three_body.num_trips * three_body.tensor_stride, 0.0f);
+      }
+      int trip = (ti * num_types_ + tj) * num_types_ + tk;
+      float* tdst = h_tensor_all.data() + (size_t)trip * three_body.tensor_stride;
+      for (int row = 0; row < nci * nck; row++) {
+        int p = row / nck;   // ij index
+        int q = row % nck;   // ik index
         li++;
         std::istringstream iss2(lines[li]);
-        for (int c = 0; c < ncj; c++) iss2 >> tensor[p + q * nci + (size_t)c * nci * nck];
+        for (int c = 0; c < ncj; c++)            // c == jk index (r)
+          iss2 >> tdst[(size_t)c + ((size_t)p + (size_t)q * nci) * ncj];
       }
-
-      // Upload coefficient tensor
-      three_body.d_tensor.resize(tensor.size());
-      three_body.d_tensor.copy_from_host(tensor.data());
 
       // Store knot info
       three_body.knot_min_ij = k_ij[0];
@@ -690,6 +816,26 @@ void UF3::initialize(const char* filename, const int number_of_atoms)
     exit(1);
   }
 
+  // Upload the assembled multi-type tables to the device.
+  if (has_2b) {
+    if ((size_t)two_body.num_pairs * two_body.nint != h_coeff_all.size()) {
+      std::cout << "UF3: missing 2B blocks (expected " << two_body.num_pairs
+                << " type pairs)." << std::endl;
+      exit(1);
+    }
+    two_body.d_coeff.resize(h_coeff_all.size());
+    two_body.d_coeff.copy_from_host(h_coeff_all.data());
+  }
+  if (has_3b) {
+    if ((size_t)three_body.num_trips * three_body.tensor_stride != h_tensor_all.size()) {
+      std::cout << "UF3: missing 3B blocks (expected " << three_body.num_trips
+                << " type triplets)." << std::endl;
+      exit(1);
+    }
+    three_body.d_tensor.resize(h_tensor_all.size());
+    three_body.d_tensor.copy_from_host(h_tensor_all.data());
+  }
+
   // If no 1B line was present, initialize e0 to zeros.
   if (!d_e0.size()) d_e0.resize(1); // at least 1 type as fallback
   cudaMemset(d_e0.data(), 0, d_e0.size() * sizeof(float));
@@ -698,15 +844,18 @@ void UF3::initialize(const char* filename, const int number_of_atoms)
   neighbor.initialize(rc, number_of_atoms, max_neighbor_);
   d_pos_packed.resize(number_of_atoms);
 
-  printf("Use UF3 potential.\n");
+  printf("Use UF3 potential with %d atom type%s.\n", num_types_,
+         num_types_ > 1 ? "s" : "");
+  for (int t = 0; t < (int)elements_.size(); t++)
+    printf("    type %d (%s).\n", t, elements_[t].c_str());
   if (has_2b) {
-    printf("    2B: rc=%.1f A, %d intervals, %d knots\n",
-           two_body.rc, two_body.nint, two_body.nknots);
+    printf("    2B: rc=%.1f A, %d intervals, %d knots, %d type pairs\n",
+           two_body.rc, two_body.nint, two_body.nknots, two_body.num_pairs);
   }
   if (has_3b) {
-    printf("    3B: rc(ij,ik,jk)=(%.1f,%.1f,%.1f) A, coeff dims=%dx%dx%d\n",
+    printf("    3B: rc(ij,ik,jk)=(%.1f,%.1f,%.1f) A, coeff dims=%dx%dx%d, %d type triplets\n",
            three_body.rc_ij, three_body.rc_ik, three_body.rc_jk,
-           three_body.nc_ij, three_body.nc_ik, three_body.nc_jk);
+           three_body.nc_ij, three_body.nc_ik, three_body.nc_jk, three_body.num_trips);
   }
 }
 
@@ -737,19 +886,25 @@ void UF3::compute(
   }
 
   if (has_2b) {
-    find_force_uf3_2b<<<grid_size, BLOCK_SIZE>>>(
-      N, N1, N2, box,
-      two_body.d_coeff.data(), two_body.nint,
-      two_body.knot_min, two_body.inv_knot_delta,
-      (float)two_body.rc,
-      neighbor.NN.data(), neighbor.NL.data(),
-      type.data(), d_e0.data(),
-      d_pos_packed.data(),
-      potential_per_atom.data(),
-      force_per_atom.data(),
-      force_per_atom.data() + N,
-      force_per_atom.data() + N * 2,
-      virial_per_atom.data());
+    auto launch_2b = [&](auto uniform_tag) {
+      constexpr bool UNI = decltype(uniform_tag)::value;
+      find_force_uf3_2b<UNI><<<grid_size, BLOCK_SIZE>>>(
+        N, N1, N2, box,
+        two_body.d_coeff.data(), two_body.num_pairs, num_types_, two_body.nint,
+        two_body.knot_min, two_body.inv_knot_delta,
+        two_body.d_knots.data(), two_body.nknots,
+        (float)two_body.rc,
+        neighbor.NN.data(), neighbor.NL.data(),
+        type.data(), d_e0.data(),
+        d_pos_packed.data(),
+        potential_per_atom.data(),
+        force_per_atom.data(),
+        force_per_atom.data() + N,
+        force_per_atom.data() + N * 2,
+        virial_per_atom.data());
+    };
+    if (two_body.knot_type == 1) launch_2b(std::true_type{});
+    else                         launch_2b(std::false_type{});
     GPU_CHECK_KERNEL
   }
 
@@ -757,6 +912,7 @@ void UF3::compute(
     find_force_uf3_3b<<<grid_size, BLOCK_SIZE>>>(
       N, N1, N2, box,
       three_body.d_tensor.data(),
+      num_types_, three_body.tensor_stride,
       three_body.nc_ij, three_body.nc_ik, three_body.nc_jk,
       three_body.nint_ij, three_body.nint_ik, three_body.nint_jk,
       three_body.knot_min_ij, three_body.knot_delta_ij, three_body.inv_knot_delta_ij,

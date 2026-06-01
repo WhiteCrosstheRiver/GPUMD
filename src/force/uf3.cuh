@@ -23,6 +23,8 @@ Ref: S. R. Xie et al., "Ultra-fast interpretable machine-learning potentials",
 #include "neighbor.cuh"
 #include "potential.cuh"
 #include "utilities/gpu_vector.cuh"
+#include <string>
+#include <vector>
 
 class UF3 : public Potential
 {
@@ -46,19 +48,35 @@ public:
 private:
   void initialize(const char* filename, const int number_of_atoms);
 
-  // ---- 2-body data ----
+  // Number of element types and their symbols, parsed from the "uf3 N e1 e2 ..."
+  // header.  Atom type index t corresponds to the position of the element in
+  // this list (standard GPUMD convention — the potential file defines the type
+  // ordering used by model.xyz / run.in).
+  int num_types_ = 1;
+  std::vector<std::string> elements_;
+
+  // ---- 2-body data (per type pair) ----
+  // The GPUMD trainer (main_uf3/main.cu::write_uf3_file) emits one 2B block per
+  // ordered type pair (index = ti*num_types + tj) and all pairs share the same
+  // uniform knot grid.  Coefficients for pair p occupy d_coeff[p*nint .. p*nint+nint).
   struct {
-    GPU_Vector<float4> d_coeff;  // [nint] combined cubic per interval (A,B,C,D)
-    GPU_Vector<float> d_knots;   // [nknots] for non-uniform knot lookup
+    GPU_Vector<float4> d_coeff;  // [num_pairs * nint] combined cubic per interval
+    GPU_Vector<float> d_knots;   // [nknots] (uniform grid, shared by all pairs)
     double rc;
+    int num_pairs;               // = num_types_ * num_types_
     int nknots, nint;
     int knot_type;               // 0=non-uniform, 1=uniform
     float knot_min, knot_delta, inv_knot_delta;  // uniform interval lookup
   } two_body;
 
-  // ---- 3-body data ----
+  // ---- 3-body data (per type triplet) ----
+  // One 3B block per type triplet (index = (ti*num_types + tj)*num_types + tk);
+  // all triplets share the same grid.  Tensor for triplet t occupies
+  // d_tensor[t*tensor_stride .. ] in jk-fastest layout.
   struct {
-    GPU_Vector<float> d_tensor;      // flattened coefficient tensor [nc_ij*nc_ik*nc_jk]
+    GPU_Vector<float> d_tensor;      // [num_trips * nc_ij*nc_ik*nc_jk]
+    int num_trips;                   // = num_types_^3
+    int tensor_stride;               // = nc_ij*nc_ik*nc_jk
     int nc_ij, nc_ik, nc_jk;         // coefficient dimensions
     int nint_ij, nint_ik, nint_jk;   // intervals per dim (for interval clamping)
     int nk_ij, nk_ik, nk_jk;         // knot counts
