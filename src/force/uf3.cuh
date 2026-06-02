@@ -88,8 +88,22 @@ private:
   } three_body;
 
   bool has_2b, has_3b;
+  bool sym_3b_ = false;   // neighbour-swap symmetry (ij/ik legs share grid)
   int max_neighbor_;
   Neighbor neighbor;
+
+  // Multi-image (ghost) neighbour list used when the cell is too small for the
+  // minimum-image convention (any periodic thickness < 2*rc).  Each entry is an
+  // (atom index, lattice-shift code) pair, so every periodic image within rc is
+  // a distinct neighbour — matching the trainer's ghost-supercell distances.
+  GPU_Vector<int> d_NN;
+  GPU_Vector<int> d_NL;
+  GPU_Vector<int> d_NL_shift;
+  int neighbor_MN_ = 0;   // per-atom neighbour-list stride for the arrays above
+
+  // Average 3B coefficients with their neighbour-swap partner so MD energies
+  // are independent of neighbour-list ordering (mirrors main_uf3::project_3b_symmetric).
+  void project_3b_symmetric(std::vector<float>& tensor) const;
 
   // Packed float4 positions (x,y,z,0) for coalesced gather in force kernel
   GPU_Vector<float4> d_pos_packed;
