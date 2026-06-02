@@ -690,8 +690,24 @@ Uf3Model::Uf3Model(UF3_Parameters& para)
   r_min_2b_=(float)para.r_min_2b; r_min_3b_=(float)para.r_min_3b;
   has_3b_=(para.n_max_3b[0]>0);
   if(has_3b_){
-    for(int d=0;d<3;d++){nc_3b_[d]=para.n_max_3b[d]+3;nk_3b_[d]=nc_3b_[d]+4;nint_3b_[d]=nk_3b_[d]-1;}
-    rc_3b_[0]=(float)para.rc_3b[0];rc_3b_[1]=(float)para.rc_3b[1];rc_3b_[2]=rc_3b_[0];
+    // Native UF3 (symmetry=2, the default): the two centre legs ij and ik are
+    // interchangeable under j<->k, so they MUST share an identical knot grid
+    // (same cutoff AND resolution); only the opposite leg jk is independent.
+    // Map the config as
+    //   rc_3b    = [ r_centre (ij=ik), r_jk ]
+    //   n_max_3b = [ n_centre (ij=ik), (unused), n_jk ]
+    // so every trained 3B is permutation-symmetric in (j,k), the tensor
+    // symmetrization is well defined, and the model reproduces order-independent
+    // energies/forces in MD.  (Previously ik got rc_3b[1]/n_max_3b[1] and jk got
+    // rc_3b[0], making ij != ik — non-compliant with native UF3 and order
+    // dependent.)
+    int n_centre = para.n_max_3b[0];
+    int n_jk     = para.n_max_3b[2] > 0 ? para.n_max_3b[2] : para.n_max_3b[0];
+    nc_3b_[0] = nc_3b_[1] = n_centre + 3;   // ij, ik : identical centre grid
+    nc_3b_[2] = n_jk + 3;                    // jk : opposite leg
+    for(int d=0;d<3;d++){nk_3b_[d]=nc_3b_[d]+4;nint_3b_[d]=nk_3b_[d]-1;}
+    rc_3b_[0]=rc_3b_[1]=(float)para.rc_3b[0];  // ij, ik centre cutoff (equal)
+    rc_3b_[2]=(float)para.rc_3b[1];            // jk opposite cutoff
     num_trips_=num_types_*num_types_*num_types_;
     num_params_3b_=num_trips_*nc_3b_[0]*nc_3b_[1]*nc_3b_[2];
 
@@ -711,9 +727,20 @@ Uf3Model::Uf3Model(UF3_Parameters& para)
     for(int i=0;i<num_params_3b_;i++)coeffs_3b_[i]=(rand()/(float)RAND_MAX-.5f)*.1f;}
   coeffs_e0_.assign(num_types_, 0.0f);
 
+  // 3B permutation symmetry is only well-defined when the ij and ik legs share
+  // an identical knot grid (same cutoff and resolution); otherwise swapping the
+  // two neighbours of a centre would map between different basis sets.
+  sym_3b_ = has_3b_ && (nc_3b_[0] == nc_3b_[1]) && (rc_3b_[0] == rc_3b_[1]);
+  if (has_3b_ && !sym_3b_) {
+    printf("Warning: 3B ij/ik grids differ (nc=%d,%d rc=%.2f,%.2f); neighbour-swap "
+           "symmetrization disabled. Trainer and MD energies may depend on neighbour "
+           "ordering.\n", nc_3b_[0], nc_3b_[1], rc_3b_[0], rc_3b_[1]);
+  }
+
   // Build the frozen-edge mask and zero those coefficients so the splines go
   // smoothly to 0 at the cutoffs (no force discontinuity / energy drift in MD).
   build_frozen_mask(para.trim_2b, para.trim_3b);
+  project_3b_symmetric();   // enforce neighbour-swap symmetry (order independence)
   project_frozen();
 
   // Pre-allocate ALL GPU buffers ONCE
@@ -900,6 +927,72 @@ void Uf3Model::project_frozen() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 3B neighbour-swap symmetrization.
+//
+// The 3B energy of a centre i sums over its unordered neighbour pairs.  Both
+// the trainer and the MD engine assign the "first" neighbour of a pair to the
+// ij leg and the "second" to the ik leg — but the *order* in which neighbours
+// appear in the list differs between the trainer's dataset neighbour list and
+// the MD engine's runtime list.  Unless the tensor is invariant under swapping
+// the two neighbours, the same configuration yields different energies/forces
+// in training vs. MD.
+//
+// Swapping the two neighbours exchanges the ij and ik legs (coefficient indices
+// p<->q, the jk index r is unchanged because r_jk == r_kj) and the neighbour
+// types (tj<->tk, i.e. triplet (ti,tj,tk) <-> (ti,tk,tj)).  Averaging each
+// coefficient with this partner projects the tensor onto the symmetric
+// subspace, making the potential independent of neighbour ordering.  Layout is
+// ij-fastest: idx(p,q,r) = p + q*nc0 + r*nc0*nc1 within each triplet block.
+// ---------------------------------------------------------------------------
+void Uf3Model::project_3b_symmetric() {
+  if (!sym_3b_) return;
+  const int nc0 = nc_3b_[0], nc1 = nc_3b_[1], nc2 = nc_3b_[2];  // nc0 == nc1 here
+  const int gsz = nc0 * nc1 * nc2;
+  const int nt = num_types_;
+  for (int ti = 0; ti < nt; ti++)
+    for (int tj = 0; tj < nt; tj++)
+      for (int tk = tj; tk < nt; tk++) {          // tk >= tj: each pair once
+        int trip  = (ti * nt + tj) * nt + tk;
+        int part  = (ti * nt + tk) * nt + tj;     // neighbour-swap partner block
+        int base  = trip * gsz;
+        int pbase = part * gsz;
+        for (int p = 0; p < nc0; p++)
+          for (int q = 0; q < nc1; q++)
+            for (int r = 0; r < nc2; r++) {
+              int a = base  + p + q * nc0 + r * nc0 * nc1;       // (ti,tj,tk)[p,q,r]
+              int b = pbase + q + p * nc0 + r * nc0 * nc1;       // (ti,tk,tj)[q,p,r]
+              float avg = 0.5f * (coeffs_3b_[a] + coeffs_3b_[b]);
+              coeffs_3b_[a] = avg;
+              coeffs_3b_[b] = avg;
+            }
+      }
+}
+
+void Uf3Model::symmetrize_3b_gradient(std::vector<float>& grad) const {
+  if (!sym_3b_ || num_params_3b_ == 0) return;
+  if ((int)grad.size() < e0_offset_) return;
+  const int nc0 = nc_3b_[0], nc1 = nc_3b_[1], nc2 = nc_3b_[2];
+  const int gsz = nc0 * nc1 * nc2;
+  const int nt = num_types_;
+  float* g3 = grad.data() + num_params_2b_;   // 3B block of the gradient vector
+  for (int ti = 0; ti < nt; ti++)
+    for (int tj = 0; tj < nt; tj++)
+      for (int tk = tj; tk < nt; tk++) {
+        int base  = ((ti * nt + tj) * nt + tk) * gsz;
+        int pbase = ((ti * nt + tk) * nt + tj) * gsz;
+        for (int p = 0; p < nc0; p++)
+          for (int q = 0; q < nc1; q++)
+            for (int r = 0; r < nc2; r++) {
+              int a = base  + p + q * nc0 + r * nc0 * nc1;
+              int b = pbase + q + p * nc0 + r * nc0 * nc1;
+              float avg = 0.5f * (g3[a] + g3[b]);
+              g3[a] = avg;
+              g3[b] = avg;
+            }
+      }
+}
+
 void Uf3Model::get_parameters(float* params) const {
   int idx=0;
   for(size_t p=0;p<coeffs_2b_.size();p++)for(int c=0;c<ncoeff_2b_;c++)params[idx++]=coeffs_2b_[p][c];
@@ -912,6 +1005,7 @@ void Uf3Model::set_parameters_async(const float* params, cudaStream_t stream) {
   for(size_t p=0;p<coeffs_2b_.size();p++)for(int c=0;c<ncoeff_2b_;c++)coeffs_2b_[p][c]=params[idx++];
   for(size_t i=0;i<coeffs_3b_.size();i++)coeffs_3b_[i]=params[idx++];
   for(int t=0;t<num_types_;t++)coeffs_e0_[t]=params[idx++];
+  project_3b_symmetric();  // enforce 3B neighbour-swap symmetry (order independence)
   project_frozen();   // enforce frozen-edge coefficients = 0 (smooth cutoff)
   upload_2b_coeffs_gpu(stream);
   CHECK(cudaMemcpyAsync(d_e0.data(), coeffs_e0_.data(),
