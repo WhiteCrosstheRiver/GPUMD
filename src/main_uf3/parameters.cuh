@@ -1,0 +1,74 @@
+/*
+    Copyright 2017 Zheyong Fan and GPUMD development team
+    This file is part of GPUMD.
+    GPUMD is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+    GPUMD is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+    You should have received a copy of the GNU General Public License
+    along with GPUMD.  If not, see <http://www.gnu.org/licenses/>.
+*/
+
+#pragma once
+#include <string>
+#include <vector>
+
+struct UF3_OptimizerStage {
+  std::string name = "adam";
+  int generation = 0;
+  int population = 0;
+  int batch = 0;           // >0 for non-lstsq; lstsq can use batch full
+  bool full_batch = false; // lstsq: use all training frames
+};
+
+struct UF3_Parameters {
+  int n_max_2b = 10;
+  int n_max_3b[3] = {0, 0, 0};
+  double rc_2b = 6.0;
+  double rc_3b[2] = {0, 0};
+  int knot_type = 1;
+  int num_types = 1;
+  std::string knot_type_str = "uk";
+
+  // Edge-coefficient trimming for smooth cutoffs (frozen to 0).  2B freezes the
+  // last `trim_2b` coefficients so the pair spline -> 0 at rc (avoids force
+  // discontinuities / energy drift in MD).  3B freezes the first/last `trim_3b`
+  // along each grid axis (only safe when the 3B grid is large enough).
+  int trim_2b = 3;
+  int trim_3b = 0;
+
+  // Inner knot bounds.  Placing knots over [r_min, rc] instead of [0, rc]
+  // concentrates B-spline resolution in the physical bonding range (matches
+  // reference UF3 and markedly improves the fit).  r < r_min clamps to the first
+  // interval in both trainer and MD (consistent).  The 3B jk leg keeps r_min=0
+  // (two neighbours of a centre can be arbitrarily close).
+  // Default 0 (knots from 0) — safe for distorted training cells with short
+  // contacts.  Set to ~1.5-2.0 for clean/equilibrium data to concentrate
+  // resolution (matches reference UF3).
+  double r_min_2b = 0.0;
+  double r_min_3b = 0.0;
+
+  // Drop training/test frames with fewer than min_atoms atoms.  Tiny cells
+  // (1-2 atoms, often isolated atoms/dimers) dominate the per-atom energy RMSE
+  // (residual/na with na=1) and wreck the reported metric.  Reference UF3 uses 3.
+  int min_atoms = 1;
+
+  int batch = 1000;  // computed from stage max batch
+  double lambda_e = 1.0;
+  double lambda_f = 1.0;
+  double lambda_v = 0.1;
+  double lambda_1 = 0.0;
+  double lambda_2 = 0.0;
+  std::string train_data = "train.xyz";
+  std::string test_data = "test.xyz";
+  std::vector<std::string> elements;
+
+  std::vector<UF3_OptimizerStage> stages;
+};
+
+void parse_uf3_parameters(const char* input_file, UF3_Parameters& para);
+void normalize_uf3_optimizer_stages(UF3_Parameters& para);

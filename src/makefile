@@ -45,6 +45,11 @@ SOURCES_NEP =                     \
 SOURCES_GNEP =                     \
 	$(wildcard main_gnep/*.cu)     \
 	$(wildcard utilities/*.cu)
+SOURCES_UF3 =                     \
+	$(wildcard main_uf3/*.cu)     \
+	utilities/error.cu            \
+	utilities/main_common.cu      \
+	utilities/read_file.cu
 
 
 ###########################################################
@@ -54,10 +59,12 @@ ifdef OS # For Windows with the cl.exe compiler
 OBJ_GPUMD = $(SOURCES_GPUMD:.cu=.obj)
 OBJ_NEP = $(SOURCES_NEP:.cu=.obj)
 OBJ_GNEP = $(SOURCES_GNEP:.cu=.obj)
+OBJ_UF3 = $(SOURCES_UF3:.cu=.obj)
 else
 OBJ_GPUMD = $(SOURCES_GPUMD:.cu=.o)
 OBJ_NEP = $(SOURCES_NEP:.cu=.o)
 OBJ_GNEP = $(SOURCES_GNEP:.cu=.o)
+OBJ_UF3 = $(SOURCES_UF3:.cu=.o)
 endif
 
 
@@ -75,13 +82,14 @@ HEADERS =                         \
 	$(wildcard model/*.cuh)       \
 	$(wildcard phonon/*.cuh)      \
 	$(wildcard main_nep/*.cuh)    \
-	$(wildcard main_gnep/*.cuh)
+	$(wildcard main_gnep/*.cuh) \
+	$(wildcard main_uf3/*.cuh)
 
 
 ###########################################################
 # executables
 ###########################################################
-all: gpumd nep 
+all: gpumd nep uf3
 gpumd: $(OBJ_GPUMD)
 	$(CC) $(LDFLAGS) $^ -o $@ $(LIBS)
 	@echo =================================================
@@ -96,6 +104,11 @@ gnep: $(OBJ_GNEP)
 	$(CC) $(LDFLAGS) $^ -o $@ $(LIBS)
 	@echo =================================================
 	@echo The gnep executable is successfully compiled!
+	@echo =================================================
+uf3: $(OBJ_UF3)
+	$(CC) $(LDFLAGS) $^ -o $@ $(LIBS)
+	@echo =================================================
+	@echo The uf3 executable is successfully compiled!
 	@echo =================================================
 
 
@@ -125,6 +138,8 @@ main_nep/%.obj: main_nep/%.cu $(HEADERS)
 	$(CC) $(CFLAGS) $(INC) -c $< -o $@
 main_gnep/%.obj: main_gnep/%.cu $(HEADERS)
 	$(CC) $(CFLAGS) $(INC) -c $< -o $@
+main_uf3/%.obj: main_uf3/%.cu $(HEADERS)
+	$(CC) $(CFLAGS) $(INC) -c $< -o $@
 else # for Linux
 integrate/%.o: integrate/%.cu $(HEADERS)
 	$(CC) $(CFLAGS) $(INC) -c $< -o $@
@@ -148,6 +163,8 @@ main_nep/%.o: main_nep/%.cu $(HEADERS)
 	$(CC) $(CFLAGS) $(INC) -c $< -o $@
 main_gnep/%.o: main_gnep/%.cu $(HEADERS)
 	$(CC) $(CFLAGS) $(INC) -c $< -o $@
+main_uf3/%.o: main_uf3/%.cu $(HEADERS)
+	$(CC) $(CFLAGS) $(INC) -c $< -o $@
 endif
 
 
@@ -158,6 +175,6 @@ clean:
 ifdef OS
 	del /s *.obj *.exp *.lib *.exe
 else
-	rm -f */*.o gpumd nep gnep
+	rm -f */*.o gpumd nep gnep uf3
 endif
 

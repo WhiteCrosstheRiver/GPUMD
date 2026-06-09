@@ -1,0 +1,1908 @@
+/*
+    Copyright 2017 Zheyong Fan and GPUMD development team
+    This file is part of GPUMD.
+    GPUMD is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+    GPUMD is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+    You should have received a copy of the GNU General Public License
+    along with GPUMD.  If not, see <http://www.gnu.org/licenses/>.
+*/
+
+#include "uf3.cuh"
+#include "utilities/error.cuh"
+#include "utilities/gpu_macro.cuh"
+#include <algorithm>
+#include <cmath>
+
+// ---- GPU helpers ----------------------------------------------------------
+__device__ inline float uf3_eval_cubic(float4 c, float u) {
+  return c.x + u * (c.y + u * (c.z + u * c.w));
+}
+__device__ inline int uf3_find_interval(float r, float kmin, float kdelta, int nint) {
+  int i = (int)((r - kmin) / kdelta);
+  if (i < 0) i = 0; if (i >= nint) i = nint - 1;
+  return i;
+}
+
+// Uniform cubic B-spline basis and derivatives — direct arithmetic (no table).
+// Basis: B0=(1-u)³/6, B1=(3u³-6u²+4)/6, B2=(-3u³+3u²+3u+1)/6, B3=u³/6
+// Derivative ×inv_kd: dB0=-(1-u)²/2, dB1=(3u²-4u)/2, dB2=(-3u²+2u+1)/2, dB3=u²/2
+__device__ inline void uf3_bspline4(float u, float b[4]) {
+  float u2 = u*u, u3 = u2*u;
+  const float inv6 = 1.0f/6.0f;
+  b[0] = (1.0f - 3.0f*u + 3.0f*u2 - u3) * inv6;
+  b[1] = (4.0f - 6.0f*u2 + 3.0f*u3) * inv6;
+  b[2] = (1.0f + 3.0f*u + 3.0f*u2 - 3.0f*u3) * inv6;
+  b[3] = u3 * inv6;
+}
+__device__ inline void uf3_bspline4_deriv(float u, float inv_kd, float db[4]) {
+  float om = 1.0f - u, u2 = u*u;
+  db[0] = -om*om * 0.5f * inv_kd;
+  db[1] = u*(3.0f*u - 4.0f) * 0.5f * inv_kd;
+  db[2] = (-3.0f*u2 + 2.0f*u + 1.0f) * 0.5f * inv_kd;
+  db[3] = u2 * 0.5f * inv_kd;
+}
+
+// ---- 2B kernel (multi-threaded: each thread handles some atoms) -----------
+// Periodic: centers on real atoms [0,n), neighbours range over the expanded
+// set [0,n_tot) (real + ghost images).  Energy uses the 0.5 pair factor so each
+// physical bond — real-real or real-image — is counted once.  Adds the 1-body
+// (per-element) energy offset for each real atom.
+static __global__ void uf3_eval_2b(
+  int nf, const int* __restrict__ fidx, const int* __restrict__ nat,
+  const int* __restrict__ nat_tot,
+  const int* __restrict__ off, const int* __restrict__ typ,
+  const float* __restrict__ x, const float* __restrict__ y, const float* __restrict__ z,
+  const float4* __restrict__ coeff, int np, int nint, float kmin, float kd, float rc,
+  const int* __restrict__ tmap, int nt, const float* __restrict__ e0,
+  float* __restrict__ ene)
+{
+  int b = blockIdx.x; if (b >= nf) return;
+  int tid = threadIdx.x, stride = blockDim.x;
+  int fid = fidx[b], n = nat[fid], n_tot = nat_tot[fid], o = off[fid];
+  float pe = 0;
+  for (int i = tid; i < n; i += stride) {
+    pe += e0[typ[o+i]];                 // 1-body offset (once per real atom)
+    int ti = typ[o+i];
+    for (int j = 0; j < n_tot; j++) {
+      if (j == i) continue;
+      float dx = x[o+i]-x[o+j], dy = y[o+i]-y[o+j], dz = z[o+i]-z[o+j];
+      float r = sqrtf(dx*dx+dy*dy+dz*dz); if (r >= rc) continue;
+      int m = uf3_find_interval(r, kmin, kd, nint);
+      float u = (r - (kmin + m*kd)) / kd;
+      float4 c = __ldg(&coeff[tmap[ti*nt+typ[o+j]] * nint + m]);
+      pe += 0.5f * uf3_eval_cubic(c, u);
+    }
+  }
+  // Warp/block reduction
+  __shared__ float s_pe[64];
+  s_pe[tid] = pe; __syncthreads();
+  for (int s = stride/2; s > 0; s >>= 1) {
+    if (tid < s) s_pe[tid] += s_pe[tid + s];
+    __syncthreads();
+  }
+  if (tid == 0) ene[b] = s_pe[0];
+}
+
+// ---- 2B force kernel (multi-threaded) -----------------------------------
+// Periodic: force on real atom i = -dE/dr summed over all neighbours j in the
+// expanded set (real + ghost images).  No scatter needed — each real atom's
+// force is computed directly from all of its images' neighbours.
+static __global__ void uf3_eval_2b_force(
+  int nf, const int* __restrict__ fidx, const int* __restrict__ nat,
+  const int* __restrict__ nat_tot,
+  const int* __restrict__ off, const int* __restrict__ typ,
+  const float* __restrict__ x, const float* __restrict__ y, const float* __restrict__ z,
+  const float4* __restrict__ coeff, int np, int nint, float kmin, float kd, float rc,
+  const int* __restrict__ tmap, int nt,
+  float* __restrict__ fx, float* __restrict__ fy, float* __restrict__ fz)
+{
+  int b = blockIdx.x; if (b >= nf) return;
+  int tid = threadIdx.x, stride = blockDim.x;
+  int fid = fidx[b], n = nat[fid], n_tot = nat_tot[fid], o = off[fid];
+
+  for (int i = tid; i < n; i += stride) {
+    int ti = typ[o+i];
+    float fxi = 0, fyi = 0, fzi = 0;
+    for (int j = 0; j < n_tot; j++) {
+      if (i == j) continue;
+      float dx = x[o+i]-x[o+j], dy = y[o+i]-y[o+j], dz = z[o+i]-z[o+j];
+      float d2 = dx*dx+dy*dy+dz*dz;
+      float rinv = rsqrtf(d2);
+      float r = d2 * rinv;
+      if (r >= rc) continue;
+      int m = uf3_find_interval(r, kmin, kd, nint);
+      float u = (r - (kmin + m*kd)) / kd;
+      float4 c = __ldg(&coeff[tmap[ti*nt+typ[o+j]] * nint + m]);
+      // Force = -dE/dr_i.  dr/dx_i = (x_i-x_j)/r = dx*rinv, so F_i = -phi'(r)*dx*rinv.
+      float f = -(c.y + u * (2.0f*c.z + u * 3.0f*c.w)) * (rinv / kd);
+      fxi += f * dx; fyi += f * dy; fzi += f * dz;
+    }
+    fx[o+i] = fxi; fy[o+i] = fyi; fz[o+i] = fzi;
+  }
+}
+
+// ---- 2B population energy/force kernels ---------------------------------
+// grid = (B, P), block = BLK. ene_pop[p * B + b], forces in [P * total_atoms].
+static __global__ void uf3_eval_2b_pop(
+  int B, int P, int total_atoms,
+  const int* __restrict__ fidx, const int* __restrict__ nat,
+  const int* __restrict__ off, const int* __restrict__ typ,
+  const float* __restrict__ x, const float* __restrict__ y, const float* __restrict__ z,
+  const float4* __restrict__ coeff,     // [P * coeff_stride]
+  int coeff_stride,                     // = np2 * nint
+  int np2, int nint, float kmin, float kd, float rc,
+  const int* __restrict__ tmap, int nt,
+  float* __restrict__ ene)              // [P * B]
+{
+  int b = blockIdx.x; if (b >= B) return;
+  int p = blockIdx.y; if (p >= P) return;
+  int tid = threadIdx.x, stride = blockDim.x;
+  int fid = fidx[b], n = nat[fid], o = off[fid];
+  const float4* coeff_p = coeff + p * coeff_stride;
+  float pe = 0;
+  for (int i = tid; i < n; i += stride) {
+    for (int j = i + 1; j < n; j++) {
+      float dx = x[o+i]-x[o+j], dy = y[o+i]-y[o+j], dz = z[o+i]-z[o+j];
+      float r = sqrtf(dx*dx + dy*dy + dz*dz); if (r >= rc) continue;
+      int m = uf3_find_interval(r, kmin, kd, nint);
+      float u = (r - (kmin + m*kd)) / kd;
+      float4 c = __ldg(&coeff_p[tmap[typ[o+i]*nt + typ[o+j]] * nint + m]);
+      pe += uf3_eval_cubic(c, u);
+    }
+  }
+  __shared__ float s_pe[64];
+  s_pe[tid] = pe; __syncthreads();
+  for (int s = stride/2; s > 0; s >>= 1) {
+    if (tid < s) s_pe[tid] += s_pe[tid + s];
+    __syncthreads();
+  }
+  if (tid == 0) {
+    ene[p * B + b] = s_pe[0];
+  }
+}
+
+static __global__ void uf3_eval_2b_force_pop(
+  int B, int P, int total_atoms,
+  const int* __restrict__ fidx, const int* __restrict__ nat,
+  const int* __restrict__ off, const int* __restrict__ typ,
+  const float* __restrict__ x, const float* __restrict__ y, const float* __restrict__ z,
+  const float4* __restrict__ coeff, int coeff_stride,
+  int np2, int nint, float kmin, float kd, float rc,
+  const int* __restrict__ tmap, int nt,
+  float* __restrict__ fx, float* __restrict__ fy, float* __restrict__ fz)
+{
+  int b = blockIdx.x; if (b >= B) return;
+  int p = blockIdx.y; if (p >= P) return;
+  int tid = threadIdx.x, stride = blockDim.x;
+  int fid = fidx[b], n = nat[fid], o = off[fid];
+  const float4* coeff_p = coeff + p * coeff_stride;
+  float* fx_p = fx + p * total_atoms;
+  float* fy_p = fy + p * total_atoms;
+  float* fz_p = fz + p * total_atoms;
+  for (int i = tid; i < n; i += stride) {
+    float fxi = 0, fyi = 0, fzi = 0;
+    for (int j = 0; j < n; j++) {
+      if (i == j) continue;
+      float dx = x[o+i]-x[o+j], dy = y[o+i]-y[o+j], dz = z[o+i]-z[o+j];
+      float d2 = dx*dx + dy*dy + dz*dz;
+      float rinv = rsqrtf(d2);
+      float r = d2 * rinv;
+      if (r >= rc) continue;
+      int m = uf3_find_interval(r, kmin, kd, nint);
+      float u = (r - (kmin + m*kd)) / kd;
+      float4 c = __ldg(&coeff_p[tmap[typ[o+i]*nt + typ[o+j]] * nint + m]);
+      // Force = -dE/dr_i.  dr/dx_i = (x_i-x_j)/r = dx*rinv, so F_i = -phi'(r)*dx*rinv.
+      float f = -(c.y + u * (2.0f*c.z + u * 3.0f*c.w)) * (rinv / kd);
+      fxi += f * dx; fyi += f * dy; fzi += f * dz;
+    }
+    fx_p[o+i] = fxi; fy_p[o+i] = fyi; fz_p[o+i] = fzi;
+  }
+}
+
+// Population energy MSE reduction.
+// grid = (ceil(B/256), P), block = 256.  Output [p*2 + 0] for each p.
+static __global__ void uf3_reduce_energy_sq_pop(
+  int B, int P,
+  const float* __restrict__ d_energy_pop,   // [P * B]
+  const float* __restrict__ d_energy_ref,
+  const int* __restrict__ d_fidx,
+  const int* __restrict__ d_natoms,
+  float* __restrict__ d_loss_sum_pop)       // [2 * P]
+{
+  int p = blockIdx.y;
+  int b = blockIdx.x * blockDim.x + threadIdx.x;
+  float v = 0.0f;
+  if (b < B) {
+    int fid = d_fidx[b];
+    float na = (float)d_natoms[fid]; if (na < 1.0f) na = 1.0f;
+    float diff = d_energy_pop[p * B + b] / na - d_energy_ref[fid] / na;
+    v = diff * diff;
+  }
+  __shared__ float s[256];
+  int tid = threadIdx.x;
+  s[tid] = v; __syncthreads();
+  for (int st = blockDim.x / 2; st > 0; st >>= 1) {
+    if (tid < st) s[tid] += s[tid + st];
+    __syncthreads();
+  }
+  if (tid == 0) atomicAdd(&d_loss_sum_pop[p * 2 + 0], s[0]);
+}
+
+// Population force MSE reduction.  grid = (B, P), block = 128.
+static __global__ void uf3_reduce_force_sq_pop(
+  int B, int P, int total_atoms,
+  const int* __restrict__ d_fidx,
+  const int* __restrict__ d_natoms,
+  const int* __restrict__ d_offsets,
+  const float* __restrict__ fx, const float* __restrict__ fy, const float* __restrict__ fz,
+  const float* __restrict__ fx_ref, const float* __restrict__ fy_ref, const float* __restrict__ fz_ref,
+  float* __restrict__ d_loss_sum_pop)
+{
+  int b = blockIdx.x; if (b >= B) return;
+  int p = blockIdx.y; if (p >= P) return;
+  int fid = d_fidx[b], n = d_natoms[fid], o = d_offsets[fid];
+  const float* fx_p = fx + p * total_atoms;
+  const float* fy_p = fy + p * total_atoms;
+  const float* fz_p = fz + p * total_atoms;
+  int tid = threadIdx.x, stride = blockDim.x;
+  float acc = 0.0f;
+  for (int i = tid; i < n; i += stride) {
+    float dx = fx_p[o+i] - fx_ref[o+i];
+    float dy = fy_p[o+i] - fy_ref[o+i];
+    float dz = fz_p[o+i] - fz_ref[o+i];
+    acc += dx*dx + dy*dy + dz*dz;
+  }
+  __shared__ float s[128];
+  s[tid] = acc; __syncthreads();
+  for (int st = blockDim.x / 2; st > 0; st >>= 1) {
+    if (tid < st) s[tid] += s[tid + st];
+    __syncthreads();
+  }
+  if (tid == 0) atomicAdd(&d_loss_sum_pop[p * 2 + 1], s[0]);
+}
+
+// ---- Fused population eval + MSE reduction (2B only) --------------------
+// Replaces uf3_eval_2b_pop + uf3_eval_2b_force_pop + uf3_reduce_*_pop with a
+// single kernel:  one pass over all pairs computes both energy and forces,
+// force residuals are accumulated in registers and reduced within the block,
+// and only two scalars per block are written to global memory.
+//
+// Compared to the four-kernel sequence this saves:
+//   • One full pass over all pairs (the old energy kernel repeated the same
+//     sqrt / interval / spline work the force kernel already does).
+//   • All writes to d_energy_buf_pop, d_fx_pop, d_fy_pop, d_fz_pop.
+//   • The two separate reduction kernel launches.
+//
+// grid = (B, P), block = 64.
+static __global__ void uf3_eval_reduce_2b_pop(
+  int B, int P, int total_atoms,
+  const int* __restrict__ fidx,
+  const int* __restrict__ nat,
+  const int* __restrict__ off,
+  const int* __restrict__ typ,
+  const float* __restrict__ x,
+  const float* __restrict__ y,
+  const float* __restrict__ z,
+  const float4* __restrict__ coeff,    // [P * coeff_stride]
+  int coeff_stride,                    // np2 * nint
+  int np2, int nint, float kmin, float kd, float rc,
+  const int* __restrict__ tmap, int nt,
+  const float* __restrict__ energy_ref,
+  const float* __restrict__ fx_ref,
+  const float* __restrict__ fy_ref,
+  const float* __restrict__ fz_ref,
+  float* __restrict__ loss_sum_pop)    // [P * 2]
+{
+  int b = blockIdx.x; if (b >= B) return;
+  int p = blockIdx.y; if (p >= P) return;
+  int tid = threadIdx.x, stride = blockDim.x;
+  int fid = fidx[b], n = nat[fid], o = off[fid];
+  const float4* coeff_p = coeff + p * coeff_stride;
+
+  float pe   = 0.0f;   // energy accumulator (pair counted once: j > i)
+  float fmse = 0.0f;   // force MSE accumulator
+
+  for (int i = tid; i < n; i += stride) {
+    float fxi = 0.0f, fyi = 0.0f, fzi = 0.0f;
+    for (int j = 0; j < n; j++) {
+      if (i == j) continue;
+      float dx = x[o+i]-x[o+j], dy = y[o+i]-y[o+j], dz = z[o+i]-z[o+j];
+      float r = sqrtf(dx*dx + dy*dy + dz*dz);
+      if (r >= rc) continue;
+      int m = uf3_find_interval(r, kmin, kd, nint);
+      float u = (r - (kmin + m*kd)) / kd;
+      float4 c = __ldg(&coeff_p[tmap[typ[o+i]*nt + typ[o+j]] * nint + m]);
+      // Energy: count each pair once (j > i)
+      if (j > i) pe += uf3_eval_cubic(c, u);
+      // Force on atom i from atom j (register accumulation, no global write).
+      // F_i = -dE/dr_i = -phi'(r) * dx / r.
+      float deriv = (c.y + u * (2.0f*c.z + u * 3.0f*c.w)) / kd;
+      float f = -deriv / r;
+      fxi += f * dx; fyi += f * dy; fzi += f * dz;
+    }
+    // Immediately reduce into force MSE — no per-atom storage needed
+    float dfx = fxi - fx_ref[o+i];
+    float dfy = fyi - fy_ref[o+i];
+    float dfz = fzi - fz_ref[o+i];
+    fmse += dfx*dfx + dfy*dfy + dfz*dfz;
+  }
+
+  // Block-level reduction for both scalars
+  __shared__ float s_pe[64], s_fmse[64];
+  s_pe[tid] = pe; s_fmse[tid] = fmse;
+  __syncthreads();
+  for (int s = stride/2; s > 0; s >>= 1) {
+    if (tid < s) {
+      s_pe[tid]   += s_pe[tid + s];
+      s_fmse[tid] += s_fmse[tid + s];
+    }
+    __syncthreads();
+  }
+  if (tid == 0) {
+    float na = (float)n; if (na < 1.0f) na = 1.0f;
+    float ediff = (s_pe[0] - energy_ref[fid]) / na;
+    atomicAdd(&loss_sum_pop[p * 2 + 0], ediff * ediff);
+    atomicAdd(&loss_sum_pop[p * 2 + 1], s_fmse[0]);
+  }
+}
+
+// ---- 3B kernel (neighbor-list-based, multi-threaded) ---------------------
+static __global__ void uf3_eval_3b(
+  int nf, const int* __restrict__ fidx, const int* __restrict__ nat,
+  const int* __restrict__ off, const int* __restrict__ typ,
+  const float* __restrict__ x, const float* __restrict__ y, const float* __restrict__ z,
+  const float* __restrict__ tensor, int nc0,int nc1,int nc2,
+  const float4* __restrict__ b0, int ni0, const float4* __restrict__ b1, int ni1,
+  const float4* __restrict__ b2, int ni2,
+  float km0,float kd0,float rc0, float km1,float kd1,float rc1,
+  float km2,float kd2,float rc2, const int* __restrict__ tmap, int ntr,int nt,
+  const int* __restrict__ nn_off, const int* __restrict__ nn_lst,
+  const int* __restrict__ nn_frame_off,
+  float* __restrict__ ene)
+{
+  int b = blockIdx.x; if (b >= nf) return;
+  int tid = threadIdx.x, stride = blockDim.x;
+  int fid = fidx[b], n = nat[fid], o = off[fid];
+  float pe = 0;
+
+  // nn_frame_off[fid] = start index in nn_off for this frame's atoms
+  int nn_base = nn_frame_off[fid];
+
+  for (int i = tid; i < n; i += stride) {
+    int ti = typ[o+i];
+    int nni = nn_off[nn_base + i + 1] - nn_off[nn_base + i];
+    int nn_start = nn_off[nn_base + i];
+
+    // Per-center triplets: each unordered neighbour pair (jj<kk) of real centre
+    // i forms one triangle.  Neighbours may be periodic ghost images.
+    for (int jj = 0; jj < nni; jj++) {
+      int j = nn_lst[nn_start + jj];
+      float dx12=x[o+j]-x[o+i], dy12=y[o+j]-y[o+i], dz12=z[o+j]-z[o+i];
+      float d12sq = dx12*dx12+dy12*dy12+dz12*dz12;
+      float r12 = d12sq * rsqrtf(d12sq);
+      if (r12>=rc0) continue;
+      int tj=typ[o+j];
+
+      // ij-basis hoisted: r12 is fixed for this jj iteration
+      int m0 = uf3_find_interval(r12,km0,kd0,ni0);
+      float u0 = (r12-(km0+m0*kd0))/kd0;
+      float vb0[4]; uf3_bspline4(u0, vb0);
+      int p0 = m0-3; if(p0<0) p0=0;
+
+      for (int kk = jj+1; kk < nni; kk++) {
+        int k = nn_lst[nn_start + kk];
+        float dx13=x[o+k]-x[o+i], dy13=y[o+k]-y[o+i], dz13=z[o+k]-z[o+i];
+        float d13sq = dx13*dx13+dy13*dy13+dz13*dz13;
+        float r13 = d13sq * rsqrtf(d13sq);
+        if (r13>=rc1) continue;
+        float dx23=x[o+k]-x[o+j], dy23=y[o+k]-y[o+j], dz23=z[o+k]-z[o+j];
+        float d23sq = dx23*dx23+dy23*dy23+dz23*dz23;
+        float r23 = d23sq * rsqrtf(d23sq);
+        if (r23>=rc2) continue;
+        int tk=typ[o+k];
+        int m1=uf3_find_interval(r13,km1,kd1,ni1), m2=uf3_find_interval(r23,km2,kd2,ni2);
+        float u1=(r13-(km1+m1*kd1))/kd1, u2=(r23-(km2+m2*kd2))/kd2;
+        float vb1[4],vb2[4];
+        uf3_bspline4(u1, vb1);
+        uf3_bspline4(u2, vb2);
+        int p1=m1-3;if(p1<0)p1=0;int p2=m2-3;if(p2<0)p2=0;
+        const float* C=&tensor[tmap[(ti*nt+tj)*nt+tk]*nc0*nc1*nc2];
+        #pragma unroll 4
+        for(int dp=0;dp<4;dp++){int q=p0+dp;if(q>=nc0)break;float bp=vb0[dp];
+          #pragma unroll 4
+          for(int dq=0;dq<4;dq++){int r=p1+dq;if(r>=nc1)break;
+            float bpbq=bp*vb1[dq]; int pq_off=q+r*nc0;
+            float Rv=0;
+            #pragma unroll 4
+            for(int dr=0;dr<4;dr++){int s=p2+dr;if(s>=nc2)break;
+              Rv+=C[pq_off+s*nc0*nc1]*vb2[dr];}
+            pe+=bpbq*Rv;
+          }
+        }
+      }
+    }
+  }
+  // Block reduction
+  __shared__ float s_pe[64];
+  s_pe[tid] = pe; __syncthreads();
+  for (int s = stride/2; s > 0; s >>= 1) {
+    if (tid < s) s_pe[tid] += s_pe[tid + s];
+    __syncthreads();
+  }
+  if (tid == 0) atomicAdd(&ene[b], s_pe[0]);
+}
+
+// ---- 3B force kernel -----------------------------------------------------
+static __global__ void uf3_eval_3b_force(
+  int nf, const int* __restrict__ fidx, const int* __restrict__ nat,
+  const int* __restrict__ off, const int* __restrict__ typ,
+  const float* __restrict__ x, const float* __restrict__ y, const float* __restrict__ z,
+  const float* __restrict__ tensor, int nc0,int nc1,int nc2,
+  const float4* __restrict__ b0, int ni0, const float4* __restrict__ b1, int ni1,
+  const float4* __restrict__ b2, int ni2,
+  float km0,float kd0,float rc0, float km1,float kd1,float rc1,
+  float km2,float kd2,float rc2, const int* __restrict__ tmap, int ntr,int nt,
+  const int* __restrict__ nn_off, const int* __restrict__ nn_lst,
+  const int* __restrict__ nn_frame_off, const int* __restrict__ parent,
+  float* __restrict__ fx, float* __restrict__ fy, float* __restrict__ fz)
+{
+  int b = blockIdx.x; if (b >= nf) return;
+  int tid = threadIdx.x, stride = blockDim.x;
+  int fid = fidx[b], n = nat[fid], o = off[fid];
+  int nn_base = nn_frame_off[fid];
+
+  for (int i = tid; i < n; i += stride) {
+    int nni = nn_off[nn_base + i + 1] - nn_off[nn_base + i];
+    int nn_start = nn_off[nn_base + i];
+    int ti = typ[o+i];
+
+    for (int jj = 0; jj < nni; jj++) {
+      int j = nn_lst[nn_start + jj];
+      float dx12=x[o+j]-x[o+i], dy12=y[o+j]-y[o+i], dz12=z[o+j]-z[o+i];
+      float d12sq = dx12*dx12+dy12*dy12+dz12*dz12;
+      float inv12 = rsqrtf(d12sq);
+      float r12 = d12sq * inv12;
+      if (r12>=rc0) continue;
+      int tj=typ[o+j];
+      int pj = parent[o+j];   // real atom this neighbour (maybe ghost) belongs to
+
+      // ij-basis: hoisted out of inner kk-loop (r12 fixed in jj-loop)
+      int m0 = uf3_find_interval(r12, km0, kd0, ni0);
+      float u0 = (r12 - (km0 + m0*kd0)) / kd0;
+      float vb0[4], db0[4];
+      uf3_bspline4(u0, vb0);
+      uf3_bspline4_deriv(u0, 1.0f/kd0, db0);
+      int p0 = m0 - 3; if (p0 < 0) p0 = 0;
+
+      for (int kk = jj+1; kk < nni; kk++) {
+        int k = nn_lst[nn_start + kk];
+        float dx13=x[o+k]-x[o+i], dy13=y[o+k]-y[o+i], dz13=z[o+k]-z[o+i];
+        float d13sq = dx13*dx13+dy13*dy13+dz13*dz13;
+        float inv13 = rsqrtf(d13sq);
+        float r13 = d13sq * inv13;
+        if (r13>=rc1) continue;
+        float dx23=x[o+k]-x[o+j], dy23=y[o+k]-y[o+j], dz23=z[o+k]-z[o+j];
+        float d23sq = dx23*dx23+dy23*dy23+dz23*dz23;
+        float inv23 = rsqrtf(d23sq);
+        float r23 = d23sq * inv23;
+        if (r23>=rc2) continue;
+        int tk=typ[o+k];
+        int pk = parent[o+k];   // real atom for neighbour k (maybe ghost)
+
+        int m1=uf3_find_interval(r13,km1,kd1,ni1), m2=uf3_find_interval(r23,km2,kd2,ni2);
+        float u1=(r13-(km1+m1*kd1))/kd1, u2=(r23-(km2+m2*kd2))/kd2;
+
+        float vb1[4],vb2[4],db1[4],db2[4];
+        uf3_bspline4(u1, vb1); uf3_bspline4_deriv(u1, 1.0f/kd1, db1);
+        uf3_bspline4(u2, vb2); uf3_bspline4_deriv(u2, 1.0f/kd2, db2);
+
+        int p1=m1-3;if(p1<0)p1=0; int p2=m2-3;if(p2<0)p2=0;
+        const float* C=&tensor[tmap[(ti*nt+tj)*nt+tk]*nc0*nc1*nc2];
+
+        // Tensor contraction with middle-loop product precompute + row-sums
+        float dv12=0, dv13=0, dv23=0;
+        #pragma unroll 4
+        for(int dp=0;dp<4;dp++){
+          int q=p0+dp; if(q>=nc0) break;
+          float bp=vb0[dp], dbp=db0[dp];
+          #pragma unroll 4
+          for(int dq=0;dq<4;dq++){
+            int r=p1+dq; if(r>=nc1) break;
+            float bpbq=bp*vb1[dq], dbpbq=dbp*vb1[dq], bpdbq=bp*db1[dq];
+            int pq_off = q + r*nc0;
+            float Rv=0, Rd23=0;
+            #pragma unroll 4
+            for(int dr=0;dr<4;dr++){
+              int s=p2+dr; if(s>=nc2) break;
+              float Cv = C[pq_off + s*nc0*nc1];
+              Rv   += Cv * vb2[dr];
+              Rd23 += Cv * db2[dr];
+            }
+            dv12 += dbpbq * Rv;
+            dv13 += bpdbq * Rv;
+            dv23 += bpbq  * Rd23;
+          }
+        }
+
+        // Force = -dE/dx.  dv12=dE/dr12, dv13=dE/dr13, dv23=dE/dr23.
+        // (Signs below are the negative gradient; verified by finite difference.)
+        float fix = dv12*inv12*dx12 + dv13*inv13*dx13;
+        float fiy = dv12*inv12*dy12 + dv13*inv13*dy13;
+        float fiz = dv12*inv12*dz12 + dv13*inv13*dz13;
+        atomicAdd(&fx[o+i], fix); atomicAdd(&fy[o+i], fiy); atomicAdd(&fz[o+i], fiz);
+
+        // j and k may be ghost images -> accumulate onto their real parents.
+        float fjx = -dv12*inv12*dx12 + dv23*inv23*dx23;
+        float fjy = -dv12*inv12*dy12 + dv23*inv23*dy23;
+        float fjz = -dv12*inv12*dz12 + dv23*inv23*dz23;
+        atomicAdd(&fx[o+pj], fjx); atomicAdd(&fy[o+pj], fjy); atomicAdd(&fz[o+pj], fjz);
+
+        float fkx = -dv13*inv13*dx13 - dv23*inv23*dx23;
+        float fky = -dv13*inv13*dy13 - dv23*inv23*dy23;
+        float fkz = -dv13*inv13*dz13 - dv23*inv23*dz23;
+        atomicAdd(&fx[o+pk], fkx); atomicAdd(&fy[o+pk], fky); atomicAdd(&fz[o+pk], fkz);
+      }
+    }
+  }
+}
+
+// ---- Analytical gradient kernel (2B energy) ------------------------------
+// For each frame: accumulates B_k(r_ij) values per coefficient, then
+// gradient[k] += (E_pred - E_ref) * Σ B_k.  One block per coefficient.
+static __global__ void uf3_grad_2b(
+  int nf, int nparam,
+  const int* __restrict__ fidx, const int* __restrict__ nat, const int* __restrict__ off,
+  const int* __restrict__ typ,
+  const float* __restrict__ x, const float* __restrict__ y, const float* __restrict__ z,
+  int np, int ncoeff, int nint, float kmin, float kd, float rc,
+  const int* __restrict__ tmap, int nt,
+  const float* __restrict__ energy_diff, // [nf] per-atom-normalized energy residual
+  float scale_e,
+  float* __restrict__ gradient)          // [nparam] output
+{
+  int k = blockIdx.x; if (k >= nparam) return;            // which coefficient
+  int tid = threadIdx.x, stride = blockDim.x;             // threads per coefficient over frames
+  int pair_idx = k / ncoeff;                              // which type pair
+  int coeff_idx = k % ncoeff;                             // which coefficient within pair
+  float grad = 0;
+
+  for (int b = tid; b < nf; b += stride) {
+    int fid = fidx[b], n = nat[fid], o = off[fid];
+    float delta = energy_diff[b];
+    float basis_sum = 0;
+    for (int i = 0; i < n; i++) {
+      int ti = typ[o+i];
+      for (int j = i+1; j < n; j++) {
+        int tj = typ[o+j];
+        if (tmap[ti*nt+tj] != pair_idx) continue;
+        float dx = x[o+i]-x[o+j], dy = y[o+i]-y[o+j], dz = z[o+i]-z[o+j];
+        float r = sqrtf(dx*dx+dy*dy+dz*dz); if (r>=rc) continue;
+        int m = uf3_find_interval(r, kmin, kd, nint);
+        float u = (r - (kmin + m*kd)) / kd;
+        // The basis value for coefficient coeff_idx at interval m:
+        // V(u) = A+Bu+Cu^2+Du^3 where (A,B,C,D) are from the combined cubic
+        // But we need the CONTRIBUTION of coefficient coeff_idx to V(u).
+        // For coefficient coeff_idx at interval m, the contribution is:
+        // coeff[coeff_idx] * basis_function_k(u)
+        // The 4 active basis functions at interval m correspond to coeffs [m-3,m-2,m-1,m]
+        int c_active = m - 3 + coeff_idx - 0; // which of the 4 active coefficients
+        // Actually: active coeffs are m-3, m-2, m-1, m. So coeff m-3 maps to basis 0, m-2 to 1, etc.
+        // For coeff_idx=0: active when m-3 <= idx <= m, i.e., c_active = idx - (m-3) = coeff_idx - m + 3
+        int c_rel = coeff_idx - m + 3;
+        if (c_rel >= 0 && c_rel < 4) {
+          float basis_val = 0;
+          float bu = u;
+          if (c_rel == 0) basis_val = (1.0f/6) * (1-bu)*(1-bu)*(1-bu);  // B0 = (1-u)^3/6
+          else if (c_rel == 1) basis_val = (3*bu*bu*bu - 6*bu*bu + 4) / 6;
+          else if (c_rel == 2) basis_val = (-3*bu*bu*bu + 3*bu*bu + 3*bu + 1) / 6;
+          else basis_val = bu*bu*bu / 6;
+          basis_sum += basis_val;
+        }
+      }
+    }
+    grad += delta * basis_sum;
+  }
+
+  // Block reduction
+  __shared__ float s_grad[64];
+  s_grad[tid] = grad; __syncthreads();
+  for (int s = stride/2; s > 0; s >>= 1) { if (tid < s) s_grad[tid] += s_grad[tid+s]; __syncthreads(); }
+  if (tid == 0) {
+    gradient[k] += scale_e * s_grad[0];
+  }
+}
+
+// ---- pre-computation -----------------------------------------------------
+// GPU spline build: each block.y = one knot interval, block.x = one type pair.
+// Replaces the host precompute_2b() / per-set_parameters H2D-of-float4-table.
+static __global__ void uf3_build_coeff_2b_kernel(
+  int npairs, int ncoeff, int nint,
+  const float* __restrict__ raw,     // [npairs * ncoeff]
+  float4* __restrict__ out)          // [npairs * nint]
+{
+  int pair = blockIdx.x;
+  int m    = blockIdx.y * blockDim.x + threadIdx.x;
+  if (pair >= npairs || m >= nint) return;
+  const float* cf = raw + pair * ncoeff;
+  // Clamp all four indices to [0, ncoeff-1].  (The original host
+  // precompute_2b() was missing upper clamps on i0/i1 — fine in single-pop
+  // mode where the OOB read landed in the next pair's slot of the same
+  // individual, but in population mode this crossed into another individual's
+  // coefficients and produced wildly wrong spline values for the last
+  // interval m=nint-1.)
+  int i0 = m - 3; if (i0 < 0) i0 = 0; if (i0 >= ncoeff) i0 = ncoeff - 1;
+  int i1 = m - 2; if (i1 < 0) i1 = 0; if (i1 >= ncoeff) i1 = ncoeff - 1;
+  int i2 = m - 1; if (i2 < 0) i2 = 0; if (i2 >= ncoeff) i2 = ncoeff - 1;
+  int i3 = m;                          if (i3 >= ncoeff) i3 = ncoeff - 1;
+  float c0 = cf[i0], c1 = cf[i1], c2 = cf[i2], c3 = cf[i3];
+  float4 v;
+  v.x = (c0 + 4.0f * c1 + c2) / 6.0f;
+  v.y = (-3.0f * c0 + 3.0f * c2) / 6.0f;
+  v.z = (3.0f * c0 - 6.0f * c1 + 3.0f * c2) / 6.0f;
+  v.w = (-c0 + 3.0f * c1 - 3.0f * c2 + c3) / 6.0f;
+  out[pair * nint + m] = v;
+}
+
+// Population variant: P sets of raw coeffs -> P float4 spline tables.
+// grid = (npairs, ceil(nint/64), pop), block = 64.
+static __global__ void uf3_build_coeff_2b_pop_kernel(
+  int P, int npairs, int ncoeff, int nint,
+  const float* __restrict__ raw,     // [P * npairs * ncoeff]
+  float4* __restrict__ out)          // [P * npairs * nint]
+{
+  int p    = blockIdx.z;
+  int pair = blockIdx.x;
+  int m    = blockIdx.y * blockDim.x + threadIdx.x;
+  if (p >= P || pair >= npairs || m >= nint) return;
+  const float* cf = raw + (p * npairs + pair) * ncoeff;
+  int i0 = m - 3; if (i0 < 0) i0 = 0; if (i0 >= ncoeff) i0 = ncoeff - 1;
+  int i1 = m - 2; if (i1 < 0) i1 = 0; if (i1 >= ncoeff) i1 = ncoeff - 1;
+  int i2 = m - 1; if (i2 < 0) i2 = 0; if (i2 >= ncoeff) i2 = ncoeff - 1;
+  int i3 = m;                          if (i3 >= ncoeff) i3 = ncoeff - 1;
+  float c0 = cf[i0], c1 = cf[i1], c2 = cf[i2], c3 = cf[i3];
+  float4 v;
+  v.x = (c0 + 4.0f * c1 + c2) / 6.0f;
+  v.y = (-3.0f * c0 + 3.0f * c2) / 6.0f;
+  v.z = (3.0f * c0 - 6.0f * c1 + 3.0f * c2) / 6.0f;
+  v.w = (-c0 + 3.0f * c1 - 3.0f * c2 + c3) / 6.0f;
+  out[(p * npairs + pair) * nint + m] = v;
+}
+
+static void precompute_3b_basis(int ni, std::vector<float4>& out) {
+  out.resize(ni*4);
+  float b[4][4]={{1.0f/6,-3.0f/6,3.0f/6,-1.0f/6},{4.0f/6,0,-6.0f/6,3.0f/6},{1.0f/6,3.0f/6,3.0f/6,-3.0f/6},{0,0,0,1.0f/6}};
+  for(int m=0;m<ni;m++) for(int p=0;p<4;p++) out[m*4+p]=make_float4(b[p][0],b[p][1],b[p][2],b[p][3]);
+}
+
+// ---- Uf3Model ------------------------------------------------------------
+Uf3Model::Uf3Model(UF3_Parameters& para)
+{
+  num_types_=para.num_types; elements_=para.elements;
+  // UF3 convention: ncoeff = n_max + degree (degree=3 for cubic B-splines)
+  // nknots = ncoeff + 4 = n_max + 7 (matches UF3: resolution + 2*degree + 1)
+  ncoeff_2b_=para.n_max_2b+3; nknots_2b_=ncoeff_2b_+4; nint_2b_=nknots_2b_-1; rc_2b_=(float)para.rc_2b;
+  r_min_2b_=(float)para.r_min_2b; r_min_3b_=(float)para.r_min_3b;
+  has_3b_=(para.n_max_3b[0]>0);
+  if(has_3b_){
+    // Native UF3 (symmetry=2, the default): the two centre legs ij and ik are
+    // interchangeable under j<->k, so they MUST share an identical knot grid
+    // (same cutoff AND resolution); only the opposite leg jk is independent.
+    // Map the config as
+    //   rc_3b    = [ r_centre (ij=ik), r_jk ]
+    //   n_max_3b = [ n_centre (ij=ik), (unused), n_jk ]
+    // so every trained 3B is permutation-symmetric in (j,k), the tensor
+    // symmetrization is well defined, and the model reproduces order-independent
+    // energies/forces in MD.  (Previously ik got rc_3b[1]/n_max_3b[1] and jk got
+    // rc_3b[0], making ij != ik — non-compliant with native UF3 and order
+    // dependent.)
+    int n_centre = para.n_max_3b[0];
+    int n_jk     = para.n_max_3b[2] > 0 ? para.n_max_3b[2] : para.n_max_3b[0];
+    nc_3b_[0] = nc_3b_[1] = n_centre + 3;   // ij, ik : identical centre grid
+    nc_3b_[2] = n_jk + 3;                    // jk : opposite leg
+    for(int d=0;d<3;d++){nk_3b_[d]=nc_3b_[d]+4;nint_3b_[d]=nk_3b_[d]-1;}
+    rc_3b_[0]=rc_3b_[1]=(float)para.rc_3b[0];  // ij, ik centre cutoff (equal)
+    rc_3b_[2]=(float)para.rc_3b[1];            // jk opposite cutoff
+    num_trips_=num_types_*num_types_*num_types_;
+    num_params_3b_=num_trips_*nc_3b_[0]*nc_3b_[1]*nc_3b_[2];
+
+  }else{num_trips_=0;num_params_3b_=0;}
+  // num_params_3b_ computed above
+  num_params_2b_=num_types_*num_types_*ncoeff_2b_;
+  // 1-body offsets live at the end of the parameter vector.
+  e0_offset_=num_params_2b_+num_params_3b_;
+  num_params_total_=num_params_2b_+num_params_3b_+num_types_;
+  build_knots();
+
+  // Init coefficients (random)
+  coeffs_2b_.resize(num_types_*num_types_); srand(42);
+  for(size_t p=0;p<coeffs_2b_.size();p++){coeffs_2b_[p].resize(ncoeff_2b_);
+    for(int c=0;c<ncoeff_2b_;c++)coeffs_2b_[p][c]=(rand()/(float)RAND_MAX-.5f)*.1f;}
+  if(has_3b_){coeffs_3b_.resize(num_params_3b_);
+    for(int i=0;i<num_params_3b_;i++)coeffs_3b_[i]=(rand()/(float)RAND_MAX-.5f)*.1f;}
+  coeffs_e0_.assign(num_types_, 0.0f);
+
+  // 3B permutation symmetry is only well-defined when the ij and ik legs share
+  // an identical knot grid (same cutoff and resolution); otherwise swapping the
+  // two neighbours of a centre would map between different basis sets.
+  sym_3b_ = has_3b_ && (nc_3b_[0] == nc_3b_[1]) && (rc_3b_[0] == rc_3b_[1]);
+  if (has_3b_ && !sym_3b_) {
+    printf("Warning: 3B ij/ik grids differ (nc=%d,%d rc=%.2f,%.2f); neighbour-swap "
+           "symmetrization disabled. Trainer and MD energies may depend on neighbour "
+           "ordering.\n", nc_3b_[0], nc_3b_[1], rc_3b_[0], rc_3b_[1]);
+  }
+
+  // Build the frozen-edge mask and zero those coefficients so the splines go
+  // smoothly to 0 at the cutoffs (no force discontinuity / energy drift in MD).
+  build_frozen_mask(para.trim_2b, para.trim_3b);
+  project_3b_symmetric();   // enforce neighbour-swap symmetry (order independence)
+  project_frozen();
+
+  // Pre-allocate ALL GPU buffers ONCE
+  // Use explicit cudaMalloc to avoid GPU_Vector resize() overhead
+  prealloc_gpu(para);
+}
+
+void Uf3Model::prealloc_gpu(const UF3_Parameters& para)
+{
+  // Dedicated compute stream — lets us issue async H2D + build + forward + D2H
+  // without serializing on the legacy default stream that the rest of GPUMD
+  // uses.
+  CHECK(cudaStreamCreate(&stream_));
+
+  int max_atoms = para.batch * 200;  // generous per-frame estimate
+  if (max_atoms < 5000) max_atoms = 5000; // floor for small batches
+  gpu_max_atoms_ = max_atoms; gpu_max_batch_ = para.batch;
+
+  d_types.resize(max_atoms);
+  d_x.resize(max_atoms); d_y.resize(max_atoms); d_z.resize(max_atoms);
+  // d_fx/fy/fz live in dataset-global layout; allocated lazily in
+  // ensure_global_force_buffer() once the dataset size is known.
+  d_batch_idx.resize(para.batch);
+  d_bnatoms.resize(para.batch);
+  d_boffsets.resize(para.batch+1);
+  d_energy_buf.resize(para.batch);
+
+  int np2 = num_types_ * num_types_;
+  std::vector<int> hm(np2); for(int i=0;i<np2;i++) hm[i]=i;
+  d_type_map.resize(np2); d_type_map.copy_from_host(hm.data());
+
+  gpu_max_coeff_2b_ = np2 * nint_2b_;
+  d_coeff_2b.resize(gpu_max_coeff_2b_);
+  d_raw_coeffs_2b.resize(np2 * ncoeff_2b_);
+  d_e0.resize(num_types_);
+  d_e0.copy_from_host(coeffs_e0_.data());
+  upload_2b_coeffs_gpu(stream_);
+  // First upload sees the random init — synchronize so subsequent legacy
+  // callers (e.g. lstsq evaluate) see a fully built table.
+  CHECK(cudaStreamSynchronize(stream_));
+
+  if (has_3b_) {
+    init_3b_basis();
+    gpu_max_tensor_ = num_trips_ * nc_3b_[0] * nc_3b_[1] * nc_3b_[2];
+    d_tensor_3b.resize(gpu_max_tensor_);
+    upload_3b_coeffs();
+    std::vector<int> ht(num_trips_); for(int i=0;i<num_trips_;i++) ht[i]=i;
+    d_trip_map.resize(num_trips_); d_trip_map.copy_from_host(ht.data());
+  }
+}
+
+Uf3Model::~Uf3Model()
+{
+  if (stream_) {
+    cudaStreamDestroy(stream_);
+    stream_ = 0;
+  }
+}
+
+void Uf3Model::ensure_batch_buffers(int batch_atoms, int batch_size)
+{
+  if (batch_atoms > gpu_max_atoms_) {
+    gpu_max_atoms_ = batch_atoms;
+    d_types.resize(batch_atoms); d_x.resize(batch_atoms); d_y.resize(batch_atoms); d_z.resize(batch_atoms);
+  }
+  // For the legacy host-frame evaluate() path forces are written into batch-local
+  // positions (offset starts at 0), so the global-force buffer must also cover
+  // batch_atoms.  ensure_global_force_buffer handles both paths.
+  ensure_global_force_buffer(batch_atoms);
+  if (batch_size > gpu_max_batch_) {
+    gpu_max_batch_ = batch_size;
+    d_batch_idx.resize(batch_size); d_bnatoms.resize(batch_size); d_boffsets.resize(batch_size+1);
+    d_energy_buf.resize(batch_size);
+  }
+}
+
+void Uf3Model::ensure_global_force_buffer(int n)
+{
+  if (n > gpu_max_force_atoms_) {
+    gpu_max_force_atoms_ = n;
+    d_fx.resize(n); d_fy.resize(n); d_fz.resize(n);
+  }
+}
+
+template<typename T>
+static void grow_copy(GPU_Vector<T>& gv, size_t n, const T* host_data) {
+  if (gv.size() < (int)n) gv.resize(n);
+  cudaMemcpy(gv.data(), host_data, n * sizeof(T), cudaMemcpyHostToDevice);
+}
+
+void Uf3Model::build_knots() {
+  // Uniform B-spline knots placed so the *valid* support [knots[3], knots[nc]]
+  // is exactly [r_min, rc] (nc = ncoeff = n_max+3 -> n_max intervals over the
+  // physical range, matching reference UF3's clamped B-spline resolution).  The
+  // outer 3 knots on each side extend past [r_min, rc] so every coefficient is
+  // meaningful over the whole physical range — without this the edges clamp to
+  // constants and the 3B jk leg (3-4 A) falls in a dead region.  Spacing stays
+  // uniform, so the eval kernels (uniform find_interval) need no change.
+  {
+    float delta = (rc_2b_ - r_min_2b_) / (float)(ncoeff_2b_ - 3);
+    knots_2b_.resize(nknots_2b_);
+    for(int i=0;i<nknots_2b_;i++) knots_2b_[i] = r_min_2b_ + (i - 3) * delta;
+  }
+  for(int dim=0;dim<3;dim++){if(!has_3b_)break;
+    float rmin = (dim<2) ? r_min_3b_ : 0.0f;
+    float delta = (rc_3b_[dim] - rmin) / (float)(nc_3b_[dim] - 3);
+    knots_3b_[dim].resize(nk_3b_[dim]);
+    for(int i=0;i<nk_3b_[dim];i++) knots_3b_[dim][i] = rmin + (i - 3) * delta;}
+}
+void Uf3Model::init_3b_basis() {
+  std::vector<float4> all;
+  for(int d=0;d<3;d++){
+    basis_offsets_[d] = (int)all.size();
+    std::vector<float4> hb; precompute_3b_basis(nint_3b_[d], hb);
+    for(auto& c : hb) all.push_back(c);
+  }
+  d_basis_3b_all.resize(all.size());
+  d_basis_3b_all.copy_from_host(all.data());
+}
+void Uf3Model::pack_2b_coeffs_host(std::vector<float>& flat) const {
+  int np2 = (int)coeffs_2b_.size();
+  flat.resize(np2 * ncoeff_2b_);
+  for (int p = 0; p < np2; p++) {
+    for (int c = 0; c < ncoeff_2b_; c++) {
+      flat[p * ncoeff_2b_ + c] = coeffs_2b_[p][c];
+    }
+  }
+}
+
+void Uf3Model::upload_2b_coeffs_gpu(cudaStream_t stream) {
+  // 1) Host -> Device of raw coefficients (small: ~np2*ncoeff floats).
+  std::vector<float> flat;
+  pack_2b_coeffs_host(flat);
+  CHECK(cudaMemcpyAsync(d_raw_coeffs_2b.data(), flat.data(),
+                        flat.size() * sizeof(float),
+                        cudaMemcpyHostToDevice, stream));
+  // 2) GPU spline build: writes the full float4 cubic table.
+  int npairs = (int)coeffs_2b_.size();
+  int nint   = nint_2b_;
+  dim3 grid(npairs, (nint + 63) / 64);
+  uf3_build_coeff_2b_kernel<<<grid, 64, 0, stream>>>(
+    npairs, ncoeff_2b_, nint, d_raw_coeffs_2b.data(), d_coeff_2b.data());
+  GPU_CHECK_KERNEL
+}
+void Uf3Model::upload_3b_coeffs() {
+  d_tensor_3b.copy_from_host(coeffs_3b_.data());  // no resize
+}
+
+void Uf3Model::build_frozen_mask(int trim_2b, int trim_3b) {
+  frozen_.assign(num_params_total_, 0);
+  // 2B: freeze the trailing `trim_2b` coefficients of every pair so the spline
+  // decays to 0 at rc.  Clamp to leave at least one free coefficient.
+  int t2 = trim_2b; if (t2 > ncoeff_2b_ - 1) t2 = ncoeff_2b_ - 1; if (t2 < 0) t2 = 0;
+  int np2 = num_types_ * num_types_;
+  for (int p = 0; p < np2; p++)
+    for (int c = ncoeff_2b_ - t2; c < ncoeff_2b_; c++)
+      frozen_[p * ncoeff_2b_ + c] = 1;
+  // 3B: freeze a shell of width `trim_3b` at both ends of each grid axis.
+  if (has_3b_ && trim_3b > 0) {
+    int t0 = std::min(trim_3b, (nc_3b_[0] - 1) / 2);
+    int t1 = std::min(trim_3b, (nc_3b_[1] - 1) / 2);
+    int t2b = std::min(trim_3b, (nc_3b_[2] - 1) / 2);
+    int gsz = nc_3b_[0] * nc_3b_[1] * nc_3b_[2];
+    for (int tr = 0; tr < num_trips_; tr++) {
+      int base = num_params_2b_ + tr * gsz;
+      for (int a = 0; a < nc_3b_[0]; a++)
+        for (int b = 0; b < nc_3b_[1]; b++)
+          for (int c = 0; c < nc_3b_[2]; c++) {
+            bool fr = a < t0 || a >= nc_3b_[0] - t0 || b < t1 || b >= nc_3b_[1] - t1 ||
+                      c < t2b || c >= nc_3b_[2] - t2b;
+            if (fr) frozen_[base + a + b * nc_3b_[0] + c * nc_3b_[0] * nc_3b_[1]] = 1;
+          }
+    }
+  }
+}
+
+void Uf3Model::project_frozen() {
+  if (frozen_.empty()) return;
+  for (int k = 0; k < num_params_total_; k++) {
+    if (!frozen_[k]) continue;
+    if (k < num_params_2b_) coeffs_2b_[k / ncoeff_2b_][k % ncoeff_2b_] = 0.0f;
+    else if (k < num_params_2b_ + num_params_3b_) coeffs_3b_[k - num_params_2b_] = 0.0f;
+    else coeffs_e0_[k - e0_offset_] = 0.0f;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// 3B neighbour-swap symmetrization.
+//
+// The 3B energy of a centre i sums over its unordered neighbour pairs.  Both
+// the trainer and the MD engine assign the "first" neighbour of a pair to the
+// ij leg and the "second" to the ik leg — but the *order* in which neighbours
+// appear in the list differs between the trainer's dataset neighbour list and
+// the MD engine's runtime list.  Unless the tensor is invariant under swapping
+// the two neighbours, the same configuration yields different energies/forces
+// in training vs. MD.
+//
+// Swapping the two neighbours exchanges the ij and ik legs (coefficient indices
+// p<->q, the jk index r is unchanged because r_jk == r_kj) and the neighbour
+// types (tj<->tk, i.e. triplet (ti,tj,tk) <-> (ti,tk,tj)).  Averaging each
+// coefficient with this partner projects the tensor onto the symmetric
+// subspace, making the potential independent of neighbour ordering.  Layout is
+// ij-fastest: idx(p,q,r) = p + q*nc0 + r*nc0*nc1 within each triplet block.
+// ---------------------------------------------------------------------------
+void Uf3Model::project_3b_symmetric() {
+  if (!sym_3b_) return;
+  const int nc0 = nc_3b_[0], nc1 = nc_3b_[1], nc2 = nc_3b_[2];  // nc0 == nc1 here
+  const int gsz = nc0 * nc1 * nc2;
+  const int nt = num_types_;
+  for (int ti = 0; ti < nt; ti++)
+    for (int tj = 0; tj < nt; tj++)
+      for (int tk = tj; tk < nt; tk++) {          // tk >= tj: each pair once
+        int trip  = (ti * nt + tj) * nt + tk;
+        int part  = (ti * nt + tk) * nt + tj;     // neighbour-swap partner block
+        int base  = trip * gsz;
+        int pbase = part * gsz;
+        for (int p = 0; p < nc0; p++)
+          for (int q = 0; q < nc1; q++)
+            for (int r = 0; r < nc2; r++) {
+              int a = base  + p + q * nc0 + r * nc0 * nc1;       // (ti,tj,tk)[p,q,r]
+              int b = pbase + q + p * nc0 + r * nc0 * nc1;       // (ti,tk,tj)[q,p,r]
+              float avg = 0.5f * (coeffs_3b_[a] + coeffs_3b_[b]);
+              coeffs_3b_[a] = avg;
+              coeffs_3b_[b] = avg;
+            }
+      }
+}
+
+void Uf3Model::symmetrize_3b_gradient(std::vector<float>& grad) const {
+  if (!sym_3b_ || num_params_3b_ == 0) return;
+  if ((int)grad.size() < e0_offset_) return;
+  const int nc0 = nc_3b_[0], nc1 = nc_3b_[1], nc2 = nc_3b_[2];
+  const int gsz = nc0 * nc1 * nc2;
+  const int nt = num_types_;
+  float* g3 = grad.data() + num_params_2b_;   // 3B block of the gradient vector
+  for (int ti = 0; ti < nt; ti++)
+    for (int tj = 0; tj < nt; tj++)
+      for (int tk = tj; tk < nt; tk++) {
+        int base  = ((ti * nt + tj) * nt + tk) * gsz;
+        int pbase = ((ti * nt + tk) * nt + tj) * gsz;
+        for (int p = 0; p < nc0; p++)
+          for (int q = 0; q < nc1; q++)
+            for (int r = 0; r < nc2; r++) {
+              int a = base  + p + q * nc0 + r * nc0 * nc1;
+              int b = pbase + q + p * nc0 + r * nc0 * nc1;
+              float avg = 0.5f * (g3[a] + g3[b]);
+              g3[a] = avg;
+              g3[b] = avg;
+            }
+      }
+}
+
+void Uf3Model::get_parameters(float* params) const {
+  int idx=0;
+  for(size_t p=0;p<coeffs_2b_.size();p++)for(int c=0;c<ncoeff_2b_;c++)params[idx++]=coeffs_2b_[p][c];
+  for(size_t i=0;i<coeffs_3b_.size();i++)params[idx++]=coeffs_3b_[i];
+  for(int t=0;t<num_types_;t++)params[idx++]=coeffs_e0_[t];
+}
+
+void Uf3Model::set_parameters_async(const float* params, cudaStream_t stream) {
+  int idx=0;
+  for(size_t p=0;p<coeffs_2b_.size();p++)for(int c=0;c<ncoeff_2b_;c++)coeffs_2b_[p][c]=params[idx++];
+  for(size_t i=0;i<coeffs_3b_.size();i++)coeffs_3b_[i]=params[idx++];
+  for(int t=0;t<num_types_;t++)coeffs_e0_[t]=params[idx++];
+  project_3b_symmetric();  // enforce 3B neighbour-swap symmetry (order independence)
+  project_frozen();   // enforce frozen-edge coefficients = 0 (smooth cutoff)
+  upload_2b_coeffs_gpu(stream);
+  CHECK(cudaMemcpyAsync(d_e0.data(), coeffs_e0_.data(),
+                        num_types_ * sizeof(float),
+                        cudaMemcpyHostToDevice, stream));
+  if (has_3b_) {
+    // 3B coeffs are already in raw form on host; just async-H2D into d_tensor_3b.
+    CHECK(cudaMemcpyAsync(d_tensor_3b.data(), coeffs_3b_.data(),
+                          coeffs_3b_.size() * sizeof(float),
+                          cudaMemcpyHostToDevice, stream));
+  }
+}
+
+void Uf3Model::set_parameters(const float* params) {
+  set_parameters_async(params, stream_);
+  CHECK(cudaStreamSynchronize(stream_));
+}
+
+void Uf3Model::evaluate(
+  const std::vector<Uf3Frame>& frames,
+  const std::vector<int>& batch_indices,
+  GPU_Vector<float>& d_energy)
+{
+  int B = (int)batch_indices.size();
+  int total=0; int max_nn=0;          // total = expanded (real+ghost) atom count
+  for(int b=0;b<B;b++){const auto& f=frames[batch_indices[b]]; total+=f.num_total;
+    if(has_3b_ && (int)f.nn_list.size()>max_nn) max_nn=(int)f.nn_list.size();}
+  ensure_batch_buffers(total, B);
+
+  // Build host batch arrays + neighbor list data for 3B
+  std::vector<int> h_bnatoms(B),h_bnatoms_tot(B),h_boffsets(B+1);
+  std::vector<int> h_btypes(total),h_parent(total);
+  std::vector<float> h_bx(total),h_by(total),h_bz(total);
+  // 3B: neighbor list flat arrays
+  std::vector<int> h_nn_offset;     // per-atom offsets into nn_list
+  std::vector<int> h_nn_list;       // flat neighbor indices
+  std::vector<int> h_nn_frame_off;  // per-frame start in nn_offset
+  if(has_3b_){ h_nn_offset.reserve(total + B); h_nn_list.reserve(max_nn); h_nn_frame_off.reserve(B+1); }
+
+  h_boffsets[0]=0; int nn_global_off=0;
+  {int off=0; for(int b=0;b<B;b++){const Uf3Frame& f = frames[batch_indices[b]];
+    h_bnatoms[b]=f.num_atoms; h_bnatoms_tot[b]=f.num_total;
+    h_boffsets[b+1]=h_boffsets[b]+f.num_total;
+    for(int i=0;i<f.num_total;i++){h_btypes[off+i]=f.types[i];h_bx[off+i]=f.x[i];h_by[off+i]=f.y[i];h_bz[off+i]=f.z[i];h_parent[off+i]=f.parent[i];}
+    // 3B: append neighbor list for this frame (centers = real atoms only)
+    if(has_3b_){
+      h_nn_frame_off.push_back((int)h_nn_offset.size());
+      for(int i=0;i<f.num_atoms;i++){
+        h_nn_offset.push_back(nn_global_off);
+        if(!f.nn_list.empty()) {
+          for(int jj=0;jj<f.nn_counts[i];jj++) h_nn_list.push_back(f.nn_list[f.nn_offset[i]+jj]);
+          nn_global_off += f.nn_counts[i];
+        }
+      }
+    }
+    off+=f.num_total;}}
+  if(has_3b_) h_nn_frame_off.push_back((int)h_nn_offset.size()); // trailing
+
+  // Upload using grow_copy (only reallocate when growing, raw cudaMemcpy)
+  grow_copy(d_types, total, h_btypes.data());
+  grow_copy(d_x, total, h_bx.data()); grow_copy(d_y, total, h_by.data()); grow_copy(d_z, total, h_bz.data());
+  std::vector<int> h_bidx(B); for(int b=0;b<B;b++)h_bidx[b]=b;
+  grow_copy(d_batch_idx, B, h_bidx.data());
+  grow_copy(d_bnatoms, B, h_bnatoms.data());
+  grow_copy(d_boffsets, B+1, h_boffsets.data());
+  // Local-path expanded-count + parent buffers (slow test path; ad-hoc alloc).
+  GPU_Vector<int> d_bnatoms_tot_loc(B), d_parent_loc(total);
+  d_bnatoms_tot_loc.copy_from_host(h_bnatoms_tot.data());
+  d_parent_loc.copy_from_host(h_parent.data());
+
+  // 2B: multi-threaded (BLOCK_SIZE threads per frame, each handles some atoms)
+  const int BLK = 64;
+  float kmin2=knots_2b_[0], kd2=(knots_2b_.back()-knots_2b_[0])/nint_2b_;
+  uf3_eval_2b<<<B, BLK>>>(B,d_batch_idx.data(),d_bnatoms.data(),d_bnatoms_tot_loc.data(),d_boffsets.data(),
+    d_types.data(),d_x.data(),d_y.data(),d_z.data(),
+    d_coeff_2b.data(),num_types_*num_types_,nint_2b_,kmin2,kd2,rc_2b_,
+    d_type_map.data(),num_types_,d_e0.data(),d_energy_buf.data());
+  GPU_CHECK_KERNEL
+
+  // 2B forces
+  uf3_eval_2b_force<<<B, BLK>>>(B,d_batch_idx.data(),d_bnatoms.data(),d_bnatoms_tot_loc.data(),d_boffsets.data(),
+    d_types.data(),d_x.data(),d_y.data(),d_z.data(),
+    d_coeff_2b.data(),num_types_*num_types_,nint_2b_,kmin2,kd2,rc_2b_,
+    d_type_map.data(),num_types_,d_fx.data(),d_fy.data(),d_fz.data());
+  GPU_CHECK_KERNEL
+
+  // 3B: neighbor-list-based, multi-threaded
+  if(has_3b_ && h_nn_frame_off.size() > 1){
+    grow_copy(d_nn_off, h_nn_offset.size(), h_nn_offset.data());
+    grow_copy(d_nn_lst, h_nn_list.size(), h_nn_list.data());
+    grow_copy(d_nn_frame_off, h_nn_frame_off.size(), h_nn_frame_off.data());
+    uf3_eval_3b<<<B, BLK>>>(B,d_batch_idx.data(),d_bnatoms.data(),d_boffsets.data(),
+      d_types.data(),d_x.data(),d_y.data(),d_z.data(),
+      d_tensor_3b.data(),nc_3b_[0],nc_3b_[1],nc_3b_[2],
+      d_basis_3b_all.data()+basis_offsets_[0],nint_3b_[0],d_basis_3b_all.data()+basis_offsets_[1],nint_3b_[1],d_basis_3b_all.data()+basis_offsets_[2],nint_3b_[2],
+      knots_3b_[0][0],(knots_3b_[0].back()-knots_3b_[0][0])/nint_3b_[0],rc_3b_[0],
+      knots_3b_[1][0],(knots_3b_[1].back()-knots_3b_[1][0])/nint_3b_[1],rc_3b_[1],
+      knots_3b_[2][0],(knots_3b_[2].back()-knots_3b_[2][0])/nint_3b_[2],rc_3b_[2],
+      d_trip_map.data(),num_trips_,num_types_,
+      d_nn_off.data(),d_nn_lst.data(),d_nn_frame_off.data(),
+      d_energy_buf.data());  // 3B energy (per-center; ghosts in neighbour list)
+    GPU_CHECK_KERNEL
+
+    // 3B forces
+    uf3_eval_3b_force<<<B, BLK>>>(B, d_batch_idx.data(), d_bnatoms.data(), d_boffsets.data(),
+      d_types.data(), d_x.data(), d_y.data(), d_z.data(),
+      d_tensor_3b.data(), nc_3b_[0], nc_3b_[1], nc_3b_[2],
+      d_basis_3b_all.data()+basis_offsets_[0], nint_3b_[0],
+      d_basis_3b_all.data()+basis_offsets_[1], nint_3b_[1],
+      d_basis_3b_all.data()+basis_offsets_[2], nint_3b_[2],
+      knots_3b_[0][0], (knots_3b_[0].back()-knots_3b_[0][0])/nint_3b_[0], rc_3b_[0],
+      knots_3b_[1][0], (knots_3b_[1].back()-knots_3b_[1][0])/nint_3b_[1], rc_3b_[1],
+      knots_3b_[2][0], (knots_3b_[2].back()-knots_3b_[2][0])/nint_3b_[2], rc_3b_[2],
+      d_trip_map.data(), num_trips_, num_types_,
+      d_nn_off.data(), d_nn_lst.data(), d_nn_frame_off.data(), d_parent_loc.data(),
+      d_fx.data(), d_fy.data(), d_fz.data());
+    GPU_CHECK_KERNEL
+  }
+
+  d_energy.resize(B);
+  cudaMemcpy(d_energy.data(), d_energy_buf.data(), B*sizeof(float), cudaMemcpyDeviceToDevice);
+}
+
+// ---- GPU-side per-atom normalized energy residual ---------------------------
+static __global__ void gpu_energy_peratom_diff_kernel(
+  int B,
+  const float* d_energy,
+  const float* d_ref,
+  const int* d_fidx,
+  const int* d_natoms,
+  float* d_diff)
+{
+  int b = blockIdx.x * blockDim.x + threadIdx.x;
+  if (b >= B) {
+    return;
+  }
+  int fid = d_fidx[b];
+  float na = (float)d_natoms[fid];
+  if (na < 1.0f) {
+    na = 1.0f;
+  }
+  d_diff[b] = d_energy[b] / na - d_ref[fid] / na;
+}
+
+// ---- Analytical force-term gradient kernel (2B) -----------------------------
+static __global__ void uf3_grad_2b_force(
+  int nf,
+  int nparam,
+  const int* __restrict__ fidx,
+  const int* __restrict__ nat,
+  const int* __restrict__ off,
+  const int* __restrict__ typ,
+  const float* __restrict__ x,
+  const float* __restrict__ y,
+  const float* __restrict__ z,
+  int np,
+  int ncoeff,
+  int nint,
+  float kmin,
+  float kd,
+  float rc,
+  const int* __restrict__ tmap,
+  int nt,
+  const float* __restrict__ fx,
+  const float* __restrict__ fy,
+  const float* __restrict__ fz,
+  const float* __restrict__ fx_ref,
+  const float* __restrict__ fy_ref,
+  const float* __restrict__ fz_ref,
+  float scale_f,
+  float* __restrict__ gradient)
+{
+  int k = blockIdx.x;
+  if (k >= nparam) {
+    return;
+  }
+  int tid = threadIdx.x;
+  int stride = blockDim.x;
+  int pair_idx = k / ncoeff;
+  int coeff_idx = k % ncoeff;
+  float grad = 0.0f;
+
+  for (int b = tid; b < nf; b += stride) {
+    int fid = fidx[b];
+    int n = nat[fid];
+    int o = off[fid];
+    for (int i = 0; i < n; i++) {
+      int ti = typ[o + i];
+      float rx = fx[o + i] - fx_ref[o + i];
+      float ry = fy[o + i] - fy_ref[o + i];
+      float rz = fz[o + i] - fz_ref[o + i];
+      for (int j = 0; j < n; j++) {
+        if (i == j) {
+          continue;
+        }
+        int tj = typ[o + j];
+        if (tmap[ti * nt + tj] != pair_idx) {
+          continue;
+        }
+        float dx = x[o + i] - x[o + j];
+        float dy = y[o + i] - y[o + j];
+        float dz = z[o + i] - z[o + j];
+        float r2 = dx * dx + dy * dy + dz * dz;
+        float inv_r = rsqrtf(r2);
+        float r = r2 * inv_r;
+        if (r >= rc) {
+          continue;
+        }
+        int m = uf3_find_interval(r, kmin, kd, nint);
+        float u = (r - (kmin + m * kd)) / kd;
+        int c_rel = coeff_idx - m + 3;
+        if (c_rel < 0 || c_rel > 3) {
+          continue;
+        }
+        float dbdu = 0.0f;
+        if (c_rel == 0) {
+          dbdu = -3.0f * (1.0f - u) * (1.0f - u) / 6.0f;
+        } else if (c_rel == 1) {
+          dbdu = (9.0f * u * u - 12.0f * u) / 6.0f;
+        } else if (c_rel == 2) {
+          dbdu = (-9.0f * u * u + 6.0f * u + 3.0f) / 6.0f;
+        } else {
+          dbdu = 3.0f * u * u / 6.0f;
+        }
+        float dbdr = dbdu / kd;
+        float factor = -dbdr * inv_r;
+        float gx = factor * dx;
+        float gy = factor * dy;
+        float gz = factor * dz;
+        grad += scale_f * (rx * gx + ry * gy + rz * gz);
+      }
+    }
+  }
+
+  __shared__ float s_grad[64];
+  s_grad[tid] = grad;
+  __syncthreads();
+  for (int s = stride / 2; s > 0; s >>= 1) {
+    if (tid < s) {
+      s_grad[tid] += s_grad[tid + s];
+    }
+    __syncthreads();
+  }
+  if (tid == 0) {
+    gradient[k] += s_grad[0];
+  }
+}
+
+// ---- Analytical energy-term gradient kernel (3B) ----------------------------
+static __device__ inline float uf3_basis_value(int coeff_idx, int m, float u)
+{
+  int c_rel = coeff_idx - m + 3;
+  if (c_rel < 0 || c_rel > 3) {
+    return 0.0f;
+  }
+  if (c_rel == 0) {
+    return (1.0f / 6.0f) * (1.0f - u) * (1.0f - u) * (1.0f - u);
+  }
+  if (c_rel == 1) {
+    return (3.0f * u * u * u - 6.0f * u * u + 4.0f) / 6.0f;
+  }
+  if (c_rel == 2) {
+    return (-3.0f * u * u * u + 3.0f * u * u + 3.0f * u + 1.0f) / 6.0f;
+  }
+  return u * u * u / 6.0f;
+}
+
+static __global__ void uf3_grad_3b_energy(
+  int nf,
+  int nparam,
+  int num_params_2b,
+  const int* __restrict__ fidx,
+  const int* __restrict__ nat,
+  const int* __restrict__ off,
+  const int* __restrict__ typ,
+  const float* __restrict__ x,
+  const float* __restrict__ y,
+  const float* __restrict__ z,
+  int nc0,
+  int nc1,
+  int nc2,
+  int ni0,
+  int ni1,
+  int ni2,
+  float k0,
+  float kd0,
+  float r0,
+  float k1,
+  float kd1,
+  float r1,
+  float k2,
+  float kd2,
+  float r2,
+  int nt,
+  int num_trips,
+  const int* __restrict__ nn_off,
+  const int* __restrict__ nn_lst,
+  const int* __restrict__ nn_frame_off,
+  const float* __restrict__ energy_diff,
+  float scale_e,
+  float* __restrict__ gradient)
+{
+  int k = blockIdx.x;
+  if (k < num_params_2b || k >= nparam) {
+    return;
+  }
+  int local = k - num_params_2b;
+  int nc01 = nc0 * nc1;
+  int trip = local / nc01 / nc2;
+  int rem = local - trip * nc01 * nc2;
+  int p = rem % nc0;
+  int rem2 = rem / nc0;
+  int q = rem2 % nc1;
+  int r = rem2 / nc1;
+
+  int tid = threadIdx.x;
+  int stride = blockDim.x;
+  float grad = 0.0f;
+
+  for (int b = tid; b < nf; b += stride) {
+    int fid = fidx[b];
+    int n = nat[fid];
+    int o = off[fid];
+    float delta = energy_diff[b];
+    for (int i = 0; i < n; i++) {
+      int ti = typ[o + i];
+      for (int j = i + 1; j < n; j++) {
+        float dx12 = x[o + j] - x[o + i];
+        float dy12 = y[o + j] - y[o + i];
+        float dz12 = z[o + j] - z[o + i];
+        float r12 = sqrtf(dx12 * dx12 + dy12 * dy12 + dz12 * dz12);
+        if (r12 >= r0) {
+          continue;
+        }
+        int tj = typ[o + j];
+        for (int kk = j + 1; kk < n; kk++) {
+          float dx13 = x[o + kk] - x[o + i];
+          float dy13 = y[o + kk] - y[o + i];
+          float dz13 = z[o + kk] - z[o + i];
+          float r13 = sqrtf(dx13 * dx13 + dy13 * dy13 + dz13 * dz13);
+          if (r13 >= r1) {
+            continue;
+          }
+          float dx23 = x[o + kk] - x[o + j];
+          float dy23 = y[o + kk] - y[o + j];
+          float dz23 = z[o + kk] - z[o + j];
+          float r23 = sqrtf(dx23 * dx23 + dy23 * dy23 + dz23 * dz23);
+          if (r23 >= r2) {
+            continue;
+          }
+          int tk = typ[o + kk];
+          int trip_idx = (ti * nt + tj) * nt + tk;
+          if (trip_idx != trip) {
+            continue;
+          }
+          int m0 = uf3_find_interval(r12, k0, kd0, ni0);
+          int m1 = uf3_find_interval(r13, k1, kd1, ni1);
+          int m2 = uf3_find_interval(r23, k2, kd2, ni2);
+          float u0 = (r12 - (k0 + m0 * kd0)) / kd0;
+          float u1 = (r13 - (k1 + m1 * kd1)) / kd1;
+          float u2 = (r23 - (k2 + m2 * kd2)) / kd2;
+          float bp = uf3_basis_value(p, m0, u0);
+          float bq = uf3_basis_value(q, m1, u1);
+          float br = uf3_basis_value(r, m2, u2);
+          grad += scale_e * delta * bp * bq * br;
+        }
+      }
+    }
+  }
+
+  __shared__ float s_grad[64];
+  s_grad[tid] = grad;
+  __syncthreads();
+  for (int s = stride / 2; s > 0; s >>= 1) {
+    if (tid < s) {
+      s_grad[tid] += s_grad[tid + s];
+    }
+    __syncthreads();
+  }
+  if (tid == 0) {
+    gradient[k] += s_grad[0];
+  }
+}
+
+// ---- Fast evaluate using pre-loaded GPU dataset (NO H2D data upload) ---------
+// Launches on stream_ so it chains naturally after set_parameters_async(stream_).
+void Uf3Model::evaluate_batch(
+  const Uf3DatasetGPU& ds,
+  int batch_id,
+  GPU_Vector<float>& d_energy)
+{
+  int B = ds.batch_size(batch_id);
+  // Force buffer lives in dataset-global layout; size to the WHOLE dataset
+  // because kernels index via ds.d_offsets[fid] (global offsets).
+  ensure_global_force_buffer(ds.total_atoms);
+  if (B > gpu_max_batch_) {
+    gpu_max_batch_ = B;
+    d_energy_buf.resize(B);
+  }
+  const int* d_fidx = ds.batch_fidx_device_ptr(batch_id);
+
+  const int BLK = 64;
+  float kmin2 = knots_2b_[0], kd2 = (knots_2b_.back() - knots_2b_[0]) / nint_2b_;
+  cudaStream_t s = stream_;
+
+  // 2B energy
+  uf3_eval_2b<<<B, BLK, 0, s>>>(B, d_fidx, ds.d_natoms.data(), ds.d_natoms_tot.data(),
+    ds.d_offsets.data(),
+    ds.d_types.data(), ds.d_x.data(), ds.d_y.data(), ds.d_z.data(),
+    d_coeff_2b.data(), num_types_ * num_types_, nint_2b_, kmin2, kd2, rc_2b_,
+    d_type_map.data(), num_types_, d_e0.data(), d_energy_buf.data());
+  GPU_CHECK_KERNEL
+
+  // 2B forces
+  uf3_eval_2b_force<<<B, BLK, 0, s>>>(B, d_fidx, ds.d_natoms.data(), ds.d_natoms_tot.data(),
+    ds.d_offsets.data(),
+    ds.d_types.data(), ds.d_x.data(), ds.d_y.data(), ds.d_z.data(),
+    d_coeff_2b.data(), num_types_ * num_types_, nint_2b_, kmin2, kd2, rc_2b_,
+    d_type_map.data(), num_types_, d_fx.data(), d_fy.data(), d_fz.data());
+  GPU_CHECK_KERNEL
+
+  // 3B energy + forces (use global neighbor lists already on GPU)
+  if (has_3b_ && ds.has_3b) {
+    uf3_eval_3b<<<B, BLK, 0, s>>>(B, d_fidx, ds.d_natoms.data(), ds.d_offsets.data(),
+      ds.d_types.data(), ds.d_x.data(), ds.d_y.data(), ds.d_z.data(),
+      d_tensor_3b.data(), nc_3b_[0], nc_3b_[1], nc_3b_[2],
+      d_basis_3b_all.data() + basis_offsets_[0], nint_3b_[0],
+      d_basis_3b_all.data() + basis_offsets_[1], nint_3b_[1],
+      d_basis_3b_all.data() + basis_offsets_[2], nint_3b_[2],
+      knots_3b_[0][0], (knots_3b_[0].back() - knots_3b_[0][0]) / nint_3b_[0], rc_3b_[0],
+      knots_3b_[1][0], (knots_3b_[1].back() - knots_3b_[1][0]) / nint_3b_[1], rc_3b_[1],
+      knots_3b_[2][0], (knots_3b_[2].back() - knots_3b_[2][0]) / nint_3b_[2], rc_3b_[2],
+      d_trip_map.data(), num_trips_, num_types_,
+      ds.d_nn_off.data(), ds.d_nn_lst.data(), ds.d_nn_frame_off.data(),
+      d_energy_buf.data());
+    GPU_CHECK_KERNEL
+
+    uf3_eval_3b_force<<<B, BLK, 0, s>>>(B, d_fidx, ds.d_natoms.data(), ds.d_offsets.data(),
+      ds.d_types.data(), ds.d_x.data(), ds.d_y.data(), ds.d_z.data(),
+      d_tensor_3b.data(), nc_3b_[0], nc_3b_[1], nc_3b_[2],
+      d_basis_3b_all.data() + basis_offsets_[0], nint_3b_[0],
+      d_basis_3b_all.data() + basis_offsets_[1], nint_3b_[1],
+      d_basis_3b_all.data() + basis_offsets_[2], nint_3b_[2],
+      knots_3b_[0][0], (knots_3b_[0].back() - knots_3b_[0][0]) / nint_3b_[0], rc_3b_[0],
+      knots_3b_[1][0], (knots_3b_[1].back() - knots_3b_[1][0]) / nint_3b_[1], rc_3b_[1],
+      knots_3b_[2][0], (knots_3b_[2].back() - knots_3b_[2][0]) / nint_3b_[2], rc_3b_[2],
+      d_trip_map.data(), num_trips_, num_types_,
+      ds.d_nn_off.data(), ds.d_nn_lst.data(), ds.d_nn_frame_off.data(), ds.d_parent.data(),
+      d_fx.data(), d_fy.data(), d_fz.data());
+    GPU_CHECK_KERNEL
+  }
+
+  d_energy.resize(B);
+  cudaMemcpyAsync(d_energy.data(), d_energy_buf.data(), B * sizeof(float),
+                  cudaMemcpyDeviceToDevice, s);
+}
+
+// ---- GPU-side RMSE reduction kernels (avoid per-step D2H of forces) -------
+// One block per frame.  Accumulates (E_pred/na - E_ref/na)^2 into d_out[0]
+// using shared-mem reduction + grid-wide atomicAdd.
+static __global__ void uf3_reduce_energy_sq(
+  int B,
+  const float* __restrict__ d_energy,
+  const float* __restrict__ d_energy_ref,
+  const int* __restrict__ d_fidx,
+  const int* __restrict__ d_natoms,
+  float* __restrict__ d_out)
+{
+  int b = blockIdx.x * blockDim.x + threadIdx.x;
+  float v = 0.0f;
+  if (b < B) {
+    int fid = d_fidx[b];
+    float na = (float)d_natoms[fid];
+    if (na < 1.0f) na = 1.0f;
+    float diff = d_energy[b] / na - d_energy_ref[fid] / na;
+    v = diff * diff;
+  }
+  __shared__ float s[256];
+  int tid = threadIdx.x;
+  s[tid] = v;
+  __syncthreads();
+  for (int st = blockDim.x / 2; st > 0; st >>= 1) {
+    if (tid < st) s[tid] += s[tid + st];
+    __syncthreads();
+  }
+  if (tid == 0) atomicAdd(d_out, s[0]);
+}
+
+// One block per frame, threads stride across the frame's atoms.
+// Accumulates squared force residuals from the dataset-global force buffers.
+static __global__ void uf3_reduce_force_sq(
+  int B,
+  const int* __restrict__ d_fidx,
+  const int* __restrict__ d_natoms,
+  const int* __restrict__ d_offsets,
+  const float* __restrict__ fx, const float* __restrict__ fy, const float* __restrict__ fz,
+  const float* __restrict__ fx_ref, const float* __restrict__ fy_ref, const float* __restrict__ fz_ref,
+  float* __restrict__ d_out)
+{
+  int b = blockIdx.x;
+  if (b >= B) return;
+  int fid = d_fidx[b];
+  int n = d_natoms[fid];
+  int o = d_offsets[fid];
+  int tid = threadIdx.x, stride = blockDim.x;
+  float acc = 0.0f;
+  for (int i = tid; i < n; i += stride) {
+    float dx = fx[o + i] - fx_ref[o + i];
+    float dy = fy[o + i] - fy_ref[o + i];
+    float dz = fz[o + i] - fz_ref[o + i];
+    acc += dx * dx + dy * dy + dz * dz;
+  }
+  __shared__ float s[128];
+  s[tid] = acc;
+  __syncthreads();
+  for (int st = blockDim.x / 2; st > 0; st >>= 1) {
+    if (tid < st) s[tid] += s[tid + st];
+    __syncthreads();
+  }
+  if (tid == 0) atomicAdd(d_out, s[0]);
+}
+
+void Uf3Model::compute_loss_reduction(
+  const Uf3DatasetGPU& ds,
+  int batch_id,
+  GPU_Vector<float>& d_loss_sum)
+{
+  int B = ds.batch_size(batch_id);
+  const int* d_fidx = ds.batch_fidx_device_ptr(batch_id);
+  cudaStream_t s = stream_;
+  cudaMemsetAsync(d_loss_sum.data(), 0, 2 * sizeof(float), s);
+  uf3_reduce_energy_sq<<<(B + 255) / 256, 256, 0, s>>>(
+    B, d_energy_buf.data(), ds.d_energy_ref.data(), d_fidx, ds.d_natoms.data(),
+    d_loss_sum.data() + 0);
+  GPU_CHECK_KERNEL
+  uf3_reduce_force_sq<<<B, 128, 0, s>>>(
+    B, d_fidx, ds.d_natoms.data(), ds.d_offsets.data(),
+    d_fx.data(), d_fy.data(), d_fz.data(),
+    ds.d_fx_ref.data(), ds.d_fy_ref.data(), ds.d_fz_ref.data(),
+    d_loss_sum.data() + 1);
+  GPU_CHECK_KERNEL
+}
+
+// ---- Fast unified loss gradient (matches Uf3Fitness::compute_loss) ---------
+// ===========================================================================
+// Backward (gradient) pass — scatter dLoss/dc in a single forward-style sweep.
+// Ghost/e0/3B-force aware; replaces the old per-coefficient gradient kernels.
+// Gradient of  L = lambda_e*sqrt(MSE_e) + lambda_f*sqrt(MSE_f):
+//   grad_k = scale_e * sum_f wE_f * dE_f/dc_k  +  scale_f * sum_a dF_a * dF_a/dc_k
+// with wE_f = (E_f-Eref)/na^2, dF_a = (F_a-Fref_a),
+//      scale_e = lambda_e/(B*loss_e),  scale_f = lambda_f/(3*Natoms*loss_f).
+// ===========================================================================
+static __global__ void uf3_ediff2_kernel(
+  int B, const float* __restrict__ d_energy, const float* __restrict__ d_ref,
+  const int* __restrict__ d_fidx, const int* __restrict__ d_natoms, float* __restrict__ d_w)
+{
+  int b = blockIdx.x * blockDim.x + threadIdx.x; if (b >= B) return;
+  int fid = d_fidx[b]; float na = (float)d_natoms[fid]; if (na < 1.0f) na = 1.0f;
+  d_w[b] = (d_energy[b] - d_ref[fid]) / (na * na);
+}
+
+// 2B + 1-body backward.  One block per frame; threads stride over real atoms.
+static __global__ void uf3_grad_2b_bwd(
+  int nf, const int* __restrict__ fidx, const int* __restrict__ nat,
+  const int* __restrict__ nat_tot, const int* __restrict__ off, const int* __restrict__ typ,
+  const float* __restrict__ x, const float* __restrict__ y, const float* __restrict__ z,
+  int nint, float kmin, float kd, float rc, const int* __restrict__ tmap, int nt,
+  int ncoeff, int e0_off, const float* __restrict__ wE, float scale_e,
+  const float* __restrict__ fx, const float* __restrict__ fy, const float* __restrict__ fz,
+  const float* __restrict__ fxr, const float* __restrict__ fyr, const float* __restrict__ fzr,
+  float scale_f, float* __restrict__ grad)
+{
+  int b = blockIdx.x; if (b >= nf) return;
+  int tid = threadIdx.x, stride = blockDim.x;
+  int fid = fidx[b], n = nat[fid], n_tot = nat_tot[fid], o = off[fid];
+  float we = scale_e * wE[b];
+  for (int i = tid; i < n; i += stride) {
+    int ti = typ[o+i];
+    atomicAdd(&grad[e0_off + ti], we);                 // dE/de0[ti] = 1 per atom
+    float dFx = scale_f*(fx[o+i]-fxr[o+i]);
+    float dFy = scale_f*(fy[o+i]-fyr[o+i]);
+    float dFz = scale_f*(fz[o+i]-fzr[o+i]);
+    for (int j = 0; j < n_tot; j++) {
+      if (j == i) continue;
+      float ddx=x[o+i]-x[o+j], ddy=y[o+i]-y[o+j], ddz=z[o+i]-z[o+j];
+      float d2=ddx*ddx+ddy*ddy+ddz*ddz; float rinv=rsqrtf(d2), r=d2*rinv; if (r>=rc) continue;
+      int pi = tmap[ti*nt + typ[o+j]];
+      int m=(int)((r-kmin)/kd); if(m<0)m=0; if(m>=nint)m=nint-1;
+      float u=(r-(kmin+m*kd))/kd; float bb[4],db[4];
+      uf3_bspline4(u,bb); uf3_bspline4_deriv(u,1.0f/kd,db);
+      int p0=m-3; if(p0<0)p0=0;
+      for(int dp=0;dp<4;dp++){int c=p0+dp; if(c>=ncoeff)break;
+        float ff = -db[dp]*rinv;                        // per-coeff dF_i,dim = ff*ddx_dim
+        float g = we*0.5f*bb[dp] + dFx*(ff*ddx) + dFy*(ff*ddy) + dFz*(ff*ddz);
+        atomicAdd(&grad[pi*ncoeff + c], g);
+      }
+    }
+  }
+}
+
+// 3B backward (energy + force).  One block per frame; threads stride over real
+// centres using the ghost-aware neighbour list.
+static __global__ void uf3_grad_3b_bwd(
+  int nf, const int* __restrict__ fidx, const int* __restrict__ nat,
+  const int* __restrict__ off, const int* __restrict__ typ,
+  const float* __restrict__ x, const float* __restrict__ y, const float* __restrict__ z,
+  int nc0,int nc1,int nc2, float km0,float kd0,float rc0, float km1,float kd1,float rc1,
+  float km2,float kd2,float rc2, int nt, int num_params_2b,
+  const int* __restrict__ nn_off, const int* __restrict__ nn_lst,
+  const int* __restrict__ nn_frame_off, const int* __restrict__ parent,
+  const float* __restrict__ wE, float scale_e,
+  const float* __restrict__ fx, const float* __restrict__ fy, const float* __restrict__ fz,
+  const float* __restrict__ fxr, const float* __restrict__ fyr, const float* __restrict__ fzr,
+  float scale_f, float* __restrict__ grad)
+{
+  int b = blockIdx.x; if (b >= nf) return;
+  int tid = threadIdx.x, stride = blockDim.x;
+  int fid = fidx[b], n = nat[fid], o = off[fid]; int nn_base = nn_frame_off[fid];
+  float we = scale_e * wE[b];
+  for (int i = tid; i < n; i += stride) {
+    int ti = typ[o+i]; int ns = nn_off[nn_base+i]; int nni = nn_off[nn_base+i+1]-ns;
+    float dFix=scale_f*(fx[o+i]-fxr[o+i]), dFiy=scale_f*(fy[o+i]-fyr[o+i]), dFiz=scale_f*(fz[o+i]-fzr[o+i]);
+    for (int jj=0; jj<nni; jj++) {
+      int j=nn_lst[ns+jj];
+      float dx12=x[o+j]-x[o+i],dy12=y[o+j]-y[o+i],dz12=z[o+j]-z[o+i];
+      float d12=dx12*dx12+dy12*dy12+dz12*dz12,inv12=rsqrtf(d12),r12=d12*inv12; if(r12>=rc0)continue;
+      int tj=typ[o+j]; int pj=parent[o+j];
+      float dFjx=scale_f*(fx[o+pj]-fxr[o+pj]),dFjy=scale_f*(fy[o+pj]-fyr[o+pj]),dFjz=scale_f*(fz[o+pj]-fzr[o+pj]);
+      int m0=(int)((r12-km0)/kd0); if(m0<0)m0=0; if(m0>=nc0+3)m0=nc0+3-1; // nint0=nc0+3
+      float u0=(r12-(km0+m0*kd0))/kd0; float b0[4],db0[4];
+      uf3_bspline4(u0,b0); uf3_bspline4_deriv(u0,1.0f/kd0,db0); int p0=m0-3; if(p0<0)p0=0;
+      for (int kk=jj+1; kk<nni; kk++) {
+        int k=nn_lst[ns+kk];
+        float dx13=x[o+k]-x[o+i],dy13=y[o+k]-y[o+i],dz13=z[o+k]-z[o+i];
+        float d13=dx13*dx13+dy13*dy13+dz13*dz13,inv13=rsqrtf(d13),r13=d13*inv13; if(r13>=rc1)continue;
+        float dx23=x[o+k]-x[o+j],dy23=y[o+k]-y[o+j],dz23=z[o+k]-z[o+j];
+        float d23=dx23*dx23+dy23*dy23+dz23*dz23,inv23=rsqrtf(d23),r23=d23*inv23; if(r23>=rc2)continue;
+        int tk=typ[o+k]; int pk=parent[o+k];
+        float dFkx=scale_f*(fx[o+pk]-fxr[o+pk]),dFky=scale_f*(fy[o+pk]-fyr[o+pk]),dFkz=scale_f*(fz[o+pk]-fzr[o+pk]);
+        int trip=(ti*nt+tj)*nt+tk; int off3=num_params_2b+trip*nc0*nc1*nc2;
+        int m1=(int)((r13-km1)/kd1); if(m1<0)m1=0; if(m1>=nc1+3)m1=nc1+3-1;
+        int m2=(int)((r23-km2)/kd2); if(m2<0)m2=0; if(m2>=nc2+3)m2=nc2+3-1;
+        float u1=(r13-(km1+m1*kd1))/kd1, u2=(r23-(km2+m2*kd2))/kd2;
+        float b1[4],db1[4],b2[4],db2[4];
+        uf3_bspline4(u1,b1); uf3_bspline4_deriv(u1,1.0f/kd1,db1);
+        uf3_bspline4(u2,b2); uf3_bspline4_deriv(u2,1.0f/kd2,db2);
+        int p1=m1-3; if(p1<0)p1=0; int p2=m2-3; if(p2<0)p2=0;
+        for(int dp=0;dp<4;dp++){int p=p0+dp; if(p>=nc0)break; float Bp=b0[dp],dBp=db0[dp];
+        for(int dq=0;dq<4;dq++){int q=p1+dq; if(q>=nc1)break; float Bq=b1[dq],dBq=db1[dq];
+        for(int dr=0;dr<4;dr++){int rr=p2+dr; if(rr>=nc2)break;
+          int col=off3+p+q*nc0+rr*nc0*nc1;
+          float Br=b2[dr], dBr=db2[dr];
+          float G12=dBp*Bq*Br, G13=Bp*dBq*Br, G23=Bp*Bq*dBr;
+          float fix=G12*inv12*dx12+G13*inv13*dx13, fiy=G12*inv12*dy12+G13*inv13*dy13, fiz=G12*inv12*dz12+G13*inv13*dz13;
+          float fjx=-G12*inv12*dx12+G23*inv23*dx23, fjy=-G12*inv12*dy12+G23*inv23*dy23, fjz=-G12*inv12*dz12+G23*inv23*dz23;
+          float fkx=-G13*inv13*dx13-G23*inv23*dx23, fky=-G13*inv13*dy13-G23*inv23*dy23, fkz=-G13*inv13*dz13-G23*inv23*dz23;
+          float g = we*Bp*Bq*Br
+                  + dFix*fix+dFiy*fiy+dFiz*fiz
+                  + dFjx*fjx+dFjy*fjy+dFjz*fjz
+                  + dFkx*fkx+dFky*fky+dFkz*fkz;
+          atomicAdd(&grad[col], g);
+        }}}
+      }
+    }
+  }
+}
+
+
+void Uf3Model::compute_loss_gradient(
+  const Uf3DatasetGPU& ds,
+  int batch_id,
+  float loss_e,
+  float loss_f,
+  float lambda_e,
+  float lambda_f,
+  GPU_Vector<float>& d_grad_ws,
+  GPU_Vector<float>& d_ediff_ws,
+  std::vector<float>& host_gradient)
+{
+  int B = ds.batch_size(batch_id);
+  int total_atoms = ds.batch_total_atoms[batch_id % ds.num_batches];
+  const int* d_fidx = ds.batch_fidx_device_ptr(batch_id);
+
+  int nparam = num_parameters();
+  if ((int)d_grad_ws.size() < nparam) d_grad_ws.resize(nparam);
+  cudaMemset(d_grad_ws.data(), 0, nparam * sizeof(float));
+
+  // wE_f = (E_pred - E_ref)/na^2  (energy residual weight for the gradient).
+  if ((int)d_ediff_ws.size() < B) d_ediff_ws.resize(B);
+  uf3_ediff2_kernel<<<(B + 63) / 64, 64>>>(
+    B, d_energy_buf.data(), ds.d_energy_ref.data(), d_fidx, ds.d_natoms.data(),
+    d_ediff_ws.data());
+  GPU_CHECK_KERNEL
+
+  float kmin2 = knots_2b_[0];
+  float kd2 = (knots_2b_.back() - knots_2b_[0]) / nint_2b_;
+  float scale_e = (lambda_e > 0.0f && loss_e > 1e-12f && B > 0)
+                    ? lambda_e / ((float)B * loss_e) : 0.0f;
+  float scale_f = (lambda_f > 0.0f && loss_f > 1e-12f && total_atoms > 0)
+                    ? lambda_f / ((float)(3 * total_atoms) * loss_f) : 0.0f;
+  int e0_off = num_params_2b_ + num_params_3b_;
+
+  // 2B + 1-body backward (single sweep; energy & force together).
+  uf3_grad_2b_bwd<<<B, 64>>>(
+    B, d_fidx, ds.d_natoms.data(), ds.d_natoms_tot.data(), ds.d_offsets.data(),
+    ds.d_types.data(), ds.d_x.data(), ds.d_y.data(), ds.d_z.data(),
+    nint_2b_, kmin2, kd2, rc_2b_, d_type_map.data(), num_types_,
+    ncoeff_2b_, e0_off, d_ediff_ws.data(), scale_e,
+    d_fx.data(), d_fy.data(), d_fz.data(),
+    ds.d_fx_ref.data(), ds.d_fy_ref.data(), ds.d_fz_ref.data(), scale_f, d_grad_ws.data());
+  GPU_CHECK_KERNEL
+
+  if (has_3b_ && ds.has_3b && num_params_3b_ > 0) {
+    uf3_grad_3b_bwd<<<B, 64>>>(
+      B, d_fidx, ds.d_natoms.data(), ds.d_offsets.data(),
+      ds.d_types.data(), ds.d_x.data(), ds.d_y.data(), ds.d_z.data(),
+      nc_3b_[0], nc_3b_[1], nc_3b_[2],
+      knots_3b_[0][0], (knots_3b_[0].back()-knots_3b_[0][0])/nint_3b_[0], rc_3b_[0],
+      knots_3b_[1][0], (knots_3b_[1].back()-knots_3b_[1][0])/nint_3b_[1], rc_3b_[1],
+      knots_3b_[2][0], (knots_3b_[2].back()-knots_3b_[2][0])/nint_3b_[2], rc_3b_[2],
+      num_types_, num_params_2b_,
+      ds.d_nn_off.data(), ds.d_nn_lst.data(), ds.d_nn_frame_off.data(), ds.d_parent.data(),
+      d_ediff_ws.data(), scale_e,
+      d_fx.data(), d_fy.data(), d_fz.data(),
+      ds.d_fx_ref.data(), ds.d_fy_ref.data(), ds.d_fz_ref.data(), scale_f, d_grad_ws.data());
+    GPU_CHECK_KERNEL
+  }
+
+  host_gradient.resize(nparam);
+  d_grad_ws.copy_to_host(host_gradient.data());
+}
+
+// ---- Population (multi-individual) fast path ------------------------------
+void Uf3Model::ensure_pop_buffers(int pop, int total_atoms)
+{
+  if (pop > pop_capacity_) {
+    pop_capacity_ = pop;
+    int np2 = num_types_ * num_types_;
+    d_raw_coeffs_2b_pop.resize((size_t)pop * np2 * ncoeff_2b_);
+    d_coeff_2b_pop.resize((size_t)pop * np2 * nint_2b_);
+    d_energy_buf_pop.resize((size_t)pop * gpu_max_batch_);
+  }
+  if (total_atoms > pop_force_atoms_capacity_ || pop > pop_capacity_) {
+    pop_force_atoms_capacity_ = total_atoms;
+    size_t n = (size_t)pop_capacity_ * total_atoms;
+    d_fx_pop.resize(n);
+    d_fy_pop.resize(n);
+    d_fz_pop.resize(n);
+  }
+}
+
+void Uf3Model::set_population_parameters_async(
+  const float* host_pop_params, int pop, cudaStream_t stream)
+{
+  // Pop buffers must already be sized; for the 2B path we don't yet know
+  // total_atoms, so allocate just the coeff buffers if needed.
+  if (pop > pop_capacity_) {
+    pop_capacity_ = pop;
+    int np2 = num_types_ * num_types_;
+    d_raw_coeffs_2b_pop.resize((size_t)pop * np2 * ncoeff_2b_);
+    d_coeff_2b_pop.resize((size_t)pop * np2 * nint_2b_);
+    d_energy_buf_pop.resize((size_t)pop * gpu_max_batch_);
+  }
+
+  // Pack raw 2B coeffs for each individual (skip 3B section here — caller
+  // handles fallback when has_3b_ is set).
+  int np2 = num_types_ * num_types_;
+  int stride2b_host = num_params_2b_;             // floats per individual on host
+  int stride2b_dev  = np2 * ncoeff_2b_;           // floats per individual on device
+  // host and device strides match by construction (num_params_2b_ == np2*ncoeff_2b_)
+  CHECK(cudaMemcpyAsync(d_raw_coeffs_2b_pop.data(), host_pop_params,
+                        (size_t)pop * stride2b_dev * sizeof(float),
+                        cudaMemcpyHostToDevice, stream));
+
+  // GPU spline build for every individual.
+  dim3 grid(np2, (nint_2b_ + 63) / 64, pop);
+  uf3_build_coeff_2b_pop_kernel<<<grid, 64, 0, stream>>>(
+    pop, np2, ncoeff_2b_, nint_2b_,
+    d_raw_coeffs_2b_pop.data(), d_coeff_2b_pop.data());
+  GPU_CHECK_KERNEL
+
+  // If 3B is on but caller invoked this anyway, the 3B coeffs aren't copied —
+  // the population kernels here only do 2B.  Caller must guard.
+  (void)stride2b_host;
+}
+
+void Uf3Model::evaluate_batch_population(
+  const Uf3DatasetGPU& ds, int batch_id, int pop,
+  GPU_Vector<float>& d_energy_pop)
+{
+  int B = ds.batch_size(batch_id);
+  int total_atoms = ds.total_atoms;
+  ensure_pop_buffers(pop, total_atoms);
+  if (B > gpu_max_batch_) {
+    gpu_max_batch_ = B;
+    d_energy_buf_pop.resize((size_t)pop_capacity_ * B);
+  }
+  const int* d_fidx = ds.batch_fidx_device_ptr(batch_id);
+  cudaStream_t s = stream_;
+
+  // Clear per-frame predicted energies; uf3_eval_2b_pop writes them directly,
+  // but if 3B is later added it will accumulate — keep semantics consistent.
+  cudaMemsetAsync(d_energy_buf_pop.data(), 0,
+                  (size_t)pop * B * sizeof(float), s);
+
+  const int BLK = 64;
+  float kmin2 = knots_2b_[0], kd2 = (knots_2b_.back() - knots_2b_[0]) / nint_2b_;
+  int np2 = num_types_ * num_types_;
+  int coeff_stride = np2 * nint_2b_;
+
+  dim3 grid(B, pop);
+  uf3_eval_2b_pop<<<grid, BLK, 0, s>>>(
+    B, pop, total_atoms, d_fidx, ds.d_natoms.data(), ds.d_offsets.data(),
+    ds.d_types.data(), ds.d_x.data(), ds.d_y.data(), ds.d_z.data(),
+    d_coeff_2b_pop.data(), coeff_stride, np2, nint_2b_, kmin2, kd2, rc_2b_,
+    d_type_map.data(), num_types_, d_energy_buf_pop.data());
+  GPU_CHECK_KERNEL
+
+  uf3_eval_2b_force_pop<<<grid, BLK, 0, s>>>(
+    B, pop, total_atoms, d_fidx, ds.d_natoms.data(), ds.d_offsets.data(),
+    ds.d_types.data(), ds.d_x.data(), ds.d_y.data(), ds.d_z.data(),
+    d_coeff_2b_pop.data(), coeff_stride, np2, nint_2b_, kmin2, kd2, rc_2b_,
+    d_type_map.data(), num_types_,
+    d_fx_pop.data(), d_fy_pop.data(), d_fz_pop.data());
+  GPU_CHECK_KERNEL
+
+  d_energy_pop.resize((size_t)pop * B);
+  cudaMemcpyAsync(d_energy_pop.data(), d_energy_buf_pop.data(),
+                  (size_t)pop * B * sizeof(float),
+                  cudaMemcpyDeviceToDevice, s);
+}
+
+void Uf3Model::compute_loss_reduction_population(
+  const Uf3DatasetGPU& ds, int batch_id, int pop,
+  GPU_Vector<float>& d_loss_sum_pop)
+{
+  int B = ds.batch_size(batch_id);
+  int total_atoms = ds.total_atoms;
+  const int* d_fidx = ds.batch_fidx_device_ptr(batch_id);
+  cudaStream_t s = stream_;
+  cudaMemsetAsync(d_loss_sum_pop.data(), 0, 2 * pop * sizeof(float), s);
+
+  dim3 gridE((B + 255) / 256, pop);
+  uf3_reduce_energy_sq_pop<<<gridE, 256, 0, s>>>(
+    B, pop, d_energy_buf_pop.data(), ds.d_energy_ref.data(), d_fidx,
+    ds.d_natoms.data(), d_loss_sum_pop.data());
+  GPU_CHECK_KERNEL
+
+  dim3 gridF(B, pop);
+  uf3_reduce_force_sq_pop<<<gridF, 128, 0, s>>>(
+    B, pop, total_atoms, d_fidx, ds.d_natoms.data(), ds.d_offsets.data(),
+    d_fx_pop.data(), d_fy_pop.data(), d_fz_pop.data(),
+    ds.d_fx_ref.data(), ds.d_fy_ref.data(), ds.d_fz_ref.data(),
+    d_loss_sum_pop.data());
+  GPU_CHECK_KERNEL
+}
+
+// ---------------------------------------------------------------------------
+// Fused forward-pass + MSE reduction (2B).  Replaces the four-step sequence
+//   set_population_parameters_async
+//   → evaluate_batch_population
+//   → compute_loss_reduction_population
+// with a single kernel launched from this method.
+//
+// Eliminates:
+//   • d_energy_buf_pop: energy values no longer written to global memory
+//   • d_fx_pop / d_fy_pop / d_fz_pop: force vectors no longer stored
+//   • The D2D copy of energies that evaluate_batch_population used to do
+//   • One redundant sweep over all atom pairs (the old energy kernel repeated
+//     every distance / spline computation the force kernel already performed)
+// ---------------------------------------------------------------------------
+void Uf3Model::evaluate_and_reduce_population(
+  const Uf3DatasetGPU& ds, int batch_id, int pop,
+  GPU_Vector<float>& d_loss_sum_pop)
+{
+  int B = ds.batch_size(batch_id);
+  int total_atoms = ds.total_atoms;
+  const int* d_fidx = ds.batch_fidx_device_ptr(batch_id);
+  cudaStream_t s = stream_;
+
+  // Zero the two accumulators per individual before launching the kernel.
+  cudaMemsetAsync(d_loss_sum_pop.data(), 0, 2 * pop * sizeof(float), s);
+
+  float kmin2 = knots_2b_[0];
+  float kd2   = (knots_2b_.back() - knots_2b_[0]) / nint_2b_;
+  int np2 = num_types_ * num_types_;
+  int coeff_stride = np2 * nint_2b_;
+
+  dim3 grid(B, pop);
+  uf3_eval_reduce_2b_pop<<<grid, 64, 0, s>>>(
+    B, pop, total_atoms,
+    d_fidx, ds.d_natoms.data(), ds.d_offsets.data(),
+    ds.d_types.data(), ds.d_x.data(), ds.d_y.data(), ds.d_z.data(),
+    d_coeff_2b_pop.data(), coeff_stride, np2, nint_2b_, kmin2, kd2, rc_2b_,
+    d_type_map.data(), num_types_,
+    ds.d_energy_ref.data(),
+    ds.d_fx_ref.data(), ds.d_fy_ref.data(), ds.d_fz_ref.data(),
+    d_loss_sum_pop.data());
+  GPU_CHECK_KERNEL
+}
