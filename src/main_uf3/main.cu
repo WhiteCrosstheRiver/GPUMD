@@ -83,6 +83,9 @@ static void write_uf3_file(UF3_Parameters& para, Uf3Model* model)
 
   for (int p = 0; p < np; p++) {
     int ti = p / nt, tj = p % nt;
+    // Both directions of a cross pair share the canonical (sorted) slot's
+    // spline; mirror it into each ordered block so MD obeys Newton's 3rd law.
+    int psrc = model->type_map()[p];
     out << "2B " << elements[ti] << " " << elements[tj] << " 0 3 uk\n";
     out << model->rc_2b() << " " << nk << "\n";
     out << std::fixed;
@@ -91,7 +94,7 @@ static void write_uf3_file(UF3_Parameters& para, Uf3Model* model)
     }
     out << nc << "\n";
     for (int c = 0; c < nc; c++) {
-      out << coeffs[p * nc + c] << (c < nc - 1 ? " " : "\n");
+      out << coeffs[psrc * nc + c] << (c < nc - 1 ? " " : "\n");
     }
     out << "#\n";
   }

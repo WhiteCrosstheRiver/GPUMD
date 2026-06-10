@@ -350,6 +350,10 @@ void Uf3Fitness::compute_gradient(int batch_id, int generation,
     dataset_, bid, loss_e, loss_f, lambda_e_, lambda_f_,
     d_grad_, d_ediff_, grad);
   accumulate_regularization_gradient(grad);
+  // Project the 3B gradient onto the neighbour-swap-symmetric subspace so the
+  // optimizer stays consistent with the symmetrized model (set_parameters keeps
+  // the iterate symmetric; this keeps the search direction symmetric too).
+  model_->symmetrize_3b_gradient(grad);
   // Keep frozen (edge) coefficients fixed at 0 for smooth cutoffs.
   const std::vector<char>& fr = model_->frozen();
   for (int i = 0; i < (int)grad.size() && i < (int)fr.size(); i++)

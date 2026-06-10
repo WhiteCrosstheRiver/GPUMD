@@ -768,8 +768,20 @@ void Uf3Model::prealloc_gpu(const UF3_Parameters& para)
   d_boffsets.resize(para.batch+1);
   d_energy_buf.resize(para.batch);
 
+  // Canonical unordered-pair map: (ti,tj) and (tj,ti) share one spline (the
+  // sorted pair's slot).  V2 must be symmetric in its two atoms — fitting the
+  // two directions independently lets lstsq give them different splines (each
+  // direction's force rows only constrain its own column), which breaks
+  // Newton's third law in MD.  Non-canonical slots receive no features and are
+  // mirrored from the canonical slot when the model is written out.
   int np2 = num_types_ * num_types_;
-  std::vector<int> hm(np2); for(int i=0;i<np2;i++) hm[i]=i;
+  std::vector<int> hm(np2);
+  for (int ti = 0; ti < num_types_; ti++)
+    for (int tj = 0; tj < num_types_; tj++) {
+      int a = ti < tj ? ti : tj, b = ti < tj ? tj : ti;
+      hm[ti * num_types_ + tj] = a * num_types_ + b;
+    }
+  type_map_host_ = hm;
   d_type_map.resize(np2); d_type_map.copy_from_host(hm.data());
 
   gpu_max_coeff_2b_ = np2 * nint_2b_;
@@ -895,9 +907,16 @@ void Uf3Model::build_frozen_mask(int trim_2b, int trim_3b) {
   // decays to 0 at rc.  Clamp to leave at least one free coefficient.
   int t2 = trim_2b; if (t2 > ncoeff_2b_ - 1) t2 = ncoeff_2b_ - 1; if (t2 < 0) t2 = 0;
   int np2 = num_types_ * num_types_;
-  for (int p = 0; p < np2; p++)
+  for (int p = 0; p < np2; p++) {
+    // Non-canonical ordered pair (ti > tj): the canonical (tj,ti) slot holds
+    // the shared spline; this slot gets no features — freeze it entirely.
+    if (p / num_types_ > p % num_types_) {
+      for (int c = 0; c < ncoeff_2b_; c++) frozen_[p * ncoeff_2b_ + c] = 1;
+      continue;
+    }
     for (int c = ncoeff_2b_ - t2; c < ncoeff_2b_; c++)
       frozen_[p * ncoeff_2b_ + c] = 1;
+  }
   // 3B: freeze a shell of width `trim_3b` at both ends of each grid axis.
   if (has_3b_ && trim_3b > 0) {
     int t0 = std::min(trim_3b, (nc_3b_[0] - 1) / 2);

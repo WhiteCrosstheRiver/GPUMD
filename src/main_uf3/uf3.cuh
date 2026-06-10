@@ -157,6 +157,22 @@ public:
   // lstsq solve and Adam to keep edge coefficients at zero.
   const std::vector<char>& frozen() const { return frozen_; }
 
+  // Canonical unordered-pair map: tmap[ti*nt+tj] = sorted-pair slot, so both
+  // directions of a cross pair share one spline (Newton's third law).
+  const std::vector<int>& type_map() const { return type_map_host_; }
+
+  // True when the 3B ij/ik legs share an identical knot grid, so the tensor can
+  // be made permutation-symmetric under swapping the two neighbours of a centre
+  // (see project_3b_symmetric / symmetrize_3b_gradient).
+  bool sym_3b() const { return sym_3b_; }
+
+  // Project the gradient of the 3B block onto the permutation-symmetric
+  // subspace: g[ti,tj,tk][p,q,r] := 0.5*(g[ti,tj,tk][p,q,r] + g[ti,tk,tj][q,p,r]).
+  // Lets gradient optimizers (Adam/LBFGS) stay on the symmetric manifold without
+  // contaminating the adaptive moments with the (loss-irrelevant) antisymmetric
+  // part.  No-op unless sym_3b_ is set.  `grad` is the full parameter vector.
+  void symmetrize_3b_gradient(std::vector<float>& grad) const;
+
 private:
   void build_knots();
   void prealloc_gpu(const UF3_Parameters& para);
@@ -199,11 +215,24 @@ private:
   int e0_offset_;
   int num_params_total_;
 
+  // Host mirror of d_type_map (canonical unordered-pair indices).
+  std::vector<int> type_map_host_;
+
   // Frozen-parameter mask (size num_params_total_): 1 => held at 0 for smooth
   // cutoffs (trailing 2B edge, optional 3B edge shell).  Built in the ctor.
   std::vector<char> frozen_;
   void build_frozen_mask(int trim_2b, int trim_3b);
   void project_frozen();   // zero all frozen coefficients in host storage
+
+  // Whether the 3B tensor is symmetrized under the (tj,p)<->(tk,q) neighbour
+  // swap.  Set in the ctor only when the ij and ik knot grids are identical
+  // (nc_3b_[0]==nc_3b_[1] && rc_3b_[0]==rc_3b_[1]); otherwise the swap is
+  // ill-defined and symmetrization is disabled.
+  bool sym_3b_ = false;
+  // Average each coefficient with its neighbour-swap partner so the fitted
+  // potential is independent of the (arbitrary) neighbour-list ordering used by
+  // the trainer vs. the MD engine.  Applied in the ctor and set_parameters.
+  void project_3b_symmetric();
 
   // ---- Pre-allocated GPU buffers (never resized after init) ----
   int gpu_max_atoms_ = 0;        // capacity for d_types/x/y/z (batch-local layout)

@@ -39,7 +39,11 @@ struct UF3_Parameters {
   // discontinuities / energy drift in MD).  3B freezes the first/last `trim_3b`
   // along each grid axis (only safe when the 3B grid is large enough).
   int trim_2b = 3;
-  int trim_3b = 0;
+  // Cubic splines need the outer 3 coefficients per axis frozen for the
+  // tensor to vanish smoothly at the cutoffs; anything less leaves a step in
+  // the PES at rc (non-conservative MD forces).  Matches reference UF3's
+  // default leading_trim=3 / trailing_trim=3 for 3B.
+  int trim_3b = 3;
 
   // Inner knot bounds.  Placing knots over [r_min, rc] instead of [0, rc]
   // concentrates B-spline resolution in the physical bonding range (matches

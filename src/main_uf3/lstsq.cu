@@ -17,6 +17,7 @@
 #include "utilities/gpu_macro.cuh"
 #include <algorithm>
 #include <cublas_v2.h>
+#include <cusolverDn.h>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -108,16 +109,19 @@ static __global__ void lstsq_energy_rows(
   int nparam, int e0_off, int num_frames_total,
   const float* __restrict__ d_target, float we_global,
   const int* __restrict__ nn_off, const int* __restrict__ nn_lst, const int* __restrict__ nn_frame_off,
+  const int* __restrict__ tmap,
   double* __restrict__ A, double* __restrict__ bvec)
 {
-  extern __shared__ float s_basis[];
+  // Features accumulate straight into the (zero-initialised) double-precision
+  // row of A — same pattern as the force rows.  The previous float shared-
+  // memory staging lost ~1e-4 relative precision on large frames (thousands of
+  // basis contributions per column) and capped nparam at the shared-mem size.
   int row = blockIdx.x; if (row >= nf) return;
   int tid = threadIdx.x, stride = blockDim.x;
   int fid = fidx[row], n = nat[fid], n_tot = nat_tot[fid], o = off[fid];
-  for (int k = tid; k < nparam; k += stride) s_basis[k] = 0.0f;
-  __syncthreads();
+  const double we = (double)we_global;
 
-  for (int i = tid; i < n; i += stride) atomicAdd(&s_basis[e0_off + typ[o+i]], 1.0f);
+  for (int i = tid; i < n; i += stride) atomicAdd(&A[(size_t)(e0_off + typ[o+i])*M + row], we);
 
   for (int i = tid; i < n; i += stride) {
     int ti = typ[o+i];
@@ -126,8 +130,9 @@ static __global__ void lstsq_energy_rows(
       int tj = typ[o+j];
       float dx = x[o+i]-x[o+j], dy = y[o+i]-y[o+j], dz = z[o+i]-z[o+j];
       float r = sqrtf(dx*dx+dy*dy+dz*dz); if (r >= rc) continue;
-      int pi = ti*nt + tj;
-      for (int c = 0; c < ncoeff; c++) { float bv=_bval(c,nint,r,kmin,kd); if(bv!=0) atomicAdd(&s_basis[pi*ncoeff+c], 0.5f*bv); }
+      int pi = tmap[ti*nt + tj];   // canonical unordered pair (both directions share columns)
+      for (int c = 0; c < ncoeff; c++) { float bv=_bval(c,nint,r,kmin,kd);
+        if(bv!=0) atomicAdd(&A[(size_t)(pi*ncoeff+c)*M + row], we * 0.5 * (double)bv); }
     }
   }
 
@@ -149,18 +154,12 @@ static __global__ void lstsq_energy_rows(
           for(int p=0;p<nc0;p++){float bp=_bval(p,ni0,r12,k0,kd0);if(bp==0)continue;
           for(int q=0;q<nc1;q++){float bq=_bval(q,ni1,r13,k1,kd1);if(bq==0)continue;float bpbq=bp*bq;
           for(int r=0;r<nc2;r++){float br=_bval(r,ni2,r23,k2,kd2);if(br==0)continue;
-          atomicAdd(&s_basis[off3+p+q*nc0+r*nc0*nc1], bpbq*br);}}}
+          atomicAdd(&A[(size_t)(off3+p+q*nc0+r*nc0*nc1)*M + row], we * (double)(bpbq*br));}}}
         }
       }
     }
   }
-  __syncthreads();
 
-  // Total-energy row, weighted by the reference-UF3 variance-normalized weight
-  // we_global = sqrt(weight / (n_e * Var(E_total))).  No per-frame /na (the
-  // 1-body term absorbs cell-size dependence).
-  double we = (double)we_global;
-  for (int k = tid; k < nparam; k += stride) A[(size_t)k*M + row] = we * (double)s_basis[k];
   if (tid == 0) bvec[row] = we * (double)d_target[fid];
 }
 
@@ -178,6 +177,7 @@ static __global__ void lstsq_force_rows(
   int nparam, float wf,
   const float* __restrict__ fxref, const float* __restrict__ fyref, const float* __restrict__ fzref,
   const int* __restrict__ nn_off, const int* __restrict__ nn_lst, const int* __restrict__ nn_frame_off,
+  const int* __restrict__ tmap,
   double* __restrict__ A, double* __restrict__ bvec)
 {
   int blk = blockIdx.x; if (blk >= nf) return;
@@ -197,7 +197,7 @@ static __global__ void lstsq_force_rows(
       int tj = typ[o+j];
       float dx=x[o+i]-x[o+j],dy=y[o+i]-y[o+j],dz=z[o+i]-z[o+j];
       float d2=dx*dx+dy*dy+dz*dz,invr=rsqrtf(d2),r=d2*invr; if(r>=rc)continue;
-      int pi=ti*nt+tj;
+      int pi=tmap[ti*nt+tj];   // canonical unordered pair
       for (int c=0;c<ncoeff;c++){ float db=_dbval(c,nint,r,kmin,kd); if(db==0)continue;
         // F_i = -phi'(r)*rinv*dx ;  per-coeff feature = -db*rinv*dx
         double f = -(double)db*(double)invr*(double)wf; int col=pi*ncoeff+c;
@@ -397,7 +397,6 @@ void run_lstsq(
   // equations AtA / Atb with cuBLAS (beta=1) — mathematically identical to a
   // single solve, but bounded memory (O(maxM x nparam) instead of O(M x nparam)).
   const int BLK = 64;
-  size_t smem = nparam * sizeof(float);
   GPU_Vector<double> d_ATA((size_t)nparam * nparam), d_ATb(nparam);
   cudaMemset(d_ATA.data(), 0, (size_t)nparam * nparam * sizeof(double));
   cudaMemset(d_ATb.data(), 0, nparam * sizeof(double));
@@ -436,7 +435,7 @@ void run_lstsq(
     cudaMemset(d_A.data(), 0, (size_t)Mchunk * nparam * sizeof(double));
     cudaMemset(d_b.data(), 0, (size_t)Mchunk * sizeof(double));
 
-    lstsq_energy_rows<<<ncf, BLK, smem>>>(
+    lstsq_energy_rows<<<ncf, BLK>>>(
       ncf, (int)Mchunk, d_cbidx.data(), ds.d_natoms.data(), ds.d_natoms_tot.data(), ds.d_offsets.data(),
       ds.d_types.data(), ds.d_x.data(), ds.d_y.data(), ds.d_z.data(),
       ncoeff, nt, nint, kmin, kd, rc, num_params_2b,
@@ -444,6 +443,7 @@ void run_lstsq(
       k3[0], kd3[0], r3[0], k3[1], kd3[1], r3[1], k3[2], kd3[2], r3[2],
       nparam, e0_off, use_frames, ds.d_energy_ref.data(), we_global,
       ds.d_nn_off.data(), ds.d_nn_lst.data(), ds.d_nn_frame_off.data(),
+      fitness.model()->d_type_map.data(),
       d_A.data(), d_b.data());
     GPU_CHECK_KERNEL
 
@@ -457,6 +457,7 @@ void run_lstsq(
         k3[0], kd3[0], r3[0], k3[1], kd3[1], r3[1], k3[2], kd3[2], r3[2],
         nparam, wf, ds.d_fx_ref.data(), ds.d_fy_ref.data(), ds.d_fz_ref.data(),
         ds.d_nn_off.data(), ds.d_nn_lst.data(), ds.d_nn_frame_off.data(),
+        fitness.model()->d_type_map.data(),
         d_A.data(), d_b.data());
       GPU_CHECK_KERNEL
     }
@@ -478,28 +479,29 @@ void run_lstsq(
     for (int j = i + 1; j < nparam; j++)
       ATA[(size_t)i*nparam + j] = ATA[(size_t)j*nparam + i];
 
-  // Tikhonov ridge.  Two components: (1) a relative term so well-constrained
-  // columns are barely perturbed, and (2) a per-column floor proportional to
-  // the mean diagonal so nearly-unconstrained 3B columns (diagonal ~0, e.g.
-  // triplets/basis that never activate) stay positive-definite and solve to ~0.
+  // Regularization (paper Eq. 12: lambda_1 ridge + lambda_2 second-difference
+  // curvature).  Both strengths are made dimensionless by scaling with the
+  // mean diagonal of the normal matrix, so the same lambda works regardless of
+  // dataset size / unit weighting.  When the user leaves them at 0 we fall
+  // back to calibrated defaults.  A tiny per-column floor keeps the matrix
+  // positive-definite for never-activated columns (e.g. unused 3B basis).
   double diag_mean = 0.0;
   for (int k = 0; k < nparam; k++) diag_mean += ATA[k*nparam + k];
   diag_mean /= std::max(1, nparam);
-  double ridge_rel = 1e-8;
-  double ridge_floor = 1e-6 * (diag_mean > 0.0 ? diag_mean : 1.0);
+  double dm = (diag_mean > 0.0 ? diag_mean : 1.0);
+
+  double ridge_rel = (para.lambda_1 > 0.0) ? para.lambda_1 : 1e-8;
+  double ridge_floor = 1e-6 * dm;
   for (int k = 0; k < nparam; k++) {
     double dk = ATA[k*nparam + k];
     ATA[k*nparam + k] = dk + ridge_rel * dk + ridge_floor;
   }
 
-  // Curvature regularization (scaled relative to the mean diagonal so it is
-  // invariant to the absolute weighting scale).  3B needs much stronger
-  // smoothing than 2B since the energy-only 3B fit is heavily under-constrained.
-  double dm = (diag_mean > 0.0 ? diag_mean : 1.0);
-  double lam2b = 1e-4 * dm;
-  double lam3b = 1e-3 * dm;
-  if (const char* e = getenv("UF3_C2")) lam2b = atof(e) * dm;
-  if (const char* e = getenv("UF3_C3")) lam3b = atof(e) * dm;
+  // Curvature: 3B defaults stronger than 2B (the 3B grid is heavily
+  // under-constrained by typical training sets).  A user-supplied lambda_2
+  // applies to 2B directly and 10x to 3B, preserving that ratio.
+  double lam2b = (para.lambda_2 > 0.0) ? para.lambda_2 * dm : 1e-4 * dm;
+  double lam3b = (para.lambda_2 > 0.0) ? 10.0 * para.lambda_2 * dm : 1e-3 * dm;
   add_curvature_regularization(ATA, nparam, npairs, ncoeff,
                                has_3b, num_params_2b, fitness.model()->num_triplets(),
                                nc3[0], nc3[1], nc3[2], lam2b, lam3b);
@@ -517,9 +519,43 @@ void run_lstsq(
     }
   }
 
-  bool ok = cholesky(ATA, nparam);   // in-place Cholesky in double
-  if (!ok) printf("  lstsq: ATA not PD (after ridge)\n");
-  std::vector<double> xd; solve_cholesky(ATA, nparam, ATb, xd);
+  // GPU Cholesky solve (cusolver) — the host single-thread O(n^3) Cholesky
+  // took minutes for 3B-sized systems (nparam ~ 10^4).  Falls back to the host
+  // path if potrf reports a non-positive-definite matrix.
+  std::vector<double> xd(nparam);
+  bool solved = false;
+  {
+    cusolverDnHandle_t cus;
+    if (cusolverDnCreate(&cus) == CUSOLVER_STATUS_SUCCESS) {
+      GPU_Vector<double> d_M((size_t)nparam * nparam), d_xv(nparam);
+      GPU_Vector<int> d_info(1);
+      cudaMemcpy(d_M.data(), ATA.data(), (size_t)nparam*nparam*sizeof(double), cudaMemcpyHostToDevice);
+      cudaMemcpy(d_xv.data(), ATb.data(), nparam*sizeof(double), cudaMemcpyHostToDevice);
+      int lwork = 0;
+      cusolverDnDpotrf_bufferSize(cus, CUBLAS_FILL_MODE_LOWER, nparam, d_M.data(), nparam, &lwork);
+      GPU_Vector<double> d_work(lwork > 0 ? lwork : 1);
+      cusolverDnDpotrf(cus, CUBLAS_FILL_MODE_LOWER, nparam, d_M.data(), nparam,
+                       d_work.data(), lwork, d_info.data());
+      int info = -1;
+      cudaMemcpy(&info, d_info.data(), sizeof(int), cudaMemcpyDeviceToHost);
+      if (info == 0) {
+        cusolverDnDpotrs(cus, CUBLAS_FILL_MODE_LOWER, nparam, 1, d_M.data(), nparam,
+                         d_xv.data(), nparam, d_info.data());
+        cudaMemcpy(&info, d_info.data(), sizeof(int), cudaMemcpyDeviceToHost);
+        if (info == 0) {
+          cudaMemcpy(xd.data(), d_xv.data(), nparam*sizeof(double), cudaMemcpyDeviceToHost);
+          solved = true;
+        }
+      }
+      if (!solved) printf("  lstsq: cusolver potrf/potrs info=%d, falling back to host\n", info);
+      cusolverDnDestroy(cus);
+    }
+  }
+  if (!solved) {
+    bool ok = cholesky(ATA, nparam);   // in-place Cholesky in double
+    if (!ok) printf("  lstsq: ATA not PD (after ridge)\n");
+    solve_cholesky(ATA, nparam, ATb, xd);
+  }
   std::vector<float> x(nparam);
   for (int i = 0; i < nparam; i++) x[i] = (float)xd[i];
   fitness.model()->set_parameters(x.data());

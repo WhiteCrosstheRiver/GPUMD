@@ -440,17 +440,21 @@ static __global__ void find_force_uf3_2b(
       apply_mic(box, x12, y12, z12);
     }
     const float d2 = x12 * x12 + y12 * y12 + z12 * z12;
-    if (d2 >= rc2) continue;
+    if (d2 >= rc2 || d2 < 1e-12f) continue;   // d2~0: overlapped atoms -> inf/NaN
 
     const float rinv = rsqrtf(d2);
     const float r = d2 * rinv;
 
+    // Below the knot grid the cubic diverges in an arbitrary (possibly
+    // attractive) direction; extrapolate linearly from the first knot instead
+    // so a hard close approach always sees a continuous, finite potential.
     int m;
-    float u, inv_h;
+    float u, inv_h, ext = 0.0f;   // ext: (r - knots[0]) in u units, <= 0
     if (UNIFORM) {
-      const float t = (r - knot_min) * inv_knot_delta;
+      float t = (r - knot_min) * inv_knot_delta;
+      if (t < 0.0f) { ext = t; t = 0.0f; }
       m = (int)t;
-      if (m < 0) m = 0; else if (m > nint_minus_1) m = nint_minus_1;
+      if (m > nint_minus_1) m = nint_minus_1;
       u = t - (float)m;
       inv_h = inv_knot_delta;
     } else {
@@ -458,14 +462,16 @@ static __global__ void find_force_uf3_2b(
       const float lo = d_knots[m];
       inv_h = 1.0f / (d_knots[m + 1] - lo);
       u = (r - lo) * inv_h;
+      if (u < 0.0f) { ext = u; u = 0.0f; }         // r < knots[0] (m clamps to 0)
     }
 
     // Select the coefficient table for this ordered type pair (matches the
     // trainer's pair index = type1*num_types + type2).
     const int pair = type1 * num_types + g_type[n2];
     const float4 c = coeff_tab[pair * nint + m];
-    const float val = eval_cubic(c, u);
-    const float deriv = eval_cubic_deriv(c, u) * inv_h;
+    const float deriv_u = eval_cubic_deriv(c, u);
+    const float val = eval_cubic(c, u) + deriv_u * ext;
+    const float deriv = deriv_u * inv_h;
 
     // Force factor matches the trainer convention: each atom's force from a
     // pair is the full -dE/dr_i derivative — no 0.5 factor (the symmetric
@@ -478,9 +484,14 @@ static __global__ void find_force_uf3_2b(
     fx += f12x; fy += f12y; fz += f12z;
     pe += 0.5f * val;
 
-    sxx -= f12x * x12; sxy -= f12x * y12; sxz -= f12x * z12;
-    syx -= f12y * x12; syy -= f12y * y12; syz -= f12y * z12;
-    szx -= f12z * x12; szy -= f12z * y12; szz -= f12z * z12;
+    // Per-atom virial.  The symmetric neighbor list visits each physical pair
+    // twice (once from each end), so each visit carries half the pair virial —
+    // same convention as lj.cu / nep.cu.  Without the 0.5 the total virial (and
+    // pressure) is exactly doubled.
+    const float hx = 0.5f * f12x, hy = 0.5f * f12y, hz = 0.5f * f12z;
+    sxx -= hx * x12; sxy -= hx * y12; sxz -= hx * z12;
+    syx -= hy * x12; syy -= hy * y12; syz -= hy * z12;
+    szx -= hz * x12; szy -= hz * y12; szz -= hz * z12;
   }
 
   g_pe[n1] += (double)pe;
@@ -513,7 +524,7 @@ __device__ __forceinline__ void uf3_eval_triplet(
   float kmin_ik, float kd_ik, float ikd_ik,
   float kmin_jk, float kd_jk, float ikd_jk,
   float rc_ij, float rc_ik, float rc_jk,
-  float w, float& pe, float3& f1, float3& fa, float3& fb)
+  float w, float& pe, float3& f1, float3& fa, float3& fb, float vir[6])
 {
   float xij = pa.x - p1.x, yij = pa.y - p1.y, zij = pa.z - p1.z;
   float dij2 = xij*xij + yij*yij + zij*zij;
@@ -580,6 +591,98 @@ __device__ __forceinline__ void uf3_eval_triplet(
   f1.x += a12x + a13x;   f1.y += a12y + a13y;   f1.z += a12z + a13z;
   fa.x += a23x - a12x;   fa.y += a23y - a12y;   fa.z += a23z - a12z;
   fb.x += -a13x - a23x;  fb.y += -a13y - a23y;  fb.z += -a13z - a23z;
+
+  // Triplet virial W = -Σ_edges t_e (r_e ⊗ r_e); each edge term is symmetric
+  // (a ∥ r), so 6 components suffice.  The a-vectors already carry w.
+  vir[0] -= a12x * xij + a13x * xik + a23x * xjk;   // xx
+  vir[1] -= a12y * yij + a13y * yik + a23y * yjk;   // yy
+  vir[2] -= a12z * zij + a13z * zik + a23z * zjk;   // zz
+  vir[3] -= a12x * yij + a13x * yik + a23x * yjk;   // xy
+  vir[4] -= a12x * zij + a13x * zik + a23x * zjk;   // xz
+  vir[5] -= a12y * zij + a13y * zik + a23y * zjk;   // yz
+}
+
+// ---------------------------------------------------------------------------
+// Hoisted triplet evaluation (symmetric path).  The caller computes the ij leg
+// (vector, 1/r, B-spline values + derivatives, base coeff index p0) ONCE per
+// j-neighbour and reuses it across every k-neighbour, so the ij B-spline is no
+// longer recomputed O(NN) times per j.  Assumes r_ij < rc_ij already checked.
+// The jk vector is k-j = (k-i)-(j-i) = ik-ij, so the j-atom position is implicit.
+// ---------------------------------------------------------------------------
+__device__ __forceinline__ void uf3_eval_triplet_hoisted(
+  const float4 p1, const float4 pb,                       // centre i, k-atom
+  float xij, float yij, float zij, float inv_ij,          // precomputed i->j leg
+  const float b_ij[4], const float db_ij[4], int p0,
+  const float* __restrict__ tensor_t,
+  int nc_ij, int nc_ik, int nc_jk,
+  int nint_ik, int nint_jk,
+  float kmin_ik, float kd_ik, float ikd_ik,
+  float kmin_jk, float kd_jk, float ikd_jk,
+  float rc_ik, float rc_jk,
+  float& pe, float3& f1, float3& fa, float3& fb, float vir[6])
+{
+  float xik = pb.x - p1.x, yik = pb.y - p1.y, zik = pb.z - p1.z;
+  float dik2 = xik*xik + yik*yik + zik*zik;
+  if (dik2 >= rc_ik*rc_ik || dik2 < 1e-12f) return;
+  float xjk = xik - xij, yjk = yik - yij, zjk = zik - zij;   // k - j
+  float djk2 = xjk*xjk + yjk*yjk + zjk*zjk;
+  if (djk2 >= rc_jk*rc_jk || djk2 < 1e-12f) return;
+
+  const float inv_ik = rsqrtf(dik2), r_ik = dik2 * inv_ik;
+  const float inv_jk = rsqrtf(djk2), r_jk = djk2 * inv_jk;
+
+  int mk = (int)((r_ik - kmin_ik) * ikd_ik);
+  if (mk < 0) mk = 0; else if (mk >= nint_ik) mk = nint_ik - 1;
+  const float uk = (r_ik - kmin_ik - mk * kd_ik) * ikd_ik;
+  float b_ik[4], db_ik[4]; eval_bspline4(uk, b_ik); eval_bspline4_deriv(uk, ikd_ik, db_ik);
+  const int q0 = (mk >= 3) ? mk - 3 : 0;
+
+  int mj = (int)((r_jk - kmin_jk) * ikd_jk);
+  if (mj < 0) mj = 0; else if (mj >= nint_jk) mj = nint_jk - 1;
+  const float uj = (r_jk - kmin_jk - mj * kd_jk) * ikd_jk;
+  float b_jk[4], db_jk[4]; eval_bspline4(uj, b_jk); eval_bspline4_deriv(uj, ikd_jk, db_jk);
+  const int r0 = (mj >= 3) ? mj - 3 : 0;
+
+  float val = 0, dv12 = 0, dv13 = 0, dv23 = 0;
+  #pragma unroll 4
+  for (int dp = 0; dp < 4; dp++) {
+    const int p = p0 + dp; if (p >= nc_ij) break;
+    const float bp = b_ij[dp], dbp = db_ij[dp];
+    #pragma unroll 4
+    for (int dq = 0; dq < 4; dq++) {
+      const int q = q0 + dq; if (q >= nc_ik) break;
+      const float bpbq = bp * b_ik[dq], dbpbq = dbp * b_ik[dq], bpdbq = bp * db_ik[dq];
+      const float* __restrict__ Crow = &tensor_t[p + q * nc_ij + r0 * nc_ij * nc_ik];
+      float Rv = 0, Rd23 = 0;
+      #pragma unroll 4
+      for (int dr = 0; dr < 4; dr++) {
+        if (r0 + dr >= nc_jk) break;
+        const float C = __ldg(&Crow[dr * nc_ij * nc_ik]);
+        Rv += C * b_jk[dr]; Rd23 += C * db_jk[dr];
+      }
+      val  += bpbq  * Rv;
+      dv12 += dbpbq * Rv;
+      dv13 += bpdbq * Rv;
+      dv23 += bpbq  * Rd23;
+    }
+  }
+
+  pe += val;
+  const float t12 = dv12 * inv_ij, t13 = dv13 * inv_ik, t23 = dv23 * inv_jk;
+  const float a12x = t12*xij, a12y = t12*yij, a12z = t12*zij;
+  const float a13x = t13*xik, a13y = t13*yik, a13z = t13*zik;
+  const float a23x = t23*xjk, a23y = t23*yjk, a23z = t23*zjk;
+  f1.x += a12x + a13x;   f1.y += a12y + a13y;   f1.z += a12z + a13z;
+  fa.x += a23x - a12x;   fa.y += a23y - a12y;   fa.z += a23z - a12z;
+  fb.x += -a13x - a23x;  fb.y += -a13y - a23y;  fb.z += -a13z - a23z;
+
+  // Triplet virial W = -Σ_edges t_e (r_e ⊗ r_e), symmetric per edge.
+  vir[0] -= a12x * xij + a13x * xik + a23x * xjk;   // xx
+  vir[1] -= a12y * yij + a13y * yik + a23y * yjk;   // yy
+  vir[2] -= a12z * zij + a13z * zik + a23z * zjk;   // zz
+  vir[3] -= a12x * yij + a13x * yik + a23x * yjk;   // xy
+  vir[4] -= a12x * zij + a13x * zik + a23x * zjk;   // xz
+  vir[5] -= a12y * zij + a13y * zik + a23y * zjk;   // yz
 }
 
 // ---------------------------------------------------------------------------
@@ -590,13 +693,16 @@ __device__ __forceinline__ void uf3_eval_triplet(
 // smaller than 2*rc and a neighbour pair has several images within the cutoff —
 // reproducing the trainer's ghost-supercell distances exactly.
 //
-// dual_order: when the ij and ik legs use different knot grids / cutoffs the
-// triplet is NOT symmetric under j<->k, so the single-ordering result depends on
-// which neighbour the (index-sorted) loop places on each leg.  Averaging both
-// assignments — 0.5*[V(n2 on ij, n3 on ik) + V(n3 on ij, n2 on ik)] with the
-// matching tensor axes — restores neighbour-order independence.  When the grids
-// match (tensor already symmetrised on load) a single ordering is exact.
+// DUAL_ORDER (template): when the ij and ik legs use different knot grids /
+// cutoffs the triplet is NOT symmetric under j<->k, so the single-ordering
+// result depends on which neighbour the (index-sorted) loop places on each leg.
+// Averaging both assignments — 0.5*[V(n2 on ij, n3 on ik) + V(n3 on ij, n2 on
+// ik)] — restores order independence.  When the grids match (tensor symmetrised
+// on load) a single ordering is exact, and the fast hoisted path is used: the ij
+// leg is evaluated once per j and the whole k-loop is skipped when r_ij >= rc_ij
+// (e.g. neighbours that the rc_2b list keeps but are outside the 3B cutoff).
 // ---------------------------------------------------------------------------
+template <bool DUAL_ORDER>
 static __global__ void find_force_uf3_3b(
   const int N, const int N1, const int N2,
   const Box box,
@@ -614,9 +720,9 @@ static __global__ void find_force_uf3_3b(
   const int* __restrict__ g_type,                   // atom types [N]
   const float* __restrict__ g_e0,                   // 1-body offsets
   const float4* __restrict__ g_pos,
-  bool dual_order,
   double* g_pe,                                     // per-atom energy
-  double* g_fx, double* g_fy, double* g_fz)         // per-atom forces (atomicAdd)
+  double* g_fx, double* g_fy, double* g_fz,         // per-atom forces (atomicAdd)
+  double* g_virial)                                 // per-atom virial [9*N]
 {
   int n1 = blockIdx.x * blockDim.x + threadIdx.x + N1;
   if (n1 >= N2) return;
@@ -626,9 +732,11 @@ static __global__ void find_force_uf3_3b(
   const float4 pos1 = g_pos[n1];
   float pe = 0.0f;
   if (g_e0) pe += g_e0[type1];                     // 1-body energy per atom
-  const float w = dual_order ? 0.5f : 1.0f;
 
   float3 f1 = make_float3(0.0f, 0.0f, 0.0f);       // centre force, 1 atomicAdd/atom
+  // Whole-triplet virial assigned to the centre atom (total stress exact; the
+  // per-atom split is the per-centre decomposition, like the trainer's energy).
+  float vir[6] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
 
   for (int j1 = 0; j1 < NN; ++j1) {
     const int idx2 = n1 + N * j1;
@@ -637,6 +745,46 @@ static __global__ void find_force_uf3_3b(
     const float4 pos2 = neighbor_image(__ldg(&g_pos[n2]), pos1, box, g_shift, idx2);
     float3 f2 = make_float3(0.0f, 0.0f, 0.0f);      // n2 force, 1 atomicAdd/j
 
+    if (!DUAL_ORDER) {
+      // -------- fast symmetric path: hoist the ij leg, skip far j-neighbours --
+      const float xij = pos2.x - pos1.x, yij = pos2.y - pos1.y, zij = pos2.z - pos1.z;
+      const float dij2 = xij*xij + yij*yij + zij*zij;
+      if (dij2 < rc_ij*rc_ij && dij2 >= 1e-12f) {
+        const float inv_ij = rsqrtf(dij2), r_ij = dij2 * inv_ij;
+        int mi = (int)((r_ij - knot_min_ij) * inv_knot_delta_ij);
+        if (mi < 0) mi = 0; else if (mi >= nint_ij) mi = nint_ij - 1;
+        const float ui = (r_ij - knot_min_ij - mi * knot_delta_ij) * inv_knot_delta_ij;
+        float b_ij[4], db_ij[4];
+        eval_bspline4(ui, b_ij); eval_bspline4_deriv(ui, inv_knot_delta_ij, db_ij);
+        const int p0 = (mi >= 3) ? mi - 3 : 0;
+        const int base_t1t2 = (type1 * num_types + type2) * num_types;
+
+        for (int k1 = j1 + 1; k1 < NN; ++k1) {
+          const int idx3 = n1 + N * k1;
+          const int n3 = g_NL[idx3];
+          const int type3 = g_type[n3];
+          const float4 pos3 = neighbor_image(__ldg(&g_pos[n3]), pos1, box, g_shift, idx3);
+          float3 f3 = make_float3(0.0f, 0.0f, 0.0f);
+          const float* __restrict__ tA =
+            d_tensor + (size_t)(base_t1t2 + type3) * tensor_stride;
+          uf3_eval_triplet_hoisted(
+            pos1, pos3, xij, yij, zij, inv_ij, b_ij, db_ij, p0,
+            tA, nc_ij, nc_ik, nc_jk, nint_ik, nint_jk,
+            knot_min_ik, knot_delta_ik, inv_knot_delta_ik,
+            knot_min_jk, knot_delta_jk, inv_knot_delta_jk,
+            rc_ik, rc_jk, pe, f1, f2, f3, vir);
+          atomicAdd(&g_fx[n3], (double)f3.x);
+          atomicAdd(&g_fy[n3], (double)f3.y);
+          atomicAdd(&g_fz[n3], (double)f3.z);
+        }
+        atomicAdd(&g_fx[n2], (double)f2.x);
+        atomicAdd(&g_fy[n2], (double)f2.y);
+        atomicAdd(&g_fz[n2], (double)f2.z);
+      }
+      continue;   // far j (r_ij >= rc_ij): no 3B contribution, skip n2 atomics
+    }
+
+    // -------- dual-order path (asymmetric legacy models) --------------------
     for (int k1 = j1 + 1; k1 < NN; ++k1) {
       const int idx3 = n1 + N * k1;
       const int n3 = g_NL[idx3];
@@ -652,19 +800,17 @@ static __global__ void find_force_uf3_3b(
         knot_min_ij, knot_delta_ij, inv_knot_delta_ij,
         knot_min_ik, knot_delta_ik, inv_knot_delta_ik,
         knot_min_jk, knot_delta_jk, inv_knot_delta_jk,
-        rc_ij, rc_ik, rc_jk, w, pe, f1, f2, f3);
+        rc_ij, rc_ik, rc_jk, 0.5f, pe, f1, f2, f3, vir);
 
-      if (dual_order) {
-        // Assignment B: n3 on the ij leg, n2 on the ik leg → tensor[t1][t3][t2].
-        const float* __restrict__ tB =
-          d_tensor + (size_t)((type1 * num_types + type3) * num_types + type2) * tensor_stride;
-        uf3_eval_triplet(
-          pos1, pos3, pos2, tB, nc_ij, nc_ik, nc_jk, nint_ij, nint_ik, nint_jk,
-          knot_min_ij, knot_delta_ij, inv_knot_delta_ij,
-          knot_min_ik, knot_delta_ik, inv_knot_delta_ik,
-          knot_min_jk, knot_delta_jk, inv_knot_delta_jk,
-          rc_ij, rc_ik, rc_jk, w, pe, f1, f3, f2);
-      }
+      // Assignment B: n3 on the ij leg, n2 on the ik leg → tensor[t1][t3][t2].
+      const float* __restrict__ tB =
+        d_tensor + (size_t)((type1 * num_types + type3) * num_types + type2) * tensor_stride;
+      uf3_eval_triplet(
+        pos1, pos3, pos2, tB, nc_ij, nc_ik, nc_jk, nint_ij, nint_ik, nint_jk,
+        knot_min_ij, knot_delta_ij, inv_knot_delta_ij,
+        knot_min_ik, knot_delta_ik, inv_knot_delta_ik,
+        knot_min_jk, knot_delta_jk, inv_knot_delta_jk,
+        rc_ij, rc_ik, rc_jk, 0.5f, pe, f1, f3, f2, vir);
 
       atomicAdd(&g_fx[n3], (double)f3.x);
       atomicAdd(&g_fy[n3], (double)f3.y);
@@ -678,6 +824,17 @@ static __global__ void find_force_uf3_3b(
   atomicAdd(&g_fy[n1], (double)f1.y);
   atomicAdd(&g_fz[n1], (double)f1.z);
   g_pe[n1] += (double)pe;
+  // Layout matches the 2B kernel: xx yy zz xy xz yz yx zx zy.  Only this
+  // thread writes row n1, so plain += is safe.
+  g_virial[n1 + 0 * N] += (double)vir[0];
+  g_virial[n1 + 1 * N] += (double)vir[1];
+  g_virial[n1 + 2 * N] += (double)vir[2];
+  g_virial[n1 + 3 * N] += (double)vir[3];
+  g_virial[n1 + 4 * N] += (double)vir[4];
+  g_virial[n1 + 5 * N] += (double)vir[5];
+  g_virial[n1 + 6 * N] += (double)vir[3];
+  g_virial[n1 + 7 * N] += (double)vir[4];
+  g_virial[n1 + 8 * N] += (double)vir[5];
 }
 
 // ---------------------------------------------------------------------------
@@ -1121,26 +1278,32 @@ void UF3::compute(
 
   if (has_3b) {
     // Average both neighbour orderings unless the ij/ik grids match and the
-    // tensor was symmetrised on load (then a single ordering is already exact).
-    const bool dual_order = !sym_3b_;
-    find_force_uf3_3b<<<grid_size, BLOCK_SIZE>>>(
-      N, N1, N2, box,
-      three_body.d_tensor.data(),
-      num_types_, three_body.tensor_stride,
-      three_body.nc_ij, three_body.nc_ik, three_body.nc_jk,
-      three_body.nint_ij, three_body.nint_ik, three_body.nint_jk,
-      three_body.knot_min_ij, three_body.knot_delta_ij, three_body.inv_knot_delta_ij,
-      three_body.knot_min_ik, three_body.knot_delta_ik, three_body.inv_knot_delta_ik,
-      three_body.knot_min_jk, three_body.knot_delta_jk, three_body.inv_knot_delta_jk,
-      (float)three_body.rc_ij, (float)three_body.rc_ik, (float)three_body.rc_jk,
-      nl_NN, nl_NL, nl_shift,
-      type.data(), nullptr,        // 1-body already added by the 2B kernel (avoid double count)
-      d_pos_packed.data(),
-      dual_order,
-      potential_per_atom.data(),
-      force_per_atom.data(),
-      force_per_atom.data() + N,
-      force_per_atom.data() + N * 2);
+    // tensor was symmetrised on load (then a single ordering is already exact
+    // and the fast hoisted path runs).  DUAL_ORDER is a template parameter so
+    // the symmetric path carries no runtime branch / dead dual-order code.
+    auto launch_3b = [&](auto dual_tag) {
+      constexpr bool DUAL = decltype(dual_tag)::value;
+      find_force_uf3_3b<DUAL><<<grid_size, BLOCK_SIZE>>>(
+        N, N1, N2, box,
+        three_body.d_tensor.data(),
+        num_types_, three_body.tensor_stride,
+        three_body.nc_ij, three_body.nc_ik, three_body.nc_jk,
+        three_body.nint_ij, three_body.nint_ik, three_body.nint_jk,
+        three_body.knot_min_ij, three_body.knot_delta_ij, three_body.inv_knot_delta_ij,
+        three_body.knot_min_ik, three_body.knot_delta_ik, three_body.inv_knot_delta_ik,
+        three_body.knot_min_jk, three_body.knot_delta_jk, three_body.inv_knot_delta_jk,
+        (float)three_body.rc_ij, (float)three_body.rc_ik, (float)three_body.rc_jk,
+        nl_NN, nl_NL, nl_shift,
+        type.data(), nullptr,      // 1-body already added by the 2B kernel (avoid double count)
+        d_pos_packed.data(),
+        potential_per_atom.data(),
+        force_per_atom.data(),
+        force_per_atom.data() + N,
+        force_per_atom.data() + N * 2,
+        virial_per_atom.data());
+    };
+    if (sym_3b_) launch_3b(std::false_type{});   // symmetric → single ordering
+    else         launch_3b(std::true_type{});    // asymmetric → dual ordering
     GPU_CHECK_KERNEL
   }
 }
