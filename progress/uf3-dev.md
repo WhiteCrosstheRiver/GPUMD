@@ -488,69 +488,59 @@ NEP4 计算分布:
 
 ---
 
-# 第四轮：决策与立项 (电脑A, 2026-06-12)
 
-## 基于 V1-V3 数据的结论
+---
 
-1. **UF3 显式 triplet 路线封顶**: 3B kernel 90.6%, 辅助开销仅 2.1%,
-   工程优化已尽, 剩余瓶颈是 O(NN²) 公式本身; 且 UF3 速度随 Stage 波动
-   (z² 对温度/密度敏感) 而 NEP4 稳定 (O(z))
-   → **冻结 UF3, uf3-dev 作为稳定交付线, 不再做性能改动**
-2. **NEP4 融合收益 ~1.5-2×**: 88.6% 时间在三个力 kernel
-   (find_descriptor 47.7% + angular 23.3% + radial 17.6%),
-   对同一邻居表跑三遍循环 + Fp/sum_fxyz 走 global 往返 → M1 主攻方向
-3. **B-spline 换基降级为可选项**: radial 占比 ≤25%, 全消除也收益有限,
-   不作为大工程主轴
-4. **机器速度参照 (RTX 5090D, 66990 atoms)**: 2B-only 164.5M /
-   NEP4 25.4M / UF3 2B+3B 23.8M → 新模型现实目标 60-100M
+# P3: UF3 推理加速二期 (R7 立项, 2026-06-12, 电脑A)
 
-## 立项
+## 背景
 
-### M1 — NEP4 推理 kernel 融合 (分支 `nep-fusion-dev`, 自 uf3-dev 切出)
+P2 后 3B warp kernel 仍占 90.6% GPU 时间 (5090D nsys), 2B+3B vs 2B-only = 6.9×。
+R4 曾冻结 UF3 性能改动, R7 解冻。M1 教训 (见 progress/README.md R6) 适用:
+动刀前必须有微架构数据, 不做想当然的结构手术。
 
-- 内容: `find_descriptor` + `find_force_radial` + `find_partial_force_angular`
-  融合为单 kernel; 第二遍邻居循环重算基函数 (recompute over store),
-  不再把 Fp / sum_fxyz / 部分力写回 global 往返
-- **不改模型公式**, 现有 nep.txt (含 UNEP-v1) 直接兼容, 零训练风险
-- 验收标准:
-  1. 与原版 NEP 同模型同构型: |ΔE| < 1e-5 eV/atom, |ΔF| < 1e-4 eV/Å
-  2. 66990-atom 基准 ≥ 1.4× (≥ 35 M atom·step/s)
-  3. NVE 能量守恒不劣化 (drift 与原版同量级)
-- 电脑A产出第一版 patch 后, 下发逐条编译+验证清单
+## 候选方向 (按 ncu 数据二选一或组合)
 
-### M2 — 新势函数 (M1 验收后从 nep-fusion-dev 切出新分支, 命名待定)
+**P3-1 若 compute-bound: 分腿部分收缩 (per-j hoisting)**
+- 现状: 每 (j,k) 三元组独立做 64 系数张量积 ×(值+3导数)
+- 改法: 固定 ij 腿, 先把 c_lmn 与 B_l(r_ij)、B'_l(r_ij) 收缩成
+  A_mn / A'_mn (每 j 一次 2×64 FMA), 此后每个 k 只需
+  ~3×20 FMA 而非 ~4×64 — 理论 FLOP 降 2-3×
+- 代价: warp 内并行粒度要从"lane-per-三元组"改为"lane-per-j + 串行 k"
+  或 j-chunk 方案, 有负载不均风险; A_mn 放寄存器 (16+16 float, 编译期下标,
+  符合 M1 教训 L1)
+- 注意: P2 曾删除 uf3_eval_triplet_hoisted (per-triplet hoisting, 无跨 k 复用);
+  本方案是跨 k 复用, 不是同一个东西
 
-- 形式: pair spline + moment 角向描述符 + per-type 小 readout
-  (H≈16, 16 元素全部权重可进 shared memory)
-- 训练: 复用 main_uf3 基建 (lstsq/virial 行/extxyz), 两阶段拟合
-  (线性 pair lstsq 吃掉大头 → 残差小 NN + 现成 NEP4 蒸馏)
-- 验收门槛: 速度 ≥ 3× NEP4 (5090D 上 ≥ 75M);
-  SiGe 数据集 force RMSE 劣化 ≤ 15% vs NEP4
-- 未达门槛 → 回退讨论, 不硬上
-- 消融要求: 每项改动 (H、l_max、cross-radial、4-body 开关) 都要有
-  对 NEP4 原版的速度+精度对照数字
+**P3-2 若 memory/L2-bound: tensor 占用压缩**
+- SiGe 2 元素 tensor 70KB 已超 48KB smem 上限, 走 L2/__ldg (P2-2 记录);
+  多元素 (4 元素 64 个 type-triple) 更甚
+- 改法 a: 对称模型 canonical 存储 (t2≤t3) 省 ~25-50%
+- 改法 b: tensor 降 bf16/fp16 存储 + float 累加 (减半占用, 2 元素可回 smem);
+  需精度验证 (FD pressure + force RMSE 对照), 风险中等
 
-## 电脑B任务 (非阻塞)
+## 电脑B任务 (P3-V0, 按序)
 
-1. 创建分支:
-   `git checkout uf3-dev && git checkout -b nep-fusion-dev && git push -u origin nep-fusion-dev`
-2. Windows 宿主 NVIDIA Control Panel → Developer →
-   Allow access to GPU performance counters (解锁 WSL ncu, M1 调优需要)
+1. **解锁 H100 ncu** (阻塞项, 优先):
+   - 试 `sudo ncu --version` 及 sudo 跑一次 profile;
+   - 无 sudo 权限则请管理员写入
+     `/etc/modprobe.d/nvidia-profiling.conf`:
+     `options nvidia NVreg_RestrictProfilingToAdminUsers=0`, 重启生效
+2. **UF3 H100 基线**: full-test/uf3_md (66990 atoms SiGe) 在 H100 跑
+   4-stage 基准: 2B+3B (warp) 与 2B-only 的 atom·step/s
+   (5090D 数字不可比, H100 须自建基线)
+3. **ncu 剖析 `find_force_uf3_3b_warp`** (解锁后):
+   ```
+   ncu --set full -k "regex:uf3_3b_warp" --launch-count 3 -o uf3_p3_ncu <gpumd>
+   ```
+   回传: achieved occupancy / registers per thread / smem per block /
+   SM throughput % vs DRAM throughput % / L2 hit rate /
+   warp stall top-3 / smem bank conflict
+4. 顺带: NEP4 legacy 三 kernel 同样来一份 ncu (M2 寄存器预算标定, 非阻塞)
+5. 回传后 A 依据 SM% vs DRAM% 与 stall 分布在 P3-1 / P3-2 间拍板并出 patch
 
-## 当前环境 (电脑A, 2026-06-12)
+## 判定标准 (预先声明, 防事后解释)
 
-| 项 | 值 |
-|----|-----|
-| GPU | NVIDIA H100 PCIe, 81559 MiB, sm_90 |
-| Driver | 580.65.06 |
-| nvcc | V13.0.48 (CUDA 13.0) |
-| ncu | 2025.3.0.0 (可用) |
-| nsys | 2025.3.2 (可用) |
-| OS | Linux 4.18.0-553.6.1.el8.x86_64 |
-| git branch | uf3-dev |
-| git commit | 480e2d64 (round-4 decisions) |
-
-## 待电脑A (下一轮)
-
-- M1 融合 kernel 设计与第一版 patch
-- A5 (knot 约定) 继续挂起, 与 M2 一并决策
+- SM throughput > 60% 且 stall 以 Wait/Not Selected 为主 → compute-bound → P3-1
+- DRAM/L2 throughput 高 或 stall 以 Long Scoreboard/LG Throttle 为主 → P3-2 优先
+- occupancy < 25% 且 registers/thread > 128 → 先做寄存器瘦身再谈其他
