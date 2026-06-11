@@ -144,6 +144,31 @@
    3B vs 2B-only 的 12.5× 差距应显著缩小
 5. ncu: 看 3b_warp kernel 的 SM 占用率 / L2 命中率 / atomic 吞吐
 
+### 第二轮审查 + 进一步优化 (2026-06-11, 未编译/未测试)
+
+12. **审查修复** (`src/force/uf3.cu`)
+    - 修复: 多 GPU 空 partition (N2==N1) 时 warp kernel grid 会算成 0
+      (CUDA 非法 launch); 现 clamp 到 ≥1
+    - 确认: stress= 转换约定与 main_nep 一致 (virial = -stress·|det(box)|;
+      NEP 另除 num_atom 因为它存 per-atom, UF3 用帧总量与能量行一致)
+    - 确认: lambda_v 在 parameters.cu 已有解析入口
+    - 审查通过: filter/eval 距离表达式一致 (边界 float 舍入自洽);
+      dual 路径在过滤表上每腿仍独立查 cutoff; collect 覆盖全 N
+      (邻居力可落在 [N1,N2) 外); 3B-only 无 header 时 e0 索引安全 (type 全 0)
+
+13. **P2-2b: warp kernel 邻居 shared 缓存** (`find_force_uf3_3b_warp`)
+    - 每 warp 把中心原子的过滤后邻居预载进 shared memory:
+      image-resolved float4 位置 (type bit-cast 进 .w) + 原子索引
+    - O(NN²) 对循环每条腿从 shared 读 20B, 不再每三元组重走
+      NL→pos→type 的 global 依赖链 (~2×NN 次/邻居)
+    - 容量 `UF3_3B_NB_CACHE=64` (rc_3b~4-5Å 固体 NN~20-50);
+      NN>64 回退 global 直读 (warp 内分支一致, 无 divergence)
+    - 同步: 单次 `__syncthreads()` 覆盖 tensor staging + 全部 warp 缓存,
+      之前无任何 return (inactive warp 之后才退出) — 无死锁;
+      不用 __syncwarp/__shfl (HIP 兼容, GPUMD 代码库无先例)
+    - smem 布局: [float4 caches | int caches | tensor], float4 区在 16B
+      对齐基址; tensor 预算改为 48KB - cache (5KB), 单元素模型仍必中
+
 ### B4 待验证清单 (换回 GPU 机器后)
 
 1. 含 `virial=` 的 train.xyz: 确认 "GPU dataset: ... virial=N/M" 计数正确,

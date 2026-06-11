@@ -222,6 +222,18 @@ __device__ __forceinline__ int find_interval(float r, float knot_min, float inv_
 // When the table is larger the kernel falls back to L2-cached global reads.
 static constexpr int UF3_2B_SHARED_COEFFS = 1024;
 
+// 3B warp kernel launch geometry and per-warp neighbour cache capacity.
+// Each warp caches its centre atom's (filtered) neighbours — image-resolved
+// position with the type bit-cast into .w, plus the atom index — in shared
+// memory, so the O(NN^2) pair loop reads 20 bytes/leg from shared instead of
+// chasing NL -> pos -> type through L2 twice per triplet.  Atoms with more than
+// UF3_3B_NB_CACHE (filtered) neighbours fall back to direct global reads; with
+// rc_3b ~ 4-5 A a solid has ~20-50 such neighbours, so 64 covers real systems.
+static constexpr int UF3_3B_BLOCK = 128;
+static constexpr int UF3_3B_NB_CACHE = 64;
+static constexpr size_t UF3_3B_CACHE_BYTES =
+  (size_t)(UF3_3B_BLOCK / 32) * UF3_3B_NB_CACHE * (sizeof(float4) + sizeof(int));
+
 // Non-uniform: binary search
 __device__ __forceinline__ int find_interval_nu(float r, const float* knots, int nk)
 {
@@ -763,7 +775,10 @@ static __global__ void filter_neighbor_3b(
 //
 // The 3B coefficient tensor (all type triplets) is staged in dynamic shared
 // memory when it fits (smem_count > 0); each triplet evaluation gathers 16 rows
-// of 4 floats from it, which otherwise all goes through L2.
+// of 4 floats from it, which otherwise all goes through L2.  Each warp also
+// stages its centre atom's neighbours (image-resolved position + type + index)
+// in shared memory, so the pair loop avoids re-chasing NL -> pos -> type
+// through global memory ~NN times per neighbour.
 //
 // Accumulation is float throughout: per-lane registers for the centre atom's
 // energy/force/virial, and native float atomics into the per-atom scratch
@@ -791,25 +806,49 @@ static __global__ void find_force_uf3_3b_warp(
   const float4* __restrict__ g_pos,
   float* __restrict__ g_scratch)                    // [10*N] float accumulators
 {
-  // Cooperative tensor staging must involve every thread of the block, so it
-  // runs before any early-out.
-  extern __shared__ float s_tensor[];
+  // Dynamic shared memory: per-warp neighbour caches first (float4 region at
+  // the 16B-aligned base), then the staged 3B tensor.
+  const int warps_per_block = blockDim.x >> 5;
+  extern __shared__ unsigned char s_raw[];
+  float4* s_npos = (float4*)s_raw;                  // [warps_per_block * CACHE]
+  int* s_nidx = (int*)(s_npos + warps_per_block * UF3_3B_NB_CACHE);
+  float* s_tensor = (float*)(s_nidx + warps_per_block * UF3_3B_NB_CACHE);
+
   for (int i = threadIdx.x; i < smem_count; i += blockDim.x) {
     s_tensor[i] = d_tensor[i];
   }
-  if (smem_count > 0) {
-    __syncthreads();
-  }
-  const float* __restrict__ tensor = (smem_count > 0) ? s_tensor : d_tensor;
 
   const int lane = threadIdx.x & 31;
-  const int n1 = blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5) + N1;
-  if (n1 >= N2) return;
+  const int warp = threadIdx.x >> 5;
+  const int n1 = blockIdx.x * warps_per_block + warp + N1;
+  const bool active = (n1 < N2);
+  const int NN = active ? g_NN[n1] : 0;
+  const float4 pos1 = active ? g_pos[n1] : make_float4(0.0f, 0.0f, 0.0f, 0.0f);
 
-  const int NN = g_NN[n1];
-  if (NN < 2) return;                               // scratch row stays zero
+  // Stage this warp's neighbours: image-resolved position (type in .w) + index.
+  // Larger neighbourhoods fall back to direct global reads in the pair loop —
+  // a warp-uniform branch, so no divergence either way.
+  const bool use_cache = (NN >= 2) && (NN <= UF3_3B_NB_CACHE);
+  float4* __restrict__ w_npos = s_npos + warp * UF3_3B_NB_CACHE;
+  int* __restrict__ w_nidx = s_nidx + warp * UF3_3B_NB_CACHE;
+  if (use_cache) {
+    for (int i = lane; i < NN; i += 32) {
+      const int idx = n1 + N * i;
+      const int n2 = g_NL[idx];
+      float4 p = neighbor_image(__ldg(&g_pos[n2]), pos1, box, g_shift, idx);
+      p.w = __int_as_float(g_type[n2]);
+      w_npos[i] = p;
+      w_nidx[i] = n2;
+    }
+  }
+  // Single block-wide barrier covers both the tensor staging and every warp's
+  // neighbour cache.  All threads reach it (no returns above), then inactive
+  // warps bail out.
+  __syncthreads();
+  if (!active || NN < 2) return;                    // scratch row stays zero
+
+  const float* __restrict__ tensor = (smem_count > 0) ? s_tensor : d_tensor;
   const int type1 = g_type[n1];
-  const float4 pos1 = g_pos[n1];
 
   float pe = 0.0f;
   float3 f1 = make_float3(0.0f, 0.0f, 0.0f);
@@ -827,14 +866,21 @@ static __global__ void find_force_uf3_3b_warp(
     while (j < NN - 2 && (j + 1) * (2 * NN - 2 - j) / 2 <= t) ++j;
     const int k = t - j * (2 * NN - 1 - j) / 2 + j + 1;
 
-    const int idx2 = n1 + N * j;
-    const int idx3 = n1 + N * k;
-    const int n2 = g_NL[idx2];
-    const int n3 = g_NL[idx3];
-    const float4 pos2 = neighbor_image(__ldg(&g_pos[n2]), pos1, box, g_shift, idx2);
-    const float4 pos3 = neighbor_image(__ldg(&g_pos[n3]), pos1, box, g_shift, idx3);
-    const int type2 = g_type[n2];
-    const int type3 = g_type[n3];
+    float4 pos2, pos3;
+    int n2, n3, type2, type3;
+    if (use_cache) {
+      pos2 = w_npos[j]; type2 = __float_as_int(pos2.w); n2 = w_nidx[j];
+      pos3 = w_npos[k]; type3 = __float_as_int(pos3.w); n3 = w_nidx[k];
+    } else {
+      const int idx2 = n1 + N * j;
+      const int idx3 = n1 + N * k;
+      n2 = g_NL[idx2];
+      n3 = g_NL[idx3];
+      pos2 = neighbor_image(__ldg(&g_pos[n2]), pos1, box, g_shift, idx2);
+      pos3 = neighbor_image(__ldg(&g_pos[n3]), pos1, box, g_shift, idx3);
+      type2 = g_type[n2];
+      type3 = g_type[n3];
+    }
 
     float3 f2 = make_float3(0.0f, 0.0f, 0.0f);
     float3 f3 = make_float3(0.0f, 0.0f, 0.0f);
@@ -1249,12 +1295,14 @@ void UF3::initialize(const char* filename, const int number_of_atoms)
     three_body.d_tensor.copy_from_host(h_tensor_all.data());
 
     // Stage the whole tensor table in dynamic shared memory when it fits the
-    // portable 48 KB per-block limit (no opt-in attribute needed on any arch).
-    // Single-element models (~13³ floats ≈ 8.8 KB) always fit; larger tables
-    // fall back to L2-cached global reads.
+    // portable 48 KB per-block limit (no opt-in attribute needed on any arch)
+    // after the per-warp neighbour caches take their share.  Single-element
+    // models (~13³ floats ≈ 8.8 KB) always fit; larger tables fall back to
+    // L2-cached global reads.
     const size_t tensor_floats = h_tensor_all.size();
     smem_floats_3b_ =
-      (tensor_floats * sizeof(float) <= 48 * 1024) ? (int)tensor_floats : 0;
+      (tensor_floats * sizeof(float) + UF3_3B_CACHE_BYTES <= 48 * 1024)
+        ? (int)tensor_floats : 0;
   }
 
   // If no 1B line was present, initialize e0 to zeros.
@@ -1416,10 +1464,15 @@ void UF3::compute(
       // single j<k ordering is exact — run the warp-parallel kernel with float
       // scratch accumulation, then fold into the double-precision arrays.
       CHECK(cudaMemset(d_scratch_3b.data(), 0, (size_t)N * 10 * sizeof(float)));
-      const int warps_per_block = BLOCK_SIZE / 32;
-      const int grid_3b = (N2 - N1 + warps_per_block - 1) / warps_per_block;
-      const size_t smem_bytes = (size_t)smem_floats_3b_ * sizeof(float);
-      find_force_uf3_3b_warp<<<grid_3b, BLOCK_SIZE, smem_bytes>>>(
+      const int warps_per_block = UF3_3B_BLOCK / 32;
+      // max(1,..): an empty partition (N2==N1) must still launch a legal grid.
+      const int grid_3b =
+        (N2 - N1 + warps_per_block - 1) / warps_per_block > 0
+          ? (N2 - N1 + warps_per_block - 1) / warps_per_block : 1;
+      // Dynamic shared memory: per-warp neighbour caches + staged tensor.
+      const size_t smem_bytes =
+        UF3_3B_CACHE_BYTES + (size_t)smem_floats_3b_ * sizeof(float);
+      find_force_uf3_3b_warp<<<grid_3b, UF3_3B_BLOCK, smem_bytes>>>(
         N, N1, N2, box,
         three_body.d_tensor.data(),
         num_types_, three_body.tensor_stride, smem_floats_3b_,
