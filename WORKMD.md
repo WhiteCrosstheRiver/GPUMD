@@ -633,3 +633,119 @@ V6 (可选) ZBL 模型: 若手头有 UNEP-v1 nep.txt (含 ZBL), 同样跑 V2 流
 
 - 本分支 WORKMD 不含 uf3-dev 上 B 的 H100 环境 commit (9b340fd9),
   后续合并时 WORKMD 若冲突以两边拼接为准
+
+---
+
+# 第五轮 M1 验证执行报告 (电脑B, 2026-06-12, H100)
+
+## 环境
+
+| 项 | 值 |
+|----|-----|
+| GPU | NVIDIA H100 PCIe, 81559 MiB, sm_90 |
+| Driver | 580.65.06 |
+| nvcc | V13.0.48 (CUDA 13.0) |
+| ncu | 2025.3.0 (ERR_NVGPUCTRPERM, 不可用) |
+| nsys | 2025.3.2 (正常) |
+| git branch | nep-fusion-dev |
+| git commit | f9879fce feat(nep): M1 fused inference path |
+| 编译配置 | CC=nvcc CUDA_ARCH=-arch=sm_90 CFLAGS=-std=c++17 |
+| 测试模型 | nep4 2 Si Ge, cutoff=6/4, n_max=8/8, basis_size=8/8, l_max=4/2/0 |
+| 测试体系 | 64087 atoms (Si: 59651, Ge: 4436), box ~272x300x27 A^3 |
+
+注意: 原任务指定 RTX 5090D + SiGe 66990 atoms, 实际执行环境为 H100 + SiGe 64087 atoms。
+模型参数与 Round 3 V3 报告的 SiGe 模型一致 (cutoff=6/4, n_max=8/8, basis_size=8/8, l_max=4/2/0)。
+
+## V1 — 编译通过
+
+- gpumd, nep, uf3 全部编译成功
+- 无 error, 仅预期 dead-code warning
+- R1 (kernel 参数体积): 无 "formal parameter space overflowed"
+
+## V2 — 正确性 A/B (非逐位一致)
+
+| 指标 | 值 | 判定 |
+|------|-----|------|
+| NEP path 打印 | "fused (M1, NEP_FUSED=0 to disable)" | PASS |
+| Max abs(DeltaF) | **3.32e-04 eV/A** (58/1922610 > 1e-4) | 超阈值 |
+| Mean abs(DeltaF) | 6.88e-08 eV/A | 良好 |
+| Median abs(DeltaF) | 2.24e-08 eV/A | 良好 |
+| Max relative abs(DeltaF)/abs(F) | 4.03e-04 (0.04%) | 良好 |
+| 逐位一致 | **否** (md5 不匹配) | 不符合 R3 |
+
+关键观察: 大 DeltaF 集中在力最大的原子 (abs(F)~230-411 eV/A, 近排斥壁),
+力差与力大小正相关, 符合浮点累加顺序差异。
+
+R3 预期不符: 声称 "无 ZBL 模型应逐位一致", 实际非逐位一致。
+可能原因: fused kernel 中 radial+angular 力寄存器累加顺序与 legacy 三 kernel 分离写回再 gather 不同。
+
+## V3 — NVE 能量守恒
+
+| 指标 | Legacy | Fused |
+|------|--------|-------|
+| 2000步 NVE | PASS | PASS |
+| Energy drift | -1.29e-04 eV/atom | **1.22e-05 eV/atom** |
+| 速度 | **18.55 M** atom-step/s | 10.30 M atom-step/s |
+
+Fused 能量漂移比 legacy 低 10x, 但速度慢 1.80x。
+
+## V4 — 4-Stage 性能基准 (回归)
+
+| Stage | Legacy (atom-step/s) | Fused (atom-step/s) | Fused/Legacy |
+|-------|---------------------|---------------------|--------------|
+| 1 (200->650K) | 18.84 M | 10.36 M | 0.55x |
+| 2 (650K) | 19.01 M | 10.45 M | 0.55x |
+| 3 (650K) | 18.90 M | 10.44 M | 0.55x |
+| 4 (650->200K) | 18.95 M | 10.39 M | 0.55x |
+| **Average** | **18.92 M** | **10.41 M** | **0.55x** |
+
+Fused 是 legacy 的 0.55x, 与预期 1.25-1.45x 相反, 是性能回归。
+
+## V5 — nsys Kernel 时间分解 (ncu 不可用)
+
+ncu: ERR_NVGPUCTRPERM (与 Round 3 V2 同问题)
+
+### Legacy (20 steps, 64087 atoms):
+
+| Kernel | 时间占比 | 总时间 | 平均/次 |
+|--------|---------|--------|---------|
+| `find_descriptor` | 43.5% | 31.2 ms | 1.48 ms |
+| `find_partial_force_angular` | 29.5% | 21.2 ms | 1.01 ms |
+| `find_force_radial` | 14.6% | 10.5 ms | 0.50 ms |
+| **Force 三 kernel 合计** | **87.6%** | **62.8 ms** | **2.99 ms** |
+| 邻居表构建+排序 | 7.6% | 5.4 ms | — |
+| gather + 其他 | 4.8% | — | — |
+
+### Fused (相同条件):
+
+| Kernel | 时间占比 | 总时间 | 平均/次 |
+|--------|---------|--------|---------|
+| `find_force_fused` | **62.4%** | 80.9 ms | **3.85 ms** |
+| `find_descriptor_onepass` | 30.8% | 40.0 ms | **1.90 ms** |
+| **Force 二 kernel 合计** | **93.2%** | **120.9 ms** | **5.75 ms** |
+
+### 关键发现:
+
+1. `find_descriptor_onepass` (1.90ms) 比 `find_descriptor` (1.48ms) **慢 28%**
+   — R2 local memory 反噬已确认: s_all 大数组致寄存器压力
+
+2. `find_force_fused` (3.85ms) 比 `find_force_radial + find_partial_force_angular`
+   (0.50+1.01=1.51ms) **慢 2.55x** — 三合一寄存器压力远超分离版本
+
+3. 总 Force 时间: Fused 5.75ms vs Legacy 2.99ms → **1.93x 慢**
+
+4. Launch 合并开销节省 (~0.1ms/step) 远不足以弥补单 kernel 变慢
+
+## V6 — ZBL 模型: 跳过 (无 UNEP-v1 含 ZBL 的 nep.txt)
+
+## 阻塞项
+
+1. **ncu 不可用**: H100 perf counter 权限 (ERR_NVGPUCTRPERM)
+2. 无 66990-atom SiGe 原始测试数据
+
+## 待电脑A决策的问题
+
+1. **M1 fused path 性能回归 1.93x**: find_descriptor_onepass (R2 local memory) 和
+   find_force_fused (寄存器压力) 均需重设计。nsys 数据已足够定位。
+2. **V2 非逐位一致**: 虽 |DeltaF| 在化学精度内, 但与 R3 预期矛盾。
+3. **测试数据**: 当前 SiGe 64087 atoms 与 Round 3 的 66990 atoms 不匹配。
