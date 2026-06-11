@@ -101,6 +101,24 @@ private:
   GPU_Vector<int> d_NL_shift;
   int neighbor_MN_ = 0;   // per-atom neighbour-list stride for the arrays above
 
+  // Compact 3-body neighbour list, filtered from the active (2B/global-rc) list
+  // down to max(rc_ij, rc_ik) each step.  With rc_2b=5.5 vs rc_3b=4.25 this cuts
+  // candidate triplets ~(rc2/rc3)^6 in the pair loop, the dominant 3B cost.
+  // Only allocated when the 3B cutoff is actually smaller than the global rc.
+  GPU_Vector<int> d_NN_3b;
+  GPU_Vector<int> d_NL_3b;
+  GPU_Vector<int> d_NL_shift_3b;
+  bool use_3b_list_ = false;
+
+  // Per-atom float accumulators for the warp-parallel 3B kernel:
+  // [0,3N) fx fy fz, [3N,4N) pe, [4N,10N) virial (xx yy zz xy xz yz).
+  // Collected into the double-precision global arrays once per step.
+  GPU_Vector<float> d_scratch_3b;
+
+  // Number of floats of the 3B tensor staged in dynamic shared memory by the
+  // warp kernel (0 = table too large, read through L2/__ldg instead).
+  int smem_floats_3b_ = 0;
+
   // Average 3B coefficients with their neighbour-swap partner so MD energies
   // are independent of neighbour-list ordering (mirrors main_uf3::project_3b_symmetric).
   void project_3b_symmetric(std::vector<float>& tensor) const;

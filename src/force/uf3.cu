@@ -603,107 +603,21 @@ __device__ __forceinline__ void uf3_eval_triplet(
 }
 
 // ---------------------------------------------------------------------------
-// Hoisted triplet evaluation (symmetric path).  The caller computes the ij leg
-// (vector, 1/r, B-spline values + derivatives, base coeff index p0) ONCE per
-// j-neighbour and reuses it across every k-neighbour, so the ij B-spline is no
-// longer recomputed O(NN) times per j.  Assumes r_ij < rc_ij already checked.
-// The jk vector is k-j = (k-i)-(j-i) = ik-ij, so the j-atom position is implicit.
-// ---------------------------------------------------------------------------
-__device__ __forceinline__ void uf3_eval_triplet_hoisted(
-  const float4 p1, const float4 pb,                       // centre i, k-atom
-  float xij, float yij, float zij, float inv_ij,          // precomputed i->j leg
-  const float b_ij[4], const float db_ij[4], int p0,
-  const float* __restrict__ tensor_t,
-  int nc_ij, int nc_ik, int nc_jk,
-  int nint_ik, int nint_jk,
-  float kmin_ik, float kd_ik, float ikd_ik,
-  float kmin_jk, float kd_jk, float ikd_jk,
-  float rc_ik, float rc_jk,
-  float& pe, float3& f1, float3& fa, float3& fb, float vir[6])
-{
-  float xik = pb.x - p1.x, yik = pb.y - p1.y, zik = pb.z - p1.z;
-  float dik2 = xik*xik + yik*yik + zik*zik;
-  if (dik2 >= rc_ik*rc_ik || dik2 < 1e-12f) return;
-  float xjk = xik - xij, yjk = yik - yij, zjk = zik - zij;   // k - j
-  float djk2 = xjk*xjk + yjk*yjk + zjk*zjk;
-  if (djk2 >= rc_jk*rc_jk || djk2 < 1e-12f) return;
-
-  const float inv_ik = rsqrtf(dik2), r_ik = dik2 * inv_ik;
-  const float inv_jk = rsqrtf(djk2), r_jk = djk2 * inv_jk;
-
-  int mk = (int)((r_ik - kmin_ik) * ikd_ik);
-  if (mk < 0) mk = 0; else if (mk >= nint_ik) mk = nint_ik - 1;
-  const float uk = (r_ik - kmin_ik - mk * kd_ik) * ikd_ik;
-  float b_ik[4], db_ik[4]; eval_bspline4(uk, b_ik); eval_bspline4_deriv(uk, ikd_ik, db_ik);
-  const int q0 = (mk >= 3) ? mk - 3 : 0;
-
-  int mj = (int)((r_jk - kmin_jk) * ikd_jk);
-  if (mj < 0) mj = 0; else if (mj >= nint_jk) mj = nint_jk - 1;
-  const float uj = (r_jk - kmin_jk - mj * kd_jk) * ikd_jk;
-  float b_jk[4], db_jk[4]; eval_bspline4(uj, b_jk); eval_bspline4_deriv(uj, ikd_jk, db_jk);
-  const int r0 = (mj >= 3) ? mj - 3 : 0;
-
-  float val = 0, dv12 = 0, dv13 = 0, dv23 = 0;
-  #pragma unroll 4
-  for (int dp = 0; dp < 4; dp++) {
-    const int p = p0 + dp; if (p >= nc_ij) break;
-    const float bp = b_ij[dp], dbp = db_ij[dp];
-    #pragma unroll 4
-    for (int dq = 0; dq < 4; dq++) {
-      const int q = q0 + dq; if (q >= nc_ik) break;
-      const float bpbq = bp * b_ik[dq], dbpbq = dbp * b_ik[dq], bpdbq = bp * db_ik[dq];
-      const float* __restrict__ Crow = &tensor_t[p + q * nc_ij + r0 * nc_ij * nc_ik];
-      float Rv = 0, Rd23 = 0;
-      #pragma unroll 4
-      for (int dr = 0; dr < 4; dr++) {
-        if (r0 + dr >= nc_jk) break;
-        const float C = __ldg(&Crow[dr * nc_ij * nc_ik]);
-        Rv += C * b_jk[dr]; Rd23 += C * db_jk[dr];
-      }
-      val  += bpbq  * Rv;
-      dv12 += dbpbq * Rv;
-      dv13 += bpdbq * Rv;
-      dv23 += bpbq  * Rd23;
-    }
-  }
-
-  pe += val;
-  const float t12 = dv12 * inv_ij, t13 = dv13 * inv_ik, t23 = dv23 * inv_jk;
-  const float a12x = t12*xij, a12y = t12*yij, a12z = t12*zij;
-  const float a13x = t13*xik, a13y = t13*yik, a13z = t13*zik;
-  const float a23x = t23*xjk, a23y = t23*yjk, a23z = t23*zjk;
-  f1.x += a12x + a13x;   f1.y += a12y + a13y;   f1.z += a12z + a13z;
-  fa.x += a23x - a12x;   fa.y += a23y - a12y;   fa.z += a23z - a12z;
-  fb.x += -a13x - a23x;  fb.y += -a13y - a23y;  fb.z += -a13z - a23z;
-
-  // Triplet virial W = -Σ_edges t_e (r_e ⊗ r_e), symmetric per edge.
-  vir[0] -= a12x * xij + a13x * xik + a23x * xjk;   // xx
-  vir[1] -= a12y * yij + a13y * yik + a23y * yjk;   // yy
-  vir[2] -= a12z * zij + a13z * zik + a23z * zjk;   // zz
-  vir[3] -= a12x * yij + a13x * yik + a23x * yjk;   // xy
-  vir[4] -= a12x * zij + a13x * zik + a23x * zjk;   // xz
-  vir[5] -= a12y * zij + a13y * zik + a23y * zjk;   // yz
-}
-
-// ---------------------------------------------------------------------------
-// 3-body kernel — image-shift aware and (optionally) neighbour-order symmetric.
+// 3-body dual-order kernel (legacy/asymmetric models, thread-per-atom).
 //
 // Periodic images come from g_shift (explicit lattice shift; nullptr -> minimum
 // image), so the (r12,r13,r23) triangle is self-consistent even when the cell is
 // smaller than 2*rc and a neighbour pair has several images within the cutoff —
 // reproducing the trainer's ghost-supercell distances exactly.
 //
-// DUAL_ORDER (template): when the ij and ik legs use different knot grids /
-// cutoffs the triplet is NOT symmetric under j<->k, so the single-ordering
-// result depends on which neighbour the (index-sorted) loop places on each leg.
-// Averaging both assignments — 0.5*[V(n2 on ij, n3 on ik) + V(n3 on ij, n2 on
-// ik)] — restores order independence.  When the grids match (tensor symmetrised
-// on load) a single ordering is exact, and the fast hoisted path is used: the ij
-// leg is evaluated once per j and the whole k-loop is skipped when r_ij >= rc_ij
-// (e.g. neighbours that the rc_2b list keeps but are outside the 3B cutoff).
+// When the ij and ik legs use different knot grids / cutoffs the triplet is NOT
+// symmetric under j<->k, so the single-ordering result depends on which
+// neighbour the (index-sorted) loop places on each leg.  Averaging both
+// assignments — 0.5*[V(n2 on ij, n3 on ik) + V(n3 on ij, n2 on ik)] — restores
+// order independence.  Models whose grids match (the common case; tensor
+// symmetrised on load) take the warp-parallel kernel below instead.
 // ---------------------------------------------------------------------------
-template <bool DUAL_ORDER>
-static __global__ void find_force_uf3_3b(
+static __global__ void find_force_uf3_3b_dual(
   const int N, const int N1, const int N2,
   const Box box,
   const float* __restrict__ d_tensor,               // [num_trips * tensor_stride]
@@ -745,46 +659,6 @@ static __global__ void find_force_uf3_3b(
     const float4 pos2 = neighbor_image(__ldg(&g_pos[n2]), pos1, box, g_shift, idx2);
     float3 f2 = make_float3(0.0f, 0.0f, 0.0f);      // n2 force, 1 atomicAdd/j
 
-    if (!DUAL_ORDER) {
-      // -------- fast symmetric path: hoist the ij leg, skip far j-neighbours --
-      const float xij = pos2.x - pos1.x, yij = pos2.y - pos1.y, zij = pos2.z - pos1.z;
-      const float dij2 = xij*xij + yij*yij + zij*zij;
-      if (dij2 < rc_ij*rc_ij && dij2 >= 1e-12f) {
-        const float inv_ij = rsqrtf(dij2), r_ij = dij2 * inv_ij;
-        int mi = (int)((r_ij - knot_min_ij) * inv_knot_delta_ij);
-        if (mi < 0) mi = 0; else if (mi >= nint_ij) mi = nint_ij - 1;
-        const float ui = (r_ij - knot_min_ij - mi * knot_delta_ij) * inv_knot_delta_ij;
-        float b_ij[4], db_ij[4];
-        eval_bspline4(ui, b_ij); eval_bspline4_deriv(ui, inv_knot_delta_ij, db_ij);
-        const int p0 = (mi >= 3) ? mi - 3 : 0;
-        const int base_t1t2 = (type1 * num_types + type2) * num_types;
-
-        for (int k1 = j1 + 1; k1 < NN; ++k1) {
-          const int idx3 = n1 + N * k1;
-          const int n3 = g_NL[idx3];
-          const int type3 = g_type[n3];
-          const float4 pos3 = neighbor_image(__ldg(&g_pos[n3]), pos1, box, g_shift, idx3);
-          float3 f3 = make_float3(0.0f, 0.0f, 0.0f);
-          const float* __restrict__ tA =
-            d_tensor + (size_t)(base_t1t2 + type3) * tensor_stride;
-          uf3_eval_triplet_hoisted(
-            pos1, pos3, xij, yij, zij, inv_ij, b_ij, db_ij, p0,
-            tA, nc_ij, nc_ik, nc_jk, nint_ik, nint_jk,
-            knot_min_ik, knot_delta_ik, inv_knot_delta_ik,
-            knot_min_jk, knot_delta_jk, inv_knot_delta_jk,
-            rc_ik, rc_jk, pe, f1, f2, f3, vir);
-          atomicAdd(&g_fx[n3], (double)f3.x);
-          atomicAdd(&g_fy[n3], (double)f3.y);
-          atomicAdd(&g_fz[n3], (double)f3.z);
-        }
-        atomicAdd(&g_fx[n2], (double)f2.x);
-        atomicAdd(&g_fy[n2], (double)f2.y);
-        atomicAdd(&g_fz[n2], (double)f2.z);
-      }
-      continue;   // far j (r_ij >= rc_ij): no 3B contribution, skip n2 atomics
-    }
-
-    // -------- dual-order path (asymmetric legacy models) --------------------
     for (int k1 = j1 + 1; k1 < NN; ++k1) {
       const int idx3 = n1 + N * k1;
       const int n3 = g_NL[idx3];
@@ -835,6 +709,210 @@ static __global__ void find_force_uf3_3b(
   g_virial[n1 + 6 * N] += (double)vir[3];
   g_virial[n1 + 7 * N] += (double)vir[4];
   g_virial[n1 + 8 * N] += (double)vir[5];
+}
+
+// ---------------------------------------------------------------------------
+// Compact 3-body neighbour list: copy the entries of the active neighbour list
+// (built with the global rc, usually rc_2b > rc_3b) that lie within rc_keep =
+// max(rc_ij, rc_ik).  The jk leg connects two neighbours and never constrains
+// the centre's list.  Candidate pair count in the 3B kernel scales with NN², so
+// rc_2b=5.5 vs rc_3b=4.25 cuts the triplet loop ~(5.5/4.25)^6 ≈ 4.7×.
+// The image-shift code of each kept entry is preserved (g_shift_out is non-null
+// exactly when g_shift_in is, so the MIC-vs-explicit-shift convention of the
+// source list carries over unchanged).
+// ---------------------------------------------------------------------------
+static __global__ void filter_neighbor_3b(
+  const int N, const float rc2_keep, const Box box,
+  const int* __restrict__ g_NN_in,
+  const int* __restrict__ g_NL_in,
+  const int* __restrict__ g_shift_in,               // nullptr -> MIC list
+  const float4* __restrict__ g_pos,
+  int* __restrict__ g_NN_out,
+  int* __restrict__ g_NL_out,
+  int* __restrict__ g_shift_out)                    // nullptr when g_shift_in is
+{
+  const int n1 = blockIdx.x * blockDim.x + threadIdx.x;
+  if (n1 >= N) return;
+  const float4 pos1 = g_pos[n1];
+  const int NN = g_NN_in[n1];
+  int count = 0;
+  for (int i = 0; i < NN; ++i) {
+    const int idx = n1 + N * i;
+    const int n2 = g_NL_in[idx];
+    const float4 pos2 = neighbor_image(__ldg(&g_pos[n2]), pos1, box, g_shift_in, idx);
+    const float dx = pos2.x - pos1.x, dy = pos2.y - pos1.y, dz = pos2.z - pos1.z;
+    const float d2 = dx * dx + dy * dy + dz * dz;
+    if (d2 < rc2_keep && d2 > 1e-12f) {
+      const int out = n1 + N * count;
+      g_NL_out[out] = n2;
+      if (g_shift_out) g_shift_out[out] = g_shift_in[idx];
+      ++count;
+    }
+  }
+  g_NN_out[n1] = count;
+}
+
+// ---------------------------------------------------------------------------
+// 3-body warp-parallel kernel (symmetric models — the hot path).
+//
+// Parallel granularity: one warp per centre atom.  The triangular (j,k) pair
+// loop (k > j) is flattened into a single index t ∈ [0, NN(NN-1)/2) and strided
+// across the 32 lanes, so all lanes of a warp work on the same atom's pair list
+// — no warp divergence from per-atom NN variation, and ~32× more parallelism
+// than thread-per-atom for the same grid of atoms.
+//
+// The 3B coefficient tensor (all type triplets) is staged in dynamic shared
+// memory when it fits (smem_count > 0); each triplet evaluation gathers 16 rows
+// of 4 floats from it, which otherwise all goes through L2.
+//
+// Accumulation is float throughout: per-lane registers for the centre atom's
+// energy/force/virial, and native float atomics into the per-atom scratch
+// buffer for neighbour forces (double atomics serialize far harder).  The
+// scratch is folded into the double-precision global arrays once per step by
+// uf3_3b_collect_scratch.  Scratch layout: [0,3N) fx fy fz, [3N,4N) pe,
+// [4N,10N) virial xx yy zz xy xz yz.
+// ---------------------------------------------------------------------------
+static __global__ void find_force_uf3_3b_warp(
+  const int N, const int N1, const int N2,
+  const Box box,
+  const float* __restrict__ d_tensor,               // [num_trips * tensor_stride]
+  int num_types, int tensor_stride,
+  int smem_count,                                   // floats staged in shared (0 = global reads)
+  int nc_ij, int nc_ik, int nc_jk,
+  int nint_ij, int nint_ik, int nint_jk,
+  float knot_min_ij, float knot_delta_ij, float inv_knot_delta_ij,
+  float knot_min_ik, float knot_delta_ik, float inv_knot_delta_ik,
+  float knot_min_jk, float knot_delta_jk, float inv_knot_delta_jk,
+  float rc_ij, float rc_ik, float rc_jk,
+  const int* __restrict__ g_NN,
+  const int* __restrict__ g_NL,
+  const int* __restrict__ g_shift,                  // per-neighbour image shift (nullptr -> MIC)
+  const int* __restrict__ g_type,
+  const float4* __restrict__ g_pos,
+  float* __restrict__ g_scratch)                    // [10*N] float accumulators
+{
+  // Cooperative tensor staging must involve every thread of the block, so it
+  // runs before any early-out.
+  extern __shared__ float s_tensor[];
+  for (int i = threadIdx.x; i < smem_count; i += blockDim.x) {
+    s_tensor[i] = d_tensor[i];
+  }
+  if (smem_count > 0) {
+    __syncthreads();
+  }
+  const float* __restrict__ tensor = (smem_count > 0) ? s_tensor : d_tensor;
+
+  const int lane = threadIdx.x & 31;
+  const int n1 = blockIdx.x * (blockDim.x >> 5) + (threadIdx.x >> 5) + N1;
+  if (n1 >= N2) return;
+
+  const int NN = g_NN[n1];
+  if (NN < 2) return;                               // scratch row stays zero
+  const int type1 = g_type[n1];
+  const float4 pos1 = g_pos[n1];
+
+  float pe = 0.0f;
+  float3 f1 = make_float3(0.0f, 0.0f, 0.0f);
+  float vir[6] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+
+  // Unrank the flattened pair index: pairs with first index < j number
+  // C(j) = j*(2*NN-1-j)/2 (one of the factors is always even — exact in int).
+  // The float sqrt gives j up to ±1; the two correction loops pin it down.
+  const int T = (NN * (NN - 1)) >> 1;
+  const float a = (float)(2 * NN - 1);
+  for (int t = lane; t < T; t += 32) {
+    int j = (int)((a - sqrtf(a * a - 8.0f * (float)t)) * 0.5f);
+    if (j < 0) j = 0; else if (j > NN - 2) j = NN - 2;
+    while (j > 0 && j * (2 * NN - 1 - j) / 2 > t) --j;
+    while (j < NN - 2 && (j + 1) * (2 * NN - 2 - j) / 2 <= t) ++j;
+    const int k = t - j * (2 * NN - 1 - j) / 2 + j + 1;
+
+    const int idx2 = n1 + N * j;
+    const int idx3 = n1 + N * k;
+    const int n2 = g_NL[idx2];
+    const int n3 = g_NL[idx3];
+    const float4 pos2 = neighbor_image(__ldg(&g_pos[n2]), pos1, box, g_shift, idx2);
+    const float4 pos3 = neighbor_image(__ldg(&g_pos[n3]), pos1, box, g_shift, idx3);
+    const int type2 = g_type[n2];
+    const int type3 = g_type[n3];
+
+    float3 f2 = make_float3(0.0f, 0.0f, 0.0f);
+    float3 f3 = make_float3(0.0f, 0.0f, 0.0f);
+    const float* __restrict__ tT =
+      tensor + (size_t)((type1 * num_types + type2) * num_types + type3) * tensor_stride;
+    uf3_eval_triplet(
+      pos1, pos2, pos3, tT, nc_ij, nc_ik, nc_jk, nint_ij, nint_ik, nint_jk,
+      knot_min_ij, knot_delta_ij, inv_knot_delta_ij,
+      knot_min_ik, knot_delta_ik, inv_knot_delta_ik,
+      knot_min_jk, knot_delta_jk, inv_knot_delta_jk,
+      rc_ij, rc_ik, rc_jk, 1.0f, pe, f1, f2, f3, vir);
+
+    // A triplet outside any leg's cutoff leaves f2/f3 exactly zero — skip the
+    // atomics for it (most candidate pairs fail the jk-leg check).
+    if (f2.x != 0.0f || f2.y != 0.0f || f2.z != 0.0f) {
+      atomicAdd(&g_scratch[n2], f2.x);
+      atomicAdd(&g_scratch[n2 + N], f2.y);
+      atomicAdd(&g_scratch[n2 + 2 * N], f2.z);
+    }
+    if (f3.x != 0.0f || f3.y != 0.0f || f3.z != 0.0f) {
+      atomicAdd(&g_scratch[n3], f3.x);
+      atomicAdd(&g_scratch[n3 + N], f3.y);
+      atomicAdd(&g_scratch[n3 + 2 * N], f3.z);
+    }
+  }
+
+  // Fold the per-lane partials for the centre atom.  Plain float atomics keep
+  // this portable (no warp shuffles, which GPUMD avoids for HIP builds); 10
+  // atomics per lane per atom is negligible next to the triplet loop.
+  atomicAdd(&g_scratch[n1], f1.x);
+  atomicAdd(&g_scratch[n1 + N], f1.y);
+  atomicAdd(&g_scratch[n1 + 2 * N], f1.z);
+  atomicAdd(&g_scratch[n1 + 3 * N], pe);
+  for (int c = 0; c < 6; ++c) {
+    atomicAdd(&g_scratch[n1 + (4 + c) * N], vir[c]);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Fold the 3B float scratch into the double-precision global arrays.  Runs over
+// all N atoms (neighbour forces can land outside [N1,N2)); the 1-body offsets
+// belong to the centre atoms only, and are added here when no 2B kernel ran.
+// Virial layout matches the 2B kernel: xx yy zz xy xz yz yx zx zy (symmetric).
+// ---------------------------------------------------------------------------
+static __global__ void uf3_3b_collect_scratch(
+  const int N, const int N1, const int N2,
+  const float* __restrict__ g_scratch,
+  const int* __restrict__ g_type,
+  const float* __restrict__ g_e0,                   // nullptr if 2B already added it
+  double* __restrict__ g_pe,
+  double* __restrict__ g_fx,
+  double* __restrict__ g_fy,
+  double* __restrict__ g_fz,
+  double* __restrict__ g_virial)
+{
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= N) return;
+  g_fx[i] += (double)g_scratch[i];
+  g_fy[i] += (double)g_scratch[i + N];
+  g_fz[i] += (double)g_scratch[i + 2 * N];
+  double pe = (double)g_scratch[i + 3 * N];
+  if (g_e0 && i >= N1 && i < N2) pe += (double)g_e0[g_type[i]];
+  g_pe[i] += pe;
+  const double vxx = (double)g_scratch[i + 4 * N];
+  const double vyy = (double)g_scratch[i + 5 * N];
+  const double vzz = (double)g_scratch[i + 6 * N];
+  const double vxy = (double)g_scratch[i + 7 * N];
+  const double vxz = (double)g_scratch[i + 8 * N];
+  const double vyz = (double)g_scratch[i + 9 * N];
+  g_virial[i + 0 * N] += vxx;
+  g_virial[i + 1 * N] += vyy;
+  g_virial[i + 2 * N] += vzz;
+  g_virial[i + 3 * N] += vxy;
+  g_virial[i + 4 * N] += vxz;
+  g_virial[i + 5 * N] += vyz;
+  g_virial[i + 6 * N] += vxy;
+  g_virial[i + 7 * N] += vxz;
+  g_virial[i + 8 * N] += vyz;
 }
 
 // ---------------------------------------------------------------------------
@@ -1100,7 +1178,7 @@ void UF3::initialize(const char* filename, const int number_of_atoms)
       // Read coefficient tensor.  File rows are (ij outer, ik inner) with jk
       // along each row; store in the kernel's jk-fastest layout
       // idx = r + (p + q*nc_ij)*nc_jk  (jk fastest, then ij, then ik) so the
-      // innermost dr-loop in find_force_uf3_3b reads 4 contiguous coefficients.
+      // innermost dr-loop in uf3_eval_triplet reads 4 contiguous coefficients.
       int nci = three_body.nc_ij, nck = three_body.nc_ik, ncj = three_body.nc_jk;
       three_body.tensor_stride = nci * nck * ncj;
       three_body.num_trips = num_types_ * num_types_ * num_types_;
@@ -1169,6 +1247,14 @@ void UF3::initialize(const char* filename, const int number_of_atoms)
     }
     three_body.d_tensor.resize(h_tensor_all.size());
     three_body.d_tensor.copy_from_host(h_tensor_all.data());
+
+    // Stage the whole tensor table in dynamic shared memory when it fits the
+    // portable 48 KB per-block limit (no opt-in attribute needed on any arch).
+    // Single-element models (~13³ floats ≈ 8.8 KB) always fit; larger tables
+    // fall back to L2-cached global reads.
+    const size_t tensor_floats = h_tensor_all.size();
+    smem_floats_3b_ =
+      (tensor_floats * sizeof(float) <= 48 * 1024) ? (int)tensor_floats : 0;
   }
 
   // If no 1B line was present, initialize e0 to zeros.
@@ -1186,6 +1272,23 @@ void UF3::initialize(const char* filename, const int number_of_atoms)
   d_NL.resize((size_t)number_of_atoms * neighbor_MN_);
   d_NL_shift.resize((size_t)number_of_atoms * neighbor_MN_);
 
+  if (has_3b) {
+    // Compact 3B list pays off only when the 3B cutoff is actually below the
+    // global rc (i.e. a 2B block with a larger cutoff exists).
+    const double rc_keep =
+      three_body.rc_ij > three_body.rc_ik ? three_body.rc_ij : three_body.rc_ik;
+    use_3b_list_ = rc_keep < rc - 1e-4;
+    if (use_3b_list_) {
+      d_NN_3b.resize(number_of_atoms);
+      d_NL_3b.resize((size_t)number_of_atoms * neighbor_MN_);
+      d_NL_shift_3b.resize((size_t)number_of_atoms * neighbor_MN_);
+    }
+    // Float accumulators for the warp-parallel symmetric kernel.
+    if (sym_3b_) {
+      d_scratch_3b.resize((size_t)number_of_atoms * 10);
+    }
+  }
+
   printf("Use UF3 potential with %d atom type%s.\n", num_types_,
          num_types_ > 1 ? "s" : "");
   for (int t = 0; t < (int)elements_.size(); t++)
@@ -1198,6 +1301,10 @@ void UF3::initialize(const char* filename, const int number_of_atoms)
     printf("    3B: rc(ij,ik,jk)=(%.1f,%.1f,%.1f) A, coeff dims=%dx%dx%d, %d type triplets\n",
            three_body.rc_ij, three_body.rc_ik, three_body.rc_jk,
            three_body.nc_ij, three_body.nc_ik, three_body.nc_jk, three_body.num_trips);
+    printf("    3B: %s neighbour list, tensor in %s, %s kernel\n",
+           use_3b_list_ ? "compact (rc_3b-filtered)" : "shared (global-rc)",
+           smem_floats_3b_ > 0 ? "shared memory" : "global memory (L2)",
+           sym_3b_ ? "warp-parallel symmetric" : "thread-per-atom dual-order");
   }
 }
 
@@ -1277,13 +1384,71 @@ void UF3::compute(
   }
 
   if (has_3b) {
-    // Average both neighbour orderings unless the ij/ik grids match and the
-    // tensor was symmetrised on load (then a single ordering is already exact
-    // and the fast hoisted path runs).  DUAL_ORDER is a template parameter so
-    // the symmetric path carries no runtime branch / dead dual-order code.
-    auto launch_3b = [&](auto dual_tag) {
-      constexpr bool DUAL = decltype(dual_tag)::value;
-      find_force_uf3_3b<DUAL><<<grid_size, BLOCK_SIZE>>>(
+    // The 1-body offsets are added by the 2B kernel when it runs; pass them to
+    // the 3B path only in the (unusual) 3B-only case so they are never counted
+    // twice.
+    const float* e0_for_3b = has_2b ? nullptr : d_e0.data();
+
+    // Compact 3B neighbour list: filter the active list down to the 3B cutoff
+    // so the O(NN²) pair loop below runs on ~rc_3b-sized neighbourhoods instead
+    // of rc_2b-sized ones.
+    const int* nl3_NN = nl_NN;
+    const int* nl3_NL = nl_NL;
+    const int* nl3_shift = nl_shift;
+    if (use_3b_list_) {
+      const float rc_keep = (float)(three_body.rc_ij > three_body.rc_ik
+                                      ? three_body.rc_ij : three_body.rc_ik);
+      int* shift_out = small_box ? d_NL_shift_3b.data() : nullptr;
+      const int grid_nb = (N - 1) / BLOCK_SIZE + 1;
+      filter_neighbor_3b<<<grid_nb, BLOCK_SIZE>>>(
+        N, rc_keep * rc_keep, box,
+        nl_NN, nl_NL, nl_shift,
+        d_pos_packed.data(),
+        d_NN_3b.data(), d_NL_3b.data(), shift_out);
+      GPU_CHECK_KERNEL
+      nl3_NN = d_NN_3b.data();
+      nl3_NL = d_NL_3b.data();
+      nl3_shift = shift_out;
+    }
+
+    if (sym_3b_) {
+      // Symmetric models (ij/ik grids match, tensor symmetrised on load): a
+      // single j<k ordering is exact — run the warp-parallel kernel with float
+      // scratch accumulation, then fold into the double-precision arrays.
+      CHECK(cudaMemset(d_scratch_3b.data(), 0, (size_t)N * 10 * sizeof(float)));
+      const int warps_per_block = BLOCK_SIZE / 32;
+      const int grid_3b = (N2 - N1 + warps_per_block - 1) / warps_per_block;
+      const size_t smem_bytes = (size_t)smem_floats_3b_ * sizeof(float);
+      find_force_uf3_3b_warp<<<grid_3b, BLOCK_SIZE, smem_bytes>>>(
+        N, N1, N2, box,
+        three_body.d_tensor.data(),
+        num_types_, three_body.tensor_stride, smem_floats_3b_,
+        three_body.nc_ij, three_body.nc_ik, three_body.nc_jk,
+        three_body.nint_ij, three_body.nint_ik, three_body.nint_jk,
+        three_body.knot_min_ij, three_body.knot_delta_ij, three_body.inv_knot_delta_ij,
+        three_body.knot_min_ik, three_body.knot_delta_ik, three_body.inv_knot_delta_ik,
+        three_body.knot_min_jk, three_body.knot_delta_jk, three_body.inv_knot_delta_jk,
+        (float)three_body.rc_ij, (float)three_body.rc_ik, (float)three_body.rc_jk,
+        nl3_NN, nl3_NL, nl3_shift,
+        type.data(),
+        d_pos_packed.data(),
+        d_scratch_3b.data());
+      GPU_CHECK_KERNEL
+      const int grid_collect = (N - 1) / BLOCK_SIZE + 1;
+      uf3_3b_collect_scratch<<<grid_collect, BLOCK_SIZE>>>(
+        N, N1, N2,
+        d_scratch_3b.data(),
+        type.data(), e0_for_3b,
+        potential_per_atom.data(),
+        force_per_atom.data(),
+        force_per_atom.data() + N,
+        force_per_atom.data() + N * 2,
+        virial_per_atom.data());
+      GPU_CHECK_KERNEL
+    } else {
+      // Asymmetric legacy models: average both neighbour orderings
+      // (thread-per-atom kernel, double accumulation — correctness path).
+      find_force_uf3_3b_dual<<<grid_size, BLOCK_SIZE>>>(
         N, N1, N2, box,
         three_body.d_tensor.data(),
         num_types_, three_body.tensor_stride,
@@ -1293,17 +1458,15 @@ void UF3::compute(
         three_body.knot_min_ik, three_body.knot_delta_ik, three_body.inv_knot_delta_ik,
         three_body.knot_min_jk, three_body.knot_delta_jk, three_body.inv_knot_delta_jk,
         (float)three_body.rc_ij, (float)three_body.rc_ik, (float)three_body.rc_jk,
-        nl_NN, nl_NL, nl_shift,
-        type.data(), nullptr,      // 1-body already added by the 2B kernel (avoid double count)
+        nl3_NN, nl3_NL, nl3_shift,
+        type.data(), e0_for_3b,
         d_pos_packed.data(),
         potential_per_atom.data(),
         force_per_atom.data(),
         force_per_atom.data() + N,
         force_per_atom.data() + N * 2,
         virial_per_atom.data());
-    };
-    if (sym_3b_) launch_3b(std::false_type{});   // symmetric → single ordering
-    else         launch_3b(std::true_type{});    // asymmetric → dual ordering
-    GPU_CHECK_KERNEL
+      GPU_CHECK_KERNEL
+    }
   }
 }

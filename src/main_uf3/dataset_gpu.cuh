@@ -46,6 +46,11 @@ struct Uf3DatasetGPU
   // --- Reference data (GPU) ---
   GPU_Vector<float> d_energy_ref;  // per-frame total energy (num_frames)
   GPU_Vector<float> d_fx_ref, d_fy_ref, d_fz_ref;  // per-atom forces
+  // Per-frame reference virial, frame-major [f*6+c], c = xx yy zz xy xz yz (eV).
+  // Frames without reference data have d_has_virial[f]=0 and zero entries.
+  GPU_Vector<float> d_virial_ref;  // [num_frames * 6]
+  GPU_Vector<int> d_has_virial;    // [num_frames]
+  int num_virial_frames = 0;       // frames carrying a reference virial
 
   // --- 3B neighbor lists (GPU) ---
   bool has_3b = false;
@@ -53,9 +58,11 @@ struct Uf3DatasetGPU
   GPU_Vector<int> d_nn_lst;          // flat neighbor indices
   GPU_Vector<int> d_nn_frame_off;    // per-frame start in nn_off
 
-  // --- CPU mirrors (for batch metadata building) ---
+  // --- CPU mirrors (for batch metadata building / lstsq weighting) ---
   std::vector<int> h_natoms;
   std::vector<int> h_offsets;
+  std::vector<float> h_virial;     // [num_frames * 6]
+  std::vector<int> h_has_virial;   // [num_frames]
 
   // --- Round-robin batches (pre-sorted by energy, interleaved) ---
   std::vector<std::vector<int>> batches;  // batches[b][k] = global frame index

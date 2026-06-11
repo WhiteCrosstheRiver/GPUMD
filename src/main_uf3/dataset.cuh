@@ -33,6 +33,13 @@ struct Uf3Frame {
   std::vector<int> parent;
   float energy = 0.0f;
 
+  // Reference virial in eV, symmetrised to 6 components (xx yy zz xy xz yz).
+  // Parsed from virial="..." (9 values, row-major) or stress="..." (eV/A^3,
+  // virial = -stress * cell volume).  has_virial=false when neither is present;
+  // such frames simply contribute no virial rows to the fit.
+  float virial[6] = {};
+  bool has_virial = false;
+
   // Lattice matrix (column-major, same convention as main_nep):
   //   box[0..8]  = H = [a|b|c], where a,b,c are lattice vectors as columns
   //   box_inv[0..8] = H^{-1} (for minimum-image convention)

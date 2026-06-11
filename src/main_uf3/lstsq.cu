@@ -266,6 +266,114 @@ static __global__ void lstsq_force_rows(
   }
 }
 
+// Virial rows: 6 rows per frame (xx yy zz xy xz yz), at rows
+// [vbase + 6*blk, vbase + 6*blk + 6).  One block per frame; threads stride over
+// real centre atoms.  Frames without a reference virial are skipped entirely —
+// their rows stay zero in both A and b, contributing nothing to A^T A / A^T b.
+//
+// Feature definitions match the MD virial (uf3.cu force kernels):
+//   2B (ordered pairs, each physical pair visited twice):
+//     dW_ab/dC = -0.5 * (dB_C/dr) / r * r_a r_b
+//   3B (per-centre triplets): W = -sum_edges t_e (r_e x r_e),
+//     dW_ab/dC = -(G12/r12 * r12_a r12_b + G13/r13 * ... + G23/r23 * ...)
+static __global__ void lstsq_virial_rows(
+  int nf, int M, int vbase, const int* __restrict__ fidx, const int* __restrict__ nat,
+  const int* __restrict__ nat_tot, const int* __restrict__ off,
+  const int* __restrict__ typ, const float* __restrict__ x, const float* __restrict__ y, const float* __restrict__ z,
+  int ncoeff, int nt, int nint, float kmin, float kd, float rc, int num_params_2b,
+  int has_3b, int nc0, int nc1, int nc2, int ni0, int ni1, int ni2,
+  float k0, float kd0, float r0, float k1, float kd1, float r1, float k2, float kd2, float r2,
+  int nparam, float wv,
+  const float* __restrict__ vref, const int* __restrict__ has_vref,
+  const int* __restrict__ nn_off, const int* __restrict__ nn_lst, const int* __restrict__ nn_frame_off,
+  const int* __restrict__ tmap,
+  double* __restrict__ A, double* __restrict__ bvec)
+{
+  int blk = blockIdx.x; if (blk >= nf) return;
+  int fid = fidx[blk]; if (!has_vref[fid]) return;
+  int tid = threadIdx.x, stride = blockDim.x;
+  int n = nat[fid], n_tot = nat_tot[fid], o = off[fid];
+  int row0 = vbase + 6 * blk;
+
+  if (tid == 0)
+    for (int c = 0; c < 6; c++)
+      bvec[row0 + c] = (double)wv * (double)vref[(size_t)fid * 6 + c];
+
+  // 2B virial features
+  for (int i = tid; i < n; i += stride) {
+    int ti = typ[o+i];
+    for (int j = 0; j < n_tot; j++) {
+      if (j == i) continue;
+      int tj = typ[o+j];
+      float dx=x[o+i]-x[o+j],dy=y[o+i]-y[o+j],dz=z[o+i]-z[o+j];
+      float d2=dx*dx+dy*dy+dz*dz,invr=rsqrtf(d2),r=d2*invr; if(r>=rc)continue;
+      int pi=tmap[ti*nt+tj];   // canonical unordered pair
+      // r x r products (sign of the pair direction cancels)
+      double pxx=(double)dx*dx, pyy=(double)dy*dy, pzz=(double)dz*dz;
+      double pxy=(double)dx*dy, pxz=(double)dx*dz, pyz=(double)dy*dz;
+      for (int c=0;c<ncoeff;c++){ float db=_dbval(c,nint,r,kmin,kd); if(db==0)continue;
+        double t = -0.5*(double)db*(double)invr*(double)wv; int col=pi*ncoeff+c;
+        atomicAdd(&A[(size_t)col*M+row0+0], t*pxx);
+        atomicAdd(&A[(size_t)col*M+row0+1], t*pyy);
+        atomicAdd(&A[(size_t)col*M+row0+2], t*pzz);
+        atomicAdd(&A[(size_t)col*M+row0+3], t*pxy);
+        atomicAdd(&A[(size_t)col*M+row0+4], t*pxz);
+        atomicAdd(&A[(size_t)col*M+row0+5], t*pyz);
+      }
+    }
+  }
+
+  // 3B virial features (per-centre triplets; same loop structure as force rows)
+  if (has_3b) {
+    int nn_base = nn_frame_off[fid];
+    for (int i = tid; i < n; i += stride) {
+      int ti=typ[o+i]; int nn_start=nn_off[nn_base+i]; int nni=nn_off[nn_base+i+1]-nn_start;
+      for (int jj=0; jj<nni; jj++) {
+        int j=nn_lst[nn_start+jj];
+        float dx12=x[o+j]-x[o+i],dy12=y[o+j]-y[o+i],dz12=z[o+j]-z[o+i];
+        float d12=dx12*dx12+dy12*dy12+dz12*dz12,inv12=rsqrtf(d12),r12=d12*inv12; if(r12>=r0)continue;
+        int tj=typ[o+j];
+        int m0=(int)((r12-k0)/kd0); if(m0<0)m0=0; if(m0>=ni0)m0=ni0-1; float u0=(r12-(k0+m0*kd0))/kd0;
+        float b0[4],db0[4]; { float u=u0,u2=u*u,u3=u2*u; b0[0]=(1-3*u+3*u2-u3)/6;b0[1]=(4-6*u2+3*u3)/6;b0[2]=(1+3*u+3*u2-3*u3)/6;b0[3]=u3/6;
+          float om=1-u; db0[0]=-om*om*0.5f/kd0; db0[1]=u*(3*u-4)*0.5f/kd0; db0[2]=(-3*u2+2*u+1)*0.5f/kd0; db0[3]=u2*0.5f/kd0; }
+        int p0=m0-3; if(p0<0)p0=0;
+        for (int kk=jj+1; kk<nni; kk++) {
+          int k=nn_lst[nn_start+kk];
+          float dx13=x[o+k]-x[o+i],dy13=y[o+k]-y[o+i],dz13=z[o+k]-z[o+i];
+          float d13=dx13*dx13+dy13*dy13+dz13*dz13,inv13=rsqrtf(d13),r13=d13*inv13; if(r13>=r1)continue;
+          float dx23=x[o+k]-x[o+j],dy23=y[o+k]-y[o+j],dz23=z[o+k]-z[o+j];
+          float d23=dx23*dx23+dy23*dy23+dz23*dz23,inv23=rsqrtf(d23),r23=d23*inv23; if(r23>=r2)continue;
+          int tk=typ[o+k];
+          int trip=(ti*nt+tj)*nt+tk; int off3=num_params_2b+trip*nc0*nc1*nc2;
+          int m1=(int)((r13-k1)/kd1); if(m1<0)m1=0; if(m1>=ni1)m1=ni1-1; float u1=(r13-(k1+m1*kd1))/kd1;
+          int m2=(int)((r23-k2)/kd2); if(m2<0)m2=0; if(m2>=ni2)m2=ni2-1; float u2=(r23-(k2+m2*kd2))/kd2;
+          float b1[4],db1[4],b2[4],db2[4];
+          { float u=u1,uu=u*u,uuu=uu*u; b1[0]=(1-3*u+3*uu-uuu)/6;b1[1]=(4-6*uu+3*uuu)/6;b1[2]=(1+3*u+3*uu-3*uuu)/6;b1[3]=uuu/6;
+            float om=1-u; db1[0]=-om*om*0.5f/kd1; db1[1]=u*(3*u-4)*0.5f/kd1; db1[2]=(-3*uu+2*u+1)*0.5f/kd1; db1[3]=uu*0.5f/kd1; }
+          { float u=u2,uu=u*u,uuu=uu*u; b2[0]=(1-3*u+3*uu-uuu)/6;b2[1]=(4-6*uu+3*uuu)/6;b2[2]=(1+3*u+3*uu-3*uuu)/6;b2[3]=uuu/6;
+            float om=1-u; db2[0]=-om*om*0.5f/kd2; db2[1]=u*(3*u-4)*0.5f/kd2; db2[2]=(-3*uu+2*u+1)*0.5f/kd2; db2[3]=uu*0.5f/kd2; }
+          int p1=m1-3; if(p1<0)p1=0; int p2=m2-3; if(p2<0)p2=0;
+          for(int dp=0;dp<4;dp++){int p=p0+dp; if(p>=nc0)break; float Bp=b0[dp],dBp=db0[dp];
+          for(int dq=0;dq<4;dq++){int q=p1+dq; if(q>=nc1)break; float Bq=b1[dq],dBq=db1[dq];
+          for(int dr=0;dr<4;dr++){int rr=p2+dr; if(rr>=nc2)break;
+            int col=off3+p+q*nc0+rr*nc0*nc1;
+            float t12=dBp*Bq*b2[dr]*inv12;     // (d dE/dr12 /dC) / r12
+            float t13=Bp*dBq*b2[dr]*inv13;
+            float t23=Bp*Bq*db2[dr]*inv23;
+            double s = -(double)wv;
+            atomicAdd(&A[(size_t)col*M+row0+0], s*((double)t12*dx12*dx12+(double)t13*dx13*dx13+(double)t23*dx23*dx23));
+            atomicAdd(&A[(size_t)col*M+row0+1], s*((double)t12*dy12*dy12+(double)t13*dy13*dy13+(double)t23*dy23*dy23));
+            atomicAdd(&A[(size_t)col*M+row0+2], s*((double)t12*dz12*dz12+(double)t13*dz13*dz13+(double)t23*dz23*dz23));
+            atomicAdd(&A[(size_t)col*M+row0+3], s*((double)t12*dx12*dy12+(double)t13*dx13*dy13+(double)t23*dx23*dy23));
+            atomicAdd(&A[(size_t)col*M+row0+4], s*((double)t12*dx12*dz12+(double)t13*dx13*dz13+(double)t23*dx23*dz23));
+            atomicAdd(&A[(size_t)col*M+row0+5], s*((double)t12*dy12*dz12+(double)t13*dy13*dz13+(double)t23*dy23*dz23));
+          }}}
+        }
+      }
+    }
+  }
+}
+
 // ---- Curvature (second-difference) regularization --------------------------
 // Adds lambda * (D2 c)^T (D2 c) penalties to the normal matrix, where D2 is the
 // discrete second-difference operator along a coefficient sequence.  This is
@@ -386,11 +494,33 @@ void run_lstsq(
   if (nf_comp < 1) nf_comp = 1;
   double vf = sf2 / nf_comp - (sf / nf_comp) * (sf / nf_comp); if (vf < 1e-12) vf = 1.0;
 
-  double wsum = (double)lambda_e + (double)lambda_f;
-  double weight_bal = (wsum > 0) ? (double)lambda_e / wsum : 0.5;
-  float we_global = (float)sqrt(weight_bal / ((double)use_frames * ve));
+  // Virial statistics over the frames that carry a reference virial.  lambda_v
+  // participates in the weight balance only when such frames exist, so datasets
+  // without virials reproduce the previous energy/force-only weighting exactly.
+  int nvf = 0; double sv = 0, sv2 = 0;
+  for (int f = 0; f < use_frames; f++) {
+    if (!ds.h_has_virial[f]) continue;
+    nvf++;
+    for (int c = 0; c < 6; c++) {
+      double v = ds.h_virial[(size_t)f * 6 + c];
+      sv += v; sv2 += v * v;
+    }
+  }
+  double lambda_v_eff = ((double)para.lambda_v > 0.0 && nvf > 0) ? (double)para.lambda_v : 0.0;
+  long long nv_comp = 6LL * std::max(1, nvf);
+  double vv = sv2 / nv_comp - (sv / nv_comp) * (sv / nv_comp); if (vv < 1e-12) vv = 1.0;
+  const bool use_virial = lambda_v_eff > 0.0;
+
+  // Three-way variance-normalized balance: shares proportional to
+  // lambda_e : lambda_f : lambda_v (lambda_v dropping out when unused).
+  double wsum = (double)lambda_e + (double)lambda_f + lambda_v_eff;
+  double share_e = (wsum > 0) ? (double)lambda_e / wsum : 0.5;
+  double share_f = (wsum > 0) ? (double)lambda_f / wsum : 0.5;
+  double share_v = (wsum > 0) ? lambda_v_eff / wsum : 0.0;
+  float we_global = (float)sqrt(share_e / ((double)use_frames * ve));
   float wf = (lambda_f > 0.0f)
-               ? (float)sqrt((1.0 - weight_bal) / ((double)(3LL * total_real) * vf)) : 0.0f;
+               ? (float)sqrt(share_f / ((double)(3LL * total_real) * vf)) : 0.0f;
+  float wv = use_virial ? (float)sqrt(share_v / ((double)nv_comp * vv)) : 0.0f;
 
   // The full design matrix A (M x nparam) can exceed GPU memory for big datasets
   // with 3B.  Build it in row-chunks of frames and accumulate the normal
@@ -416,15 +546,18 @@ void run_lstsq(
     // Greedily grow a chunk until its row count would exceed maxM.
     std::vector<int> cb_idx, cb_realbase;
     long long Mc = 0; int creal = 0; int f1 = f0;
+    const long long vrows_per_frame = use_virial ? 6 : 0;
     while (f1 < use_frames) {
       int na = ds.h_natoms[f1];
-      long long add = 1 + 3LL * na;
+      long long add = 1 + 3LL * na + vrows_per_frame;
       if (Mc + add > maxM && f1 > f0) break;
       cb_idx.push_back(f1); cb_realbase.push_back(creal);
       creal += na; Mc += add; f1++;
     }
     int ncf = f1 - f0;
-    long long Mchunk = (long long)ncf + 3LL * creal;
+    // Row layout: [0,ncf) energy | [ncf, ncf+3*creal) forces |
+    //             [ncf+3*creal, +6*ncf) virial (when enabled).
+    long long Mchunk = (long long)ncf + 3LL * creal + vrows_per_frame * ncf;
     n_chunks++;
 
     if ((int)d_cbidx.size() < ncf) { d_cbidx.resize(ncf); d_crealbase.resize(ncf); }
@@ -456,6 +589,21 @@ void run_lstsq(
         has_3b ? 1 : 0, nc3[0], nc3[1], nc3[2], ni3[0], ni3[1], ni3[2],
         k3[0], kd3[0], r3[0], k3[1], kd3[1], r3[1], k3[2], kd3[2], r3[2],
         nparam, wf, ds.d_fx_ref.data(), ds.d_fy_ref.data(), ds.d_fz_ref.data(),
+        ds.d_nn_off.data(), ds.d_nn_lst.data(), ds.d_nn_frame_off.data(),
+        fitness.model()->d_type_map.data(),
+        d_A.data(), d_b.data());
+      GPU_CHECK_KERNEL
+    }
+
+    if (use_virial) {
+      lstsq_virial_rows<<<ncf, BLK>>>(
+        ncf, (int)Mchunk, (int)(ncf + 3LL * creal), d_cbidx.data(),
+        ds.d_natoms.data(), ds.d_natoms_tot.data(), ds.d_offsets.data(),
+        ds.d_types.data(), ds.d_x.data(), ds.d_y.data(), ds.d_z.data(),
+        ncoeff, nt, nint, kmin, kd, rc, num_params_2b,
+        has_3b ? 1 : 0, nc3[0], nc3[1], nc3[2], ni3[0], ni3[1], ni3[2],
+        k3[0], kd3[0], r3[0], k3[1], kd3[1], r3[1], k3[2], kd3[2], r3[2],
+        nparam, wv, ds.d_virial_ref.data(), ds.d_has_virial.data(),
         ds.d_nn_off.data(), ds.d_nn_lst.data(), ds.d_nn_frame_off.data(),
         fitness.model()->d_type_map.data(),
         d_A.data(), d_b.data());
@@ -562,8 +710,9 @@ void run_lstsq(
 
   auto t1 = std::chrono::high_resolution_clock::now();
   float dt = (float)std::chrono::duration<double>(t1 - t0).count();
-  printf("  lstsq GPU: %d params%s, %d frames, %.2f s\n",
-         nparam, has_3b?" (2B+3B)":" (2B)", use_frames, dt);
+  printf("  lstsq GPU: %d params%s, %d frames%s, %.2f s\n",
+         nparam, has_3b?" (2B+3B)":" (2B)", use_frames,
+         use_virial ? " (+virial rows)" : "", dt);
   // local_iter=1: lstsq runs once; triggers the local_iter==1 logging checkpoint.
   float tl = fitness.compute_loss(0, gen_offset, stage_id, 1, dt);
   printf("  Loss=%.3f [E=%.3f F=%.3f eV/A]\n", tl, fitness.loss_e, fitness.loss_f);

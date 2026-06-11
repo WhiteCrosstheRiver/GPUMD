@@ -45,6 +45,9 @@ void Uf3DatasetGPU::load(const std::vector<Uf3Frame>& frames, bool has_3b_flag,
   std::vector<float> h_x(total_atoms), h_y(total_atoms), h_z(total_atoms);
   std::vector<float> h_fx(total_atoms, 0.0f), h_fy(total_atoms, 0.0f), h_fz(total_atoms, 0.0f);
   std::vector<float> h_energy(num_frames);
+  h_virial.assign((size_t)num_frames * 6, 0.0f);
+  h_has_virial.assign(num_frames, 0);
+  num_virial_frames = 0;
   std::vector<int> h_nn_off, h_nn_lst, h_nn_foff;
 
   int nn_total_off = 0, nn_total_lst = 0;
@@ -73,6 +76,11 @@ void Uf3DatasetGPU::load(const std::vector<Uf3Frame>& frames, bool has_3b_flag,
     std::copy(f.fy.begin(), f.fy.end(), h_fy.begin() + off);
     std::copy(f.fz.begin(), f.fz.end(), h_fz.begin() + off);
     h_energy[i] = f.energy;
+    h_has_virial[i] = f.has_virial ? 1 : 0;
+    if (f.has_virial) {
+      num_virial_frames++;
+      for (int c = 0; c < 6; c++) h_virial[(size_t)i * 6 + c] = f.virial[c];
+    }
 
     if (has_3b) {
       h_nn_foff.push_back((int)h_nn_off.size());
@@ -106,6 +114,10 @@ void Uf3DatasetGPU::load(const std::vector<Uf3Frame>& frames, bool has_3b_flag,
 
   d_energy_ref.resize(num_frames);
   d_energy_ref.copy_from_host(h_energy.data());
+  d_virial_ref.resize((size_t)num_frames * 6);
+  d_virial_ref.copy_from_host(h_virial.data());
+  d_has_virial.resize(num_frames);
+  d_has_virial.copy_from_host(h_has_virial.data());
   d_fx_ref.resize(total_atoms); d_fx_ref.copy_from_host(h_fx.data());
   d_fy_ref.resize(total_atoms); d_fy_ref.copy_from_host(h_fy.data());
   d_fz_ref.resize(total_atoms); d_fz_ref.copy_from_host(h_fz.data());
@@ -155,9 +167,10 @@ void Uf3DatasetGPU::load(const std::vector<Uf3Frame>& frames, bool has_3b_flag,
   d_batch_fidx_all.resize(h_batch_fidx_all.size());
   d_batch_fidx_all.copy_from_host(h_batch_fidx_all.data());
 
-  printf("GPU dataset: %d frames, %d atoms, %d batches (size=%d, max=%d frames / %d atoms), 3B=%s\n",
+  printf("GPU dataset: %d frames, %d atoms, %d batches (size=%d, max=%d frames / %d atoms), 3B=%s, virial=%d/%d\n",
          num_frames, total_atoms, num_batches, batch_size,
-         max_batch_size, max_batch_atoms, has_3b ? "yes" : "no");
+         max_batch_size, max_batch_atoms, has_3b ? "yes" : "no",
+         num_virial_frames, num_frames);
 }
 
 void Uf3DatasetGPU::build_batch_meta(int batch_id,

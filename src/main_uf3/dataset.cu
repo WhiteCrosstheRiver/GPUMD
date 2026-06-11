@@ -293,6 +293,38 @@ std::vector<Uf3Frame> load_uf3_frames(
       f.has_lattice = true;
     }
 
+    // Reference virial: virial="..." (9 values, eV, row-major) preferred;
+    // stress="..." (9 values, eV/A^3) as fallback, converted via
+    // virial = -stress * volume (needs the lattice, parsed above).
+    // Both are symmetrised to 6 components xx yy zz xy xz yz.
+    {
+      std::string vv = find_key(header, "virial=");
+      if (vv.empty()) vv = find_key(header, "Virial=");
+      bool from_stress = false;
+      if (vv.empty()) {
+        vv = find_key(header, "stress=");
+        if (vv.empty()) vv = find_key(header, "Stress=");
+        from_stress = !vv.empty();
+      }
+      if (!vv.empty() && !(from_stress && !f.has_lattice)) {
+        std::istringstream vs(vv);
+        float w[9] = {};
+        int cnt = 0;
+        while (cnt < 9 && (vs >> w[cnt])) cnt++;
+        if (cnt == 9) {
+          float scale = 1.0f;
+          if (from_stress) scale = -std::fabs(box_det(f.box));
+          f.virial[0] = scale * w[0];                    // xx
+          f.virial[1] = scale * w[4];                    // yy
+          f.virial[2] = scale * w[8];                    // zz
+          f.virial[3] = scale * 0.5f * (w[1] + w[3]);    // xy
+          f.virial[4] = scale * 0.5f * (w[2] + w[6]);    // xz
+          f.virial[5] = scale * 0.5f * (w[5] + w[7]);    // yz
+          f.has_virial = true;
+        }
+      }
+    }
+
     // Properties= column layout
     std::string pv = find_key(header, "Properties=");
     if (pv.empty()) pv = find_key(header, "properties=");
