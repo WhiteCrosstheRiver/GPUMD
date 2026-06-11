@@ -544,3 +544,81 @@ R4 曾冻结 UF3 性能改动, R7 解冻。M1 教训 (见 progress/README.md R6)
 - SM throughput > 60% 且 stall 以 Wait/Not Selected 为主 → compute-bound → P3-1
 - DRAM/L2 throughput 高 或 stall 以 Long Scoreboard/LG Throttle 为主 → P3-2 优先
 - occupancy < 25% 且 registers/thread > 128 → 先做寄存器瘦身再谈其他
+
+---
+
+# P3-V0 执行记录 (电脑B, 2026-06-12, H100)
+
+## 环境
+
+| 项 | 值 |
+|----|-----|
+| GPU | NVIDIA H100 PCIe, 81559 MiB, sm_90 |
+| Driver | 580.65.06 |
+| nvcc | V13.0.48 (CUDA 13.0) |
+| ncu | 2025.3.0 |
+| nsys | 2025.3.2 |
+| git commit | f9a48617 (uf3-dev) |
+| 二进制 | src/gpumd (sm_90, c++17) |
+
+## 任务1: 解锁 H100 ncu — 阻塞
+
+- `sudo ncu`: 无 sudo 密码, 不可用
+- `/proc/driver/nvidia/params` 确认: `RmProfilingAdminOnly: 1` (只允许 root profiling)
+- 需管理员: 创建 `/etc/modprobe.d/nvidia-profiling.conf` 写入
+  `options nvidia NVreg_RmProfilingAdminOnly=0`, 然后重载 nvidia 模块或重启
+- **当前状态: ncu 不可用, P3-V0 任务3/4 阻塞**
+
+## 任务2: UF3 H100 基线
+
+测试体系: 66990 atoms SiGe, 4-stage NVT Berendsen (200->650->650->200 K),
+每 stage 2000 steps, timestep 1 fs.
+
+UF3 模型: SiGe.uf3 (2B 4 blocks, 3B 6 triplets, trim_3b=3),
+3B coeff dims=15x15x15, rc_3b=(5.5,5.5,5.5) A.
+
+### 2B-only (SiGe_2b.uf3)
+
+| Stage | atom-step/s |
+|-------|------------|
+| 1 (200->650K) | 212.0 M |
+| 2 (650K) | 176.4 M |
+| 3 (650K) | 171.2 M |
+| 4 (650->200K) | 175.4 M |
+| **Average** | **183.8 M** |
+
+### 2B+3B (SiGe.uf3, warp kernel)
+
+| Stage | atom-step/s |
+|-------|------------|
+| 1 (200->650K) | 18.2 M |
+| 2 (650K) | 16.3 M |
+| 3 (650K) | 12.5 M |
+| 4 (650->200K) | 10.1 M |
+| **Average** | **14.3 M** |
+
+### 3B cost fraction: 2B+3B vs 2B-only = **12.9x**
+
+3B kernel 状态: compact (rc_3b-filtered) neighbour list,
+tensor in global memory (L2), warp-parallel symmetric kernel.
+Tensor 未进 shared memory (8 type triplets 总大小远超 48KB smem 上限)。
+
+速度有明显 stage 依赖性 (10.1-18.2M), 与 3B triplet O(NN²) 的温度/密度敏感性一致。
+
+### H100 与 5090D 对比 (不同模型, 仅供参考)
+
+| 指标 | H100 (本报告) | 5090D (R3 V3) |
+|------|-------------|---------------|
+| 2B-only | 183.8 M | 164.5 M (+12%) |
+| 2B+3B (warp) | 14.3 M | 23.8 M (-40%) |
+| 3B cost fraction | 12.9x | 6.9x |
+
+H100 2B-only 比 5090D 快 12%, 但 H100 2B+3B 反而慢 40%。
+可能原因: 不同模型参数 (coeff dims=15 vs 13, 8 triplets vs 更少),
+H100 sm_90 的 shared memory bank 配置与 5090D sm_120 不同,
+tensor L2 访问模式在 H100 上不利。
+5090D 数字来自不同 UF3 模型, 非严格可比。
+
+## 任务3/4: ncu 剖析 — 阻塞
+
+等待管理员解锁 ncu profiling 权限 (RmProfilingAdminOnly=0)。
