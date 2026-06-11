@@ -263,3 +263,100 @@ P2 基线: 2B+3B = 30.3M vs 2B-only = 234M atom·step/s → **7.7× slower (-38%
 | `src/main_uf3/main.cu` | P0修复 | write_uf3_file 从 canonical slot 镜像 |
 | `src/main_uf3/fitness.cu` | P1修复 | 梯度 3B 对称化 (从 stash@{0} 恢复) |
 | `src/main_uf3/parameters.cuh` | P0修复 | trim_3b 默认值 0→3 |
+
+---
+
+# 第三轮：大改动前置验证任务 (2026-06-12 下发, 电脑B执行)
+
+> 背景: 下一阶段计划开启大工程 (方向: NEP4 推理 kernel 融合 + 局部基/小 readout
+> 模型, 详见电脑A讨论记录)。开工前必须: ① 确认第二轮未测代码; ② 拿到 UF3 与
+> NEP4 的 ncu/nsys 剖析数据作为决策依据。本轮**只验证, 不改代码**。
+> 执行顺序: V1 → V2 → V3。V1 不过则停, 回传日志。
+
+## V1 — 确认当前树状态 + 全量回归 (必做, 最高优先)
+
+第二轮改动 (条目12: 多GPU空分区 clamp; 条目13: P2-2b warp 邻居 shared 缓存)
+在 workmd 中标记"未编译/未测试", 但验证表中已出现 CACHE=64 vs 4 测试,
+时间线有歧义。需要先确认电脑B当前文件就是最新版本。
+
+1. 确认版本:
+   ```
+   cd <GPUMD仓库目录>
+   git log -1 --oneline; git status; git diff --stat
+   md5sum src/force/uf3.cu src/force/uf3.cuh
+   grep -n "UF3_3B_NB_CACHE" src/force/uf3.cu | head -5
+   ```
+   - 预期: `UF3_3B_NB_CACHE` 存在 (= 含 P2-2b); 回传 md5 与 grep 输出。
+   - 若 grep 无结果 → 电脑B不是最新树, 停止, 回传 git log/status, 等 A 同步。
+2. 编译: 项目正常构建流程 (sm_120, 同 P2 验证时配置)。
+   - 预期: 编译通过, 仅 dead-code warning。
+   - 失败 → 回传完整 nvcc 命令行 + 完整错误日志 + nvcc --version。
+3. 回归 (全部用当前二进制重跑, 即使之前 PASS 过):
+   - `virial_check/`: FD pressure (2B / 2B+3B warp / 2B+3B dual) + cluster virial
+     → 全部 PASS, 误差量级与上表一致 (<0.01%)
+   - `mini-test/uf3_md` (303 atoms, 小盒子 multi-image): NVE 2000 steps
+     → 跑通, energy drift ≤ 1e-3 eV/atom
+   - `full-test/uf3_md` (66990 atoms): 记录 4 个 Stage 的 atom·step/s 与总时间
+     → 预期 ≥ 22.9 M atom·step/s (P2-2b 缓存若此前未计入, 可能更快; 记录新数字)
+   - 2B-only 同体系: 记录 atom·step/s, 更新 3B cost fraction
+4. 回传: 上述每项的 PASS/FAIL + 数字, 失败项附完整 stdout/stderr。
+
+## V2 — ncu 剖析 UF3 kernel (P2-3, 必做)
+
+在 `full-test/uf3_md` 目录:
+```
+ncu --set full --launch-count 3 -k "regex:uf3" -o uf3_ncu <gpumd可执行文件>
+ncu --import uf3_ncu.ncu-rep --page details > uf3_ncu.txt
+```
+- 注意: WSL 下 ncu 需要 GPU performance counter 权限
+  (驱动设置 NVIDIA Control Panel → Developer → Allow access to GPU
+  performance counters, 或以管理员运行)。若 ncu 在 WSL 不可用,
+  回退方案: 在 Windows 侧原生 ncu attach, 或改用
+  `nsys profile -o uf3_nsys <gpumd>` 仅拿 kernel 时间占比。
+- 需要回传的指标 (对 `find_force_uf3_3b_warp` / `find_force_uf3_2b` /
+  `filter_neighbor_3b` / `uf3_3b_collect_scratch` 各一份):
+  1. Duration 与各 kernel 占总步时间比例
+  2. Achieved occupancy / registers per thread / shared memory per block
+  3. SM throughput (%) vs DRAM throughput (%) — 判断 compute-bound 还是 memory-bound
+  4. L2 hit rate
+  5. Warp stall 原因 Top-3 (Stall LG Throttle / Long Scoreboard / ...)
+- 预期用途: 确认 3B warp kernel 当前瓶颈 (假设: tensor/坐标读取与 atomic),
+  决定大工程里 moment 形式重写的收益上限。
+
+## V3 — NEP4 同机基线 + kernel 时间分解 (大工程决策依据, 必做)
+
+目的: 在同一台 RTX 5090D 上量化 (a) UF2/UF3 vs NEP4 的真实速度比;
+(b) NEP4 各 kernel 时间占比 → 推断 kernel 融合的提速上限;
+(c) 径向部分占比 → 判断"B-spline 换基"值不值得做。
+
+1. 准备 NEP 模型: 任选其一, 优先①
+   - ① UNEP-v1 (16元素): Zenodo https://doi.org/10.5281/zenodo.11533864 下载
+     nep.txt; 体系用 bcc W 或等摩尔 MoTaVW, 原子数与 full-test 同量级 (~6-7万)
+   - ② 手头任何现成 nep.txt + 对应体系 (注明元素与截断)
+2. MD 基准: 与 full-test 相同的 run.in 结构 (NVE 或 NVT, ≥2000 steps,
+   排除前 200 步预热), 记录 atom·step/s。
+3. kernel 时间分解:
+   ```
+   nsys profile -o nep_nsys <gpumd可执行文件>
+   nsys stats --report cuda_gpu_kern_sum nep_nsys.nsys-rep > nep_kern_sum.txt
+   ```
+   回传 `find_descriptor` / `find_force_radial` / `find_partial_force_angular` /
+   `find_force_ZBL` / 邻居表 各自的时间占比表。
+4. (可选, 若 V2 ncu 可用) ncu 对 `find_partial_force_angular` 与
+   `find_descriptor` 各跑一份, 指标同 V2。
+5. 回传汇总表: 同机同量级体系下
+   | 模型 | atom·step/s | 备注 |
+   |------|------------|------|
+   | UF2 (2B-only) | | |
+   | UF2+UF3 (warp) | | |
+   | NEP4 | | |
+
+## 失败时统一回传清单
+
+完整命令行、完整错误日志、`nvcc --version`、`nvidia-smi` 头部、
+相关文件 `git diff`、ncu/nsys 版本号。不要只回传结论。
+
+## 本轮明确不做
+
+- 任何源代码修改 (包括 A5 knot 约定 — 这是设计决策, 由电脑A定方案)
+- NEP 径向制表实验、kernel 融合原型 — 属于大工程, 等本轮数据回来再立项
