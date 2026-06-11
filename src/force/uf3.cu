@@ -585,7 +585,7 @@ __device__ __forceinline__ void uf3_eval_triplet(
       #pragma unroll 4
       for (int dr = 0; dr < 4; dr++) {
         if (r0 + dr >= nc_jk) break;
-        const float C = __ldg(&Crow[dr * nc_ij * nc_ik]);
+        const float C = Crow[dr * nc_ij * nc_ik];
         Rv += C * b_jk[dr]; Rd23 += C * db_jk[dr];
       }
       val  += bpbq  * Rv;
