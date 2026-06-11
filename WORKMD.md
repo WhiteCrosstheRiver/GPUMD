@@ -23,10 +23,10 @@
 | B1 | lstsq 硬编码正则化, `lambda_1/lambda_2` 未接入 | 用户参数只进 SNES/Adam loss, 不进 lstsq (最关键的训练步) | ✅ 已接入 |
 | B2 | 能量行 feature 用 float atomicAdd 累加 | 大帧舍入误差 ~1e-4, 污染能量拟合下限 | ✅ 升 double |
 | B3 | Host 单线程 Cholesky O(n^3) | 3B时 nparam~10^4, 单线程 Cholesky min级 | ✅ 换 cusolver potrf/potrs |
-| B4 | 无 virial/stress 训练项 | `lambda_v` 已解析但未用 | ✅ 已接入 lstsq (2026-06-11, 未测试) |
+| B4 | 无 virial/stress 训练项 | `lambda_v` 已解析但未用 | ✅ 已接入+已测试 (2026-06-11) |
 | B5 | SNES/ES/Adam/LBFGS 对强凸线性问题冗余 | 论文就是一次线性求解 | 文档建议 |
 
-### C. MD 推理性能 (P2 — 待做)
+### C. MD 推理性能 (P2 — ✅ 已验证, 3.1× 加速)
 
 | # | 问题 | 根因 |
 |---|------|------|
@@ -83,7 +83,7 @@
    - Adam/SNES 梯度计算后调用 `model_->symmetrize_3b_gradient(grad)`
    - 保持梯度在对称子空间内, 不自破坏模型的邻接顺序不变性
 
-### P2 (推理加速) — 代码完成 ⚠️ 未编译/未测试 (本机无 nvcc, 2026-06-11)
+### P2 (推理加速) — ✅ 已测试 (2026-06-11, RTX 5090D + CUDA 13.1 + sm_120)
 
 9. **P2-1: 分离 3B 紧凑邻居表** (`src/force/uf3.cu`, `uf3.cuh`)
    - 新 kernel `filter_neighbor_3b`: 每步把活动邻居表 (全局 rc, 通常 = rc_2b)
@@ -111,9 +111,19 @@
       删除 `uf3_eval_triplet_hoisted`
     - 顺手修复: 3B-only 模型 (无 2B block) 时 1B e0 之前被丢弃,
       现在由 collect kernel / dual kernel 补加 (`e0_for_3b`)
-- P2-3: ncu profiling 验证 — **待做** (需有 GPU + nvcc 的机器)
+- P2-3: ncu profiling 验证 — **待做** (需 ncu 工具)
 
-### B4: virial 训练项 — 代码完成 ⚠️ 未编译/未测试 (2026-06-11)
+### P2-Bugfix: __ldg on shared memory pointer (2026-06-11)
+
+12. **Bug: `uf3_eval_triplet` line 588 `__ldg()` on shared-memory tensor** (`src/force/uf3.cu`)
+    - 当 3B tensor 被 stage 进 shared memory 时 (`smem_count > 0`)，`Crow` 指向
+      shared memory，`__ldg(&Crow[...])` 尝试对 shared memory 执行
+      `ld.global.nc` 指令，触发 `cudaErrorInvalidAddressSpace` (717)
+    - **修复**: 第 588 行 `__ldg(&Crow[...])` → `Crow[...]`，普通 load 对
+      shared/global 均兼容
+    - 修复后 sym_3b 模型全部通过测试
+
+### B4: virial 训练项 — ✅ 已测试 (2026-06-11)
 
 11. **B4: lstsq virial 行** (`src/main_uf3/`)
     - `dataset.cuh/.cu`: `Uf3Frame` 增加 `virial[6]` (xx yy zz xy xz yz, eV) +
@@ -187,28 +197,49 @@
    先换算; 解析代码假定 eV/Å³)
 
 ## 验证结果
-
+### P0+P1 基线验证 (回归, 2026-06-11 re-verified)
 | 测试 | 模型 | 结果 |
 |------|------|------|
-| FD pressure (∂E/∂V) | 2B | PASS (|err|<0.005%) |
-| FD pressure (∂E/∂V) | 2B+3B (trim=3) | PASS (|err|<0.005%) |
-| Cluster virial (Σ r×F) | 2B | PASS (|err|~1e-8 GPa) |
-| Cluster virial (Σ r×F) | 2B+3B (trim=3) | PASS (|err|~1e-8 GPa) |
+| FD pressure | 2B | PASS (|err|=0.005%) |
+| FD pressure | 2B+3B symmetric (warp) | PASS (|err|=0.004%) |
+| FD pressure | 2B+3B stripped (dual) | PASS (|err|=0.001%) |
+| Cluster virial | 2B | PASS (|err|=2.1e-9 GPa) |
+| Cluster virial | 2B+3B symmetric | PASS (|err|=1.3e-8 GPa) |
 | Pair symmetry | 2B (SiGe) | PASS (max|c_delta|=0) |
-| Training loss | 2B+3B (mini, 36 frames) | E=0.005 eV/atom, F=0.211 eV/A |
-| Training time | 2B+3B (10702 params, 36 frames) | 5.6s (vs 178.6s baseline) |
+| Training time | 2B+3B (10702 params, 36 frames) | 7.15s (old: 5.6s; +virial rows) |
 
-## MD 推理性能基线 (RTX 5090D, 66990 atoms, 2B+3B)
+### P2 推理加速验证 (2026-06-11, RTX 5090D + CUDA 13.1 + sm_120)
+| 测试 | 模型/条件 | 结果 |
+|------|-----------|------|
+| 编译 | sm_120, C++17 | PASS (仅 dead-code warning) |
+| 小盒子 MD (303 atoms) | NVE 2000 steps, 500K | PASS, energy drift=8.5e-4 eV/atom |
+| 邻居缓存一致性 | CACHE=64 vs CACHE=4 fallback | PASS, ΔU=0.0, max|ΔF|=2.4e-7 eV/Å |
+| 性能 (2B+3B, 66990 atoms) | Stage 1-4 平均 | **22.9 M atom·step/s** (基线 7.4 M, **3.1x**) |
+| 3B cost fraction | 2B-only vs 2B+3B | **7.7x** (基线 12.5x, **-38%**) |
 
-| 区间 | Speed (atom*step/s) |
-|------|---------------------|
-| Stage 1 (200→650K) | 9.67 M |
-| Stage 2 (650K hold) | 7.02 M |
-| Stage 3 (650K hold) | 6.65 M |
-| Stage 4 (650→200K) | 6.30 M |
+### B4 virial 训练验证 (2026-06-11)
+| 测试 | 条件 | 结果 |
+|------|------|------|
+| stress= 解析 + virial 计数 | 36 frames, train.xyz | PASS, "virial=36/36" |
+| (+virial rows) 打印 | lstsq 输出 | PASS |
+| 2B lstsq + virial | 54 params, 36 frames | PASS, 0.17s |
+| 2B+3B lstsq + virial | 10702 params, 36 frames | PASS, 7.15s |
+| FD pressure (训练后) | B4-trained 2B+3B model | PASS (|err|=0.004%) |
+| lambda_v=0 回归 | 2B, no virial rows | PASS, E/F loss 退化正常 |
 
-3B cost fraction (vs 2B-only): 2B+3B = 2.53s/500steps vs 2B-only = 0.20s/500steps
-→ **3B 比 2B 慢 ~12.5×** (邻居表合并 + 3B kernel SM 利用率问题是根因)
+
+## MD 推理性能 (RTX 5090D, 66990 atoms, 2B+3B)
+
+| 区间 | Speed 基线 (atom*step/s) | Speed P2 (atom*step/s) | 加速比 |
+|------|--------------------------|-------------------------|--------|
+| Stage 1 (200→650K) | 9.67 M | **27.44 M** | **2.84×** |
+| Stage 2 (650K hold) | 7.02 M | **22.99 M** | **3.28×** |
+| Stage 3 (650K hold) | 6.65 M | **19.07 M** | **2.87×** |
+| Stage 4 (650→200K) | 6.30 M | **21.82 M** | **3.46×** |
+| **Total time** | 74.44 s | **23.92 s** | **3.11×** |
+
+3B cost fraction: 旧基线 2B+3B = 2.53s vs 2B-only = 0.20s → **12.5× slower**.
+P2 基线: 2B+3B = 30.3M vs 2B-only = 234M atom·step/s → **7.7× slower (-38%).**
 
 ## 测试文件位置
 
