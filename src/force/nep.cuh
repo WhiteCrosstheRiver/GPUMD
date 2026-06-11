@@ -110,6 +110,10 @@ public:
         GPU_Vector<float> r12;
     } small_box_data;
 
+  // M1: fused inference path for the standard large-box route.
+  // Controlled by env var NEP_FUSED ("0" -> legacy multi-kernel path); default on.
+  bool use_fused_path_ = true;
+
   NEP(const char* file_potential, const int num_atoms);
   virtual ~NEP(void);
   virtual void compute(

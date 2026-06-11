@@ -27,6 +27,7 @@ heat transport, Phys. Rev. B. 104, 104309 (2021).
 #include "utilities/error.cuh"
 #include "utilities/gpu_macro.cuh"
 #include "utilities/nep_utilities.cuh"
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -360,6 +361,14 @@ NEP::NEP(const char* file_potential, const int num_atoms)
 
   initialize_dftd3();
   B_projection_size = annmb.num_neurons1 * (annmb.dim + 2);
+
+  // M1: fused large-box inference path (descriptor one-pass + fused force kernel).
+  // Set env var NEP_FUSED=0 to fall back to the legacy multi-kernel path.
+  const char* fused_env = std::getenv("NEP_FUSED");
+  use_fused_path_ = !(fused_env != nullptr && fused_env[0] == '0');
+  printf(
+    "    NEP large-box inference path: %s.\n",
+    use_fused_path_ ? "fused (M1, NEP_FUSED=0 to disable)" : "legacy (NEP_FUSED=0)");
 }
 
 NEP::~NEP(void)
@@ -936,6 +945,427 @@ static __global__ void find_force_ZBL(
   }
 }
 
+// ----------------------------------------------------------------------------
+// M1 fused inference path (large box, standard potential route).
+//
+// find_descriptor_onepass: identical outputs to find_descriptor, but the
+// angular section walks the angular neighbor list ONCE instead of
+// (n_max_angular+1) times.  Per neighbor, fc/fn are evaluated once and the
+// inner loop over n accumulates into s_all[n*NUM_OF_ABC + abc].  Per-element
+// accumulation order over neighbors is unchanged, so results are expected to
+// be bit-identical to the legacy kernel.
+//
+// find_force_fused: merges find_force_radial + find_partial_force_angular +
+// find_force_ZBL into one kernel with a single loop over the RADIAL list.
+// The angular list is an order-preserving subsequence of the radial list
+// (see find_neighbor_list_large_box), so angular pairs are recognized by a
+// merge pointer (NL_angular[k_ang] == n2) -- no distance re-derivation, and
+// k_ang reproduces exactly the f12 indexing convention the gather kernel
+// (find_properties_many_body) expects.
+// ----------------------------------------------------------------------------
+
+static __global__ void find_descriptor_onepass(
+  NEP::ParaMB paramb,
+  NEP::ANN annmb,
+  const int N,
+  const int N1,
+  const int N2,
+  const Box box,
+  const int* g_NN,
+  const int* g_NL,
+  const int* g_NN_angular,
+  const int* g_NL_angular,
+  const int* __restrict__ g_type,
+  const double* __restrict__ g_x,
+  const double* __restrict__ g_y,
+  const double* __restrict__ g_z,
+  const bool is_polarizability,
+  double* g_pe,
+  float* g_Fp,
+  double* g_virial,
+  float* g_sum_fxyz,
+  bool need_B_projection,
+  double* B_projection,
+  int B_projection_size)
+{
+  int n1 = blockIdx.x * blockDim.x + threadIdx.x + N1;
+  if (n1 < N2) {
+    int t1 = g_type[n1];
+    double x1 = g_x[n1];
+    double y1 = g_y[n1];
+    double z1 = g_z[n1];
+    float q[MAX_DIM] = {0.0f};
+
+    // get radial descriptors (identical to legacy)
+    for (int i1 = 0; i1 < g_NN[n1]; ++i1) {
+      int n2 = g_NL[n1 + N * i1];
+      float x12 = g_x[n2] - x1;
+      float y12 = g_y[n2] - y1;
+      float z12 = g_z[n2] - z1;
+      apply_mic(box, x12, y12, z12);
+      float d12 = sqrt(x12 * x12 + y12 * y12 + z12 * z12);
+      float fc12;
+      int t2 = g_type[n2];
+      float rc = (paramb.rc_radial[t1] + paramb.rc_radial[t2]) * 0.5f;
+      float rcinv = 1.0f / rc;
+      find_fc(rc, rcinv, d12, fc12);
+      float fn12[MAX_NUM_N];
+
+      find_fn(paramb.basis_size_radial, rcinv, d12, fc12, fn12);
+      for (int n = 0; n <= paramb.n_max_radial; ++n) {
+        float gn12 = 0.0f;
+        for (int k = 0; k <= paramb.basis_size_radial; ++k) {
+          int c_index = (n * (paramb.basis_size_radial + 1) + k) * paramb.num_types_sq;
+          c_index += t1 * paramb.num_types + t2;
+          gn12 += fn12[k] * annmb.c[c_index];
+        }
+        q[n] += gn12;
+      }
+    }
+
+    // get angular descriptors: ONE pass over the angular neighbor list
+    const int num_abc = (paramb.L_max + 1) * (paramb.L_max + 1) - 1;
+    float s_all[NUM_OF_ABC * MAX_NUM_N];
+    for (int n = 0; n <= paramb.n_max_angular; ++n) {
+      for (int abc = 0; abc < num_abc; ++abc) {
+        s_all[n * NUM_OF_ABC + abc] = 0.0f;
+      }
+    }
+    for (int i1 = 0; i1 < g_NN_angular[n1]; ++i1) {
+      int n2 = g_NL_angular[n1 + N * i1];
+      float x12 = g_x[n2] - x1;
+      float y12 = g_y[n2] - y1;
+      float z12 = g_z[n2] - z1;
+      apply_mic(box, x12, y12, z12);
+      float d12 = sqrt(x12 * x12 + y12 * y12 + z12 * z12);
+      float fc12;
+      int t2 = g_type[n2];
+      float rc = (paramb.rc_angular[t1] + paramb.rc_angular[t2]) * 0.5f;
+      float rcinv = 1.0f / rc;
+      find_fc(rc, rcinv, d12, fc12);
+      float fn12[MAX_NUM_N];
+      find_fn(paramb.basis_size_angular, rcinv, d12, fc12, fn12);
+      for (int n = 0; n <= paramb.n_max_angular; ++n) {
+        float gn12 = 0.0f;
+        for (int k = 0; k <= paramb.basis_size_angular; ++k) {
+          int c_index = (n * (paramb.basis_size_angular + 1) + k) * paramb.num_types_sq;
+          c_index += t1 * paramb.num_types + t2 + paramb.num_c_radial;
+          gn12 += fn12[k] * annmb.c[c_index];
+        }
+        accumulate_s(paramb.L_max, d12, x12, y12, z12, gn12, s_all + n * NUM_OF_ABC);
+      }
+    }
+    for (int n = 0; n <= paramb.n_max_angular; ++n) {
+      find_q(
+        paramb.L_max, paramb.has_q_222, paramb.has_q_1111, paramb.has_q_112, paramb.has_q_123,
+        paramb.has_q_233, paramb.has_q_134, paramb.n_max_angular + 1, n, s_all + n * NUM_OF_ABC,
+        q + (paramb.n_max_radial + 1));
+      for (int abc = 0; abc < num_abc; ++abc) {
+        g_sum_fxyz[(n * num_abc + abc) * N + n1] = s_all[n * NUM_OF_ABC + abc];
+      }
+    }
+
+    // nomalize descriptor (identical to legacy)
+    for (int d = 0; d < annmb.dim; ++d) {
+      q[d] = q[d] * annmb.q_scaler[d];
+    }
+
+    // get energy and energy gradient (identical to legacy)
+    float F = 0.0f, Fp[MAX_DIM] = {0.0f};
+
+    if (is_polarizability) {
+      apply_ann_one_layer(
+        annmb.dim,
+        annmb.num_neurons1,
+        annmb.w0_pol[t1],
+        annmb.b0_pol[t1],
+        annmb.w1_pol[t1],
+        annmb.b1_pol,
+        q,
+        F,
+        Fp);
+      g_virial[n1] = F;
+      g_virial[n1 + N * 1] = F;
+      g_virial[n1 + N * 2] = F;
+      F = 0.0f;
+      for (int d = 0; d < annmb.dim; ++d) {
+        Fp[d] = 0.0f;
+      }
+    }
+
+    if (paramb.version == 5) {
+      apply_ann_one_layer_nep5(
+        annmb.dim, annmb.num_neurons1, annmb.w0[t1], annmb.b0[t1], annmb.w1[t1], annmb.b1, q, F,
+        Fp);
+    } else {
+      if (!need_B_projection)
+        apply_ann_one_layer(
+          annmb.dim, annmb.num_neurons1, annmb.w0[t1], annmb.b0[t1], annmb.w1[t1], annmb.b1, q, F,
+          Fp);
+      else
+        apply_ann_one_layer(
+          annmb.dim, annmb.num_neurons1, annmb.w0[t1], annmb.b0[t1], annmb.w1[t1], annmb.b1, q, F,
+          Fp, B_projection + n1 * B_projection_size);
+    }
+    g_pe[n1] += F;
+
+    for (int d = 0; d < annmb.dim; ++d) {
+      g_Fp[d * N + n1] = Fp[d] * annmb.q_scaler[d];
+    }
+  }
+}
+
+static __global__ void find_force_fused(
+  NEP::ParaMB paramb,
+  NEP::ANN annmb,
+  const NEP::ZBL zbl,
+  const bool zbl_enabled,
+  const int N,
+  const int N1,
+  const int N2,
+  const Box box,
+  const int* g_NN,
+  const int* g_NL,
+  const int* g_NN_angular,
+  const int* g_NL_angular,
+  const int* __restrict__ g_type,
+  const double* __restrict__ g_x,
+  const double* __restrict__ g_y,
+  const double* __restrict__ g_z,
+  const float* __restrict__ g_Fp,
+  const float* __restrict__ g_sum_fxyz,
+  const bool is_dipole,
+  float* g_f12x,
+  float* g_f12y,
+  float* g_f12z,
+  double* g_fx,
+  double* g_fy,
+  double* g_fz,
+  double* g_virial,
+  double* g_pe)
+{
+  int n1 = blockIdx.x * blockDim.x + threadIdx.x + N1;
+  if (n1 < N2) {
+    int t1 = g_type[n1];
+    double x1 = g_x[n1];
+    double y1 = g_y[n1];
+    double z1 = g_z[n1];
+
+    // stage this atom's angular Fp and sum_fxyz (as in legacy angular kernel)
+    float Fp_ang[MAX_DIM_ANGULAR] = {0.0f};
+    float sum_fxyz[NUM_OF_ABC * MAX_NUM_N];
+    for (int d = 0; d < paramb.dim_angular; ++d) {
+      Fp_ang[d] = g_Fp[(paramb.n_max_radial + 1 + d) * N + n1];
+    }
+    const int num_abc = (paramb.L_max + 1) * (paramb.L_max + 1) - 1;
+    for (int n = 0; n < paramb.n_max_angular + 1; ++n) {
+      for (int abc = 0; abc < num_abc; ++abc) {
+        sum_fxyz[n * NUM_OF_ABC + abc] = g_sum_fxyz[(n * num_abc + abc) * N + n1];
+      }
+    }
+
+    // ZBL per-atom setup
+    int zi = 0;
+    float pow_zi = 0.0f;
+    if (zbl_enabled) {
+      zi = zbl.atomic_numbers[t1];
+      pow_zi = pow(float(zi), 0.23f);
+    }
+
+    float s_pe = 0.0f;
+    float s_fx = 0.0f;
+    float s_fy = 0.0f;
+    float s_fz = 0.0f;
+    float s_sxx = 0.0f;
+    float s_sxy = 0.0f;
+    float s_sxz = 0.0f;
+    float s_syx = 0.0f;
+    float s_syy = 0.0f;
+    float s_syz = 0.0f;
+    float s_szx = 0.0f;
+    float s_szy = 0.0f;
+    float s_szz = 0.0f;
+
+    int k_ang = 0;
+    const int NN_ang = g_NN_angular[n1];
+
+    for (int i1 = 0; i1 < g_NN[n1]; ++i1) {
+      int n2 = g_NL[n1 + N * i1];
+      int t2 = g_type[n2];
+      float x12 = g_x[n2] - x1;
+      float y12 = g_y[n2] - y1;
+      float z12 = g_z[n2] - z1;
+      apply_mic(box, x12, y12, z12);
+      float r12[3] = {x12, y12, z12};
+      float d12 = sqrt(r12[0] * r12[0] + r12[1] * r12[1] + r12[2] * r12[2]);
+      float d12inv = 1.0f / d12;
+
+      // ---- radial force part (identical math to find_force_radial) ----
+      {
+        float f12[3] = {0.0f};
+        float f21[3] = {0.0f};
+        float fc12, fcp12;
+        float rc = (paramb.rc_radial[t1] + paramb.rc_radial[t2]) * 0.5f;
+        float rcinv = 1.0f / rc;
+        find_fc_and_fcp(rc, rcinv, d12, fc12, fcp12);
+        float fn12[MAX_NUM_N];
+        float fnp12[MAX_NUM_N];
+        find_fn_and_fnp(paramb.basis_size_radial, rcinv, d12, fc12, fcp12, fn12, fnp12);
+        for (int n = 0; n <= paramb.n_max_radial; ++n) {
+          float gnp12 = 0.0f;
+          float gnp21 = 0.0f;
+          for (int k = 0; k <= paramb.basis_size_radial; ++k) {
+            int c_index = (n * (paramb.basis_size_radial + 1) + k) * paramb.num_types_sq;
+            gnp12 += fnp12[k] * annmb.c[c_index + t1 * paramb.num_types + t2];
+            gnp21 += fnp12[k] * annmb.c[c_index + t2 * paramb.num_types + t1];
+          }
+          float tmp12 = g_Fp[n1 + n * N] * gnp12 * d12inv;
+          float tmp21 = g_Fp[n2 + n * N] * gnp21 * d12inv;
+          for (int d = 0; d < 3; ++d) {
+            f12[d] += tmp12 * r12[d];
+            f21[d] -= tmp21 * r12[d];
+          }
+        }
+        s_fx += f12[0] - f21[0];
+        s_fy += f12[1] - f21[1];
+        s_fz += f12[2] - f21[2];
+        if (is_dipole) {
+          float r12_square = r12[0] * r12[0] + r12[1] * r12[1] + r12[2] * r12[2];
+          s_sxx -= r12_square * f21[0];
+          s_syy -= r12_square * f21[1];
+          s_szz -= r12_square * f21[2];
+        } else {
+          s_sxx += r12[0] * f21[0];
+          s_syy += r12[1] * f21[1];
+          s_szz += r12[2] * f21[2];
+        }
+        s_sxy += r12[0] * f21[1];
+        s_sxz += r12[0] * f21[2];
+        s_syx += r12[1] * f21[0];
+        s_syz += r12[1] * f21[2];
+        s_szx += r12[2] * f21[0];
+        s_szy += r12[2] * f21[1];
+      }
+
+      // ---- angular + ZBL part: only for pairs that are members of the
+      //      angular list (order-preserving subsequence of the radial list) ----
+      if (k_ang < NN_ang && g_NL_angular[n1 + N * k_ang] == n2) {
+        // angular partial force (identical math to find_partial_force_angular)
+        {
+          float f12[3] = {0.0f};
+          float fc12, fcp12;
+          float rc = (paramb.rc_angular[t1] + paramb.rc_angular[t2]) * 0.5f;
+          float rcinv = 1.0f / rc;
+          find_fc_and_fcp(rc, rcinv, d12, fc12, fcp12);
+          float fn12[MAX_NUM_N];
+          float fnp12[MAX_NUM_N];
+          find_fn_and_fnp(paramb.basis_size_angular, rcinv, d12, fc12, fcp12, fn12, fnp12);
+          for (int n = 0; n <= paramb.n_max_angular; ++n) {
+            float gn12 = 0.0f;
+            float gnp12 = 0.0f;
+            for (int k = 0; k <= paramb.basis_size_angular; ++k) {
+              int c_index = (n * (paramb.basis_size_angular + 1) + k) * paramb.num_types_sq;
+              c_index += t1 * paramb.num_types + t2 + paramb.num_c_radial;
+              gn12 += fn12[k] * annmb.c[c_index];
+              gnp12 += fnp12[k] * annmb.c[c_index];
+            }
+            accumulate_f12(
+              paramb.L_max,
+              paramb.has_q_222, paramb.has_q_1111, paramb.has_q_112, paramb.has_q_123,
+              paramb.has_q_233, paramb.has_q_134,
+              paramb.num_L,
+              n,
+              paramb.n_max_angular + 1,
+              d12,
+              r12,
+              gn12,
+              gnp12,
+              Fp_ang,
+              sum_fxyz,
+              f12);
+          }
+          g_f12x[k_ang * N + n1] = f12[0];
+          g_f12y[k_ang * N + n1] = f12[1];
+          g_f12z[k_ang * N + n1] = f12[2];
+        }
+
+        // ZBL (identical math to find_force_ZBL; ZBL runs on the angular list)
+        if (zbl_enabled) {
+          float f, fp;
+          int zj = zbl.atomic_numbers[t2];
+          float a_inv = (pow_zi + pow(float(zj), 0.23f)) * 2.134563f;
+          float zizj = K_C_SP * zi * zj;
+          if (zbl.flexibled) {
+            int ta, tb;
+            if (t1 < t2) {
+              ta = t1;
+              tb = t2;
+            } else {
+              ta = t2;
+              tb = t1;
+            }
+            int zbl_index = ta * zbl.num_types - (ta * (ta - 1)) / 2 + (tb - ta);
+            float ZBL_para[10];
+            for (int i = 0; i < 10; ++i) {
+              ZBL_para[i] = zbl.para[10 * zbl_index + i];
+            }
+            find_f_and_fp_zbl(ZBL_para, zizj, a_inv, d12, d12inv, f, fp);
+          } else {
+            float rc_inner = zbl.rc_inner;
+            float rc_outer = zbl.rc_outer;
+            if (paramb.use_typewise_cutoff_zbl) {
+              // zi and zj start from 1, so need to minus 1 here
+              rc_outer = min(
+                (COVALENT_RADIUS[zi - 1] + COVALENT_RADIUS[zj - 1]) *
+                  paramb.typewise_cutoff_zbl_factor,
+                rc_outer);
+              rc_inner = 0.0f;
+            }
+            find_f_and_fp_zbl(zizj, a_inv, rc_inner, rc_outer, d12, d12inv, f, fp);
+          }
+          float f2 = fp * d12inv * 0.5f;
+          float fz12[3] = {r12[0] * f2, r12[1] * f2, r12[2] * f2};
+          s_fx += 2.0f * fz12[0];
+          s_fy += 2.0f * fz12[1];
+          s_fz += 2.0f * fz12[2];
+          s_sxx -= r12[0] * fz12[0];
+          s_sxy -= r12[0] * fz12[1];
+          s_sxz -= r12[0] * fz12[2];
+          s_syx -= r12[1] * fz12[0];
+          s_syy -= r12[1] * fz12[1];
+          s_syz -= r12[1] * fz12[2];
+          s_szx -= r12[2] * fz12[0];
+          s_szy -= r12[2] * fz12[1];
+          s_szz -= r12[2] * fz12[2];
+          s_pe += f * 0.5f;
+        }
+
+        ++k_ang;
+      }
+    }
+
+    g_fx[n1] += s_fx;
+    g_fy[n1] += s_fy;
+    g_fz[n1] += s_fz;
+    // save virial
+    // xx xy xz    0 3 4
+    // yx yy yz    6 1 5
+    // zx zy zz    7 8 2
+    g_virial[n1 + 0 * N] += s_sxx;
+    g_virial[n1 + 1 * N] += s_syy;
+    g_virial[n1 + 2 * N] += s_szz;
+    g_virial[n1 + 3 * N] += s_sxy;
+    g_virial[n1 + 4 * N] += s_sxz;
+    g_virial[n1 + 5 * N] += s_syz;
+    g_virial[n1 + 6 * N] += s_syx;
+    g_virial[n1 + 7 * N] += s_szx;
+    g_virial[n1 + 8 * N] += s_szy;
+    if (zbl_enabled) {
+      g_pe[n1] += s_pe;
+    }
+  }
+}
+
 // large box fo MD applications
 void NEP::compute_large_box(
   Box& box,
@@ -996,6 +1426,82 @@ void NEP::compute_large_box(
   }
 
   bool is_polarizability = paramb.model_type == 2;
+  bool is_dipole = paramb.model_type == 1;
+
+  if (use_fused_path_) {
+    // ---- M1 fused path: 2 kernels + gather (vs legacy 3 kernels + gather + ZBL) ----
+    find_descriptor_onepass<<<grid_size, BLOCK_SIZE>>>(
+      paramb,
+      annmb,
+      N,
+      N1,
+      N2,
+      box,
+      nep_data.NN_radial.data(),
+      nep_data.NL_radial.data(),
+      nep_data.NN_angular.data(),
+      nep_data.NL_angular.data(),
+      type.data(),
+      position_per_atom.data(),
+      position_per_atom.data() + N,
+      position_per_atom.data() + N * 2,
+      is_polarizability,
+      potential_per_atom.data(),
+      nep_data.Fp.data(),
+      virial_per_atom.data(),
+      nep_data.sum_fxyz.data(),
+      need_B_projection,
+      B_projection,
+      B_projection_size);
+    GPU_CHECK_KERNEL
+
+    find_force_fused<<<grid_size, BLOCK_SIZE>>>(
+      paramb,
+      annmb,
+      zbl,
+      zbl.enabled,
+      N,
+      N1,
+      N2,
+      box,
+      nep_data.NN_radial.data(),
+      nep_data.NL_radial.data(),
+      nep_data.NN_angular.data(),
+      nep_data.NL_angular.data(),
+      type.data(),
+      position_per_atom.data(),
+      position_per_atom.data() + N,
+      position_per_atom.data() + N * 2,
+      nep_data.Fp.data(),
+      nep_data.sum_fxyz.data(),
+      is_dipole,
+      nep_data.f12x.data(),
+      nep_data.f12y.data(),
+      nep_data.f12z.data(),
+      force_per_atom.data(),
+      force_per_atom.data() + N,
+      force_per_atom.data() + N * 2,
+      virial_per_atom.data(),
+      potential_per_atom.data());
+    GPU_CHECK_KERNEL
+
+    find_properties_many_body(
+      box,
+      nep_data.NN_angular.data(),
+      nep_data.NL_angular.data(),
+      nep_data.f12x.data(),
+      nep_data.f12y.data(),
+      nep_data.f12z.data(),
+      is_dipole,
+      position_per_atom,
+      force_per_atom,
+      virial_per_atom);
+    GPU_CHECK_KERNEL
+
+    return;
+  }
+
+  // ---- legacy path (NEP_FUSED=0) ----
   find_descriptor<<<grid_size, BLOCK_SIZE>>>(
     paramb,
     annmb,
@@ -1021,7 +1527,6 @@ void NEP::compute_large_box(
     B_projection_size);
   GPU_CHECK_KERNEL
 
-  bool is_dipole = paramb.model_type == 1;
   find_force_radial<<<grid_size, BLOCK_SIZE>>>(
     paramb,
     annmb,

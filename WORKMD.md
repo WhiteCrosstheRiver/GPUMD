@@ -541,3 +541,95 @@ NEP4 计算分布:
 
 - M1 融合 kernel 设计与第一版 patch
 - A5 (knot 约定) 继续挂起, 与 M2 一并决策
+
+---
+
+# 第五轮：M1 第一版 patch (电脑A, 2026-06-12, 分支 nep-fusion-dev, 未编译/未测试)
+
+## 改动内容 (`src/force/nep.cu`, `src/force/nep.cuh`)
+
+1. **`find_descriptor_onepass`** (新 kernel)
+   - 角向描述符从 "每个 n 重走一遍角向邻居表" (n_max_angular+1 遍,
+     SiGe 模型 = 9 遍, 每遍重算距离/MIC/fc/全部 Chebyshev 基) 改为
+     **单遍邻居循环**: 每邻居 fc/fn 只算一次, 内层扫 n 累加到
+     `s_all[n*NUM_OF_ABC+abc]` (局部数组, 大小 NUM_OF_ABC×MAX_NUM_N,
+     与 legacy 角向力 kernel 的 local sum_fxyz 同规格, 有先例)
+   - 逐元素累加次序与 legacy 完全一致 → **输出预期 bit 级一致**
+   - 径向部分 / find_q / sum_fxyz 落盘 / ANN / 极化分支均 verbatim 不动
+
+2. **`find_force_fused`** (新 kernel)
+   - find_force_radial + find_partial_force_angular + find_force_ZBL 三合一,
+     **单循环走 radial 邻居表**
+   - 角向表是 radial 表的有序子序列 (find_neighbor_list_large_box 单遍构建),
+     用归并指针匹配 (`NL_angular[k_ang]==n2` 时才做角向+ZBL 并 k_ang++),
+     **不重新推导距离判据**, 零分类漂移风险; f12 写入索引 = k_ang,
+     与 gather (find_properties_many_body) 的约定严格一致
+   - 三段数学均 verbatim 拷贝; ZBL 力 `f12-f21` 改写为 `2*fz12`
+     (f21=-f12, IEEE 下严格相等); ZBL 段内部排序变量改名 ta/tb 避免遮蔽
+   - 力/virial/pe 寄存器累加, 每原子一次写回, 无 atomics (沿用 dual 方向技巧)
+
+3. **调度** (`compute_large_box` 标准版)
+   - `use_fused_path_` (构造时读环境变量 `NEP_FUSED`, "0"=legacy, 默认 fused;
+     启动时打印当前路径) → fused: onepass descriptor → fused force → gather;
+     legacy 分支原样保留, 同一二进制可 A/B
+   - **明确不动**: 小盒子路径 / 温度变体 compute_large_box(T,...) /
+     nep_multigpu / nep_charge / UF3 全部不变
+
+## 预期与已知风险 (B 验证时注意)
+
+- R1 **kernel 参数体积**: find_force_fused 按值传 paramb+annmb+zbl+box ≈ 6.3KB,
+  超经典 4KB 限制, 需 CUDA ≥12.1 + sm_70+ (H100/CUDA13.0 满足)。
+  若编译报 "formal parameter space overflowed" → 立即回传, A 把 zbl 改
+  __constant__
+- R2 **onepass descriptor 的 local memory**: s_all 5.4KB/thread, 换掉的是 8 遍
+  邻居重走; 理论稳赚, 但需 ncu 确认 occupancy / local traffic 没有反噬
+- R3 **数值一致性预期**: 无 ZBL 模型 (SiGe) fused vs legacy 应**逐位一致**
+  (所有累加次序保持); 有 ZBL 模型只是 ZBL 加进力累加器的位置提前,
+  容差内一致即可
+- R4 速度预期: 1.25~1.45× (descriptor 角向冗余消除是大头, launch 合并次之);
+  验收门槛 ≥1.4×, 若落在 1.25~1.4 之间不算失败, 回传 nsys 分解, A 继续
+  M1.1 (radial/angular 表合并读取、位置 float4 预打包等)
+
+## 电脑B验证清单 (H100, 按序执行, V1 不过则停)
+
+V1 编译
+```
+cd <repo>; git fetch && git checkout nep-fusion-dev && git pull
+<正常构建流程, -arch=sm_90>
+```
+预期: 无 error; 回传完整 warning 列表。若 R1 报错 → 停, 回传日志。
+
+V2 正确性 A/B (同一二进制, SiGe NEP4, 66990 atoms)
+```
+NEP_FUSED=0 ./gpumd ...   # legacy, dump_force/dump_position 每步, 跑 10 步 NVE
+NEP_FUSED=1 ./gpumd ...   # fused, 同一初始构型
+```
+比较逐原子力与总能:
+- 预期 (R3): SiGe 模型 max|ΔF| = 0.0 (逐位一致); 若非零但 <1e-4 eV/Å,
+  回传具体数值与 nep.txt 超参数, A 分析
+- 启动输出应打印 "NEP large-box inference path: fused"
+
+V3 NVE 守恒: SiGe 66990 atoms, NVE 2000 steps, fused 路径,
+drift 与 legacy 同量级 (legacy 参考值与 V1 轮一致)
+
+V4 性能 (与第三轮 V3 同一 run.in, 4-stage)
+- NEP_FUSED=1 vs NEP_FUSED=0 vs 第三轮基线 25.4M
+- 门槛 ≥35M; 1.25~1.4× 区间也回传完整数据 (见 R4)
+
+V5 nsys + ncu (H100 ncu 可用)
+```
+nsys profile -o nep_fused ./gpumd && nsys stats --report cuda_gpu_kern_sum ...
+ncu --set full -k "regex:find_descriptor_onepass|find_force_fused" --launch-count 3 -o m1_ncu ./gpumd
+```
+回传: 两个新 kernel 的时间占比、occupancy、registers/thread、
+local memory throughput (R2)、warp stall top-3
+
+V6 (可选) ZBL 模型: 若手头有 UNEP-v1 nep.txt (含 ZBL), 同样跑 V2 流程,
+容差 |ΔE|<1e-5 eV/atom, |ΔF|<1e-4 eV/Å
+
+失败回传: 完整命令、完整日志、nvcc/ncu 版本、git commit hash。
+
+## 备注
+
+- 本分支 WORKMD 不含 uf3-dev 上 B 的 H100 环境 commit (9b340fd9),
+  后续合并时 WORKMD 若冲突以两边拼接为准
