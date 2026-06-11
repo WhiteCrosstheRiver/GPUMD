@@ -537,6 +537,19 @@ NEP4 计算分布:
 2. Windows 宿主 NVIDIA Control Panel → Developer →
    Allow access to GPU performance counters (解锁 WSL ncu, M1 调优需要)
 
+## 当前环境 (电脑A, 2026-06-12)
+
+| 项 | 值 |
+|----|-----|
+| GPU | NVIDIA H100 PCIe, 81559 MiB, sm_90 |
+| Driver | 580.65.06 |
+| nvcc | V13.0.48 (CUDA 13.0) |
+| ncu | 2025.3.0.0 (可用) |
+| nsys | 2025.3.2 (可用) |
+| OS | Linux 4.18.0-553.6.1.el8.x86_64 |
+| git branch | uf3-dev |
+| git commit | 480e2d64 (round-4 decisions) |
+
 ## 待电脑A (下一轮)
 
 - M1 融合 kernel 设计与第一版 patch
