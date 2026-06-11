@@ -360,3 +360,128 @@ ncu --import uf3_ncu.ncu-rep --page details > uf3_ncu.txt
 
 - 任何源代码修改 (包括 A5 knot 约定 — 这是设计决策, 由电脑A定方案)
 - NEP 径向制表实验、kernel 融合原型 — 属于大工程, 等本轮数据回来再立项
+
+---
+
+# 第三轮验证执行报告 (电脑B, 2026-06-11)
+
+## 环境
+
+| 项 | 值 |
+|----|-----|
+| GPU | NVIDIA GeForce RTX 5090 D v2, sm_120 |
+| nvcc | V13.1.115 (CUDA 13.1) |
+| ncu | 2025.4.1 (可用但 ERR_NVGPUCTRPERM) |
+| nsys | 2025.5.2 (正常) |
+| git commit | 3bfa17ab Update WORKMD.md |
+| md5 uf3.cu | 913244e8625a31ea57307b9441a48be6 |
+| md5 uf3.cuh | 5a204e5ba3cd0595a8df3dfdafe2e680 |
+| UF3_3B_NB_CACHE | line 233, =64 (P2-2b 在树) |
+| 编译配置 | CC=/usr/local/cuda-13.1/bin/nvcc CUDA_ARCH=-arch=sm_120 CFLAGS=-std=c++17 |
+
+## V1 — 全量回归 ✅
+
+### 编译
+- gpumd ✅, uf3 ✅, nep ✅
+- Warning only: precompute_3b_basis_uniform, apply_mic, uf3_grad_2b 等未引用 (死代码)
+
+### 正确性回归 (使用当前二进制重跑)
+
+| 测试 | 结果 | 误差 |
+|------|------|------|
+| FD pressure 2B | PASS | \|err\|=0.005% |
+| FD pressure 2B+3B warp | PASS | \|err\|=0.004% |
+| FD pressure 2B+3B dual | PASS | \|err\|=0.001% |
+| Cluster virial 2B | PASS | \|err\|=2.1e-9 GPa |
+| Cluster virial 2B+3B | PASS | \|err\|=1.3e-8 GPa |
+| Mini MD (303 atoms, NVE 2000) | PASS | drift=0.618 meV/atom |
+
+### 性能回归 (66990 atoms SiGe 2B+3B)
+
+| Stage | atom·step/s | vs 基线 |
+|-------|------------|---------|
+| 1 (200→650K) | 27.53 M | 2.85× |
+| 2 (650K) | 23.04 M | 3.28× |
+| 3 (650K) | 22.65 M | 3.41× |
+| 4 (650→200K) | 21.93 M | 3.48× |
+| **Total time** | **22.77 s** | **3.27×** (基线 74.44s) |
+
+2B-only: 164.5 M atom·step/s
+3B cost fraction: **6.9×** (基线 12.5×, -45%)
+
+## V2 — UF3 kernel 时间分解 (nsys) ⚠️ ncu 不可用
+
+ncu 报 ERR_NVGPUCTRPERM (WSL 无 GPU perf counter 权限)。
+回退 nsys profile 拿到 kernel 时间占比 (8000 steps, 66990 atoms):
+
+| Kernel | 时间占比 | 总时间 | 平均/次 |
+|--------|---------|--------|---------|
+| `find_force_uf3_3b_warp` | **90.6%** | 18.33 s | 2.29 ms |
+| `find_force_uf3_2b` | 2.9% | 0.59 s | 74.3 µs |
+| `filter_neighbor_3b` | 1.9% | 0.39 s | 48.4 µs |
+| `uf3_3b_collect_scratch` | 0.2% | 38.6 ms | 4.8 µs |
+| 邻居表构建+排序 | 1.4% | 0.29 s | — |
+| thermo/verlet/pbc/其他 | 3.0% | — | — |
+
+关键发现:
+- 3B warp kernel 独占 90.6% GPU 时间 → 优化 3B 是唯一有效方向
+- 2B kernel 仅 2.9% → 3B/2B 单 kernel 速度比 ~31×
+- filter_neighbor_3b + collect_scratch 合计仅 2.1% → 开销可忽略
+- 邻居表构建 1.4% → 不是瓶颈
+
+ncu 缺失指标 (occupancy/register/L2/stall): 需要 Windows 原生 ncu 或管理员权限。
+
+## V3 — NEP4 同机基线 ✅
+
+NEP4 模型: SiGe, cutoff=6/4, n_max=8/8, basis_size=8/8, l_max=4/2/0
+同体系 66990 atoms, 相同 run.in (4-stage NVT Berendsen 200↔650K)
+
+### 速度对比
+
+| Stage | UF3 (2B+3B warp) | NEP4 |
+|-------|-------------------|------|
+| 1 (200→650K) | 27.53 M | 25.26 M |
+| 2 (650K) | 23.04 M | 25.60 M |
+| 3 (650K) | 22.65 M | 25.52 M |
+| 4 (650→200K) | 21.93 M | 25.31 M |
+| **Average** | **23.8 M** | **25.4 M** |
+
+NEP4 与 UF3 2B+3B 基本持平 (NEP4 略快 7%)。
+注意: UF3 在不同 Stage 波动 (21.9~27.5 M)，NEP4 非常稳定 (25.3~25.6 M)。
+
+### NEP4 kernel 时间分解 (nsys)
+
+| Kernel | 时间占比 | 总时间 | 平均/次 |
+|--------|---------|--------|---------|
+| `find_descriptor` | **47.7%** | 9.21 s | 1.15 ms |
+| `find_partial_force_angular` | 23.3% | 4.51 s | 0.56 ms |
+| `find_force_radial` | 17.6% | 3.40 s | 0.42 ms |
+| `find_neighbor_list_large_box` | 4.3% | 0.83 s | 0.10 ms |
+| `gpu_find_force_many_body` | 2.9% | 0.55 s | 69.1 µs |
+| 邻居表构建+排序 | 1.3% | — | — |
+| 其余 | 3.0% | — | — |
+
+NEP4 计算分布:
+- descriptor (径向+角向基函数): 47.7%
+- angular force: 23.3%
+- radial force: 17.6%
+- 合计 88.6% 在力计算, compute-bound
+
+### UF3 vs NEP4 结构对比 (供大工程决策)
+
+| 维度 | UF3 2B+3B | NEP4 |
+|------|-----------|------|
+| 推理速度 | 23.8 M | 25.4 M |
+| 主 kernel 占比 | 3B warp 90.6% | descriptor 47.7% |
+| 瓶颈类型 | 3B triplet loop (O(NN²)) | descriptor + angular |
+| 3B/angular 单 kernel 耗时 | 2.29 ms | 1.15+0.56=1.71 ms |
+| 径向部分 | 2B 0.59s (2.9%) | radial 3.40s (17.6%) |
+| 速度稳定性 | 波动 (21.9-27.5M) | 稳定 (25.3-25.6M) |
+
+大工程推论:
+- UF3 3B kernel 融合 + moment 形式重写: 理论上限 ~31× (降到 2B 水平),
+  实际可达 3-5× (考虑 triplet 无法完全消除)
+- NEP4 descriptor 占比 47.7%, kernel 融合 descriptor+radial+angular
+  理论上限 ~2×
+- B-spline 换基 (descriptor→simpler radial): NEP4 radial 仅 17.6%,
+  即使完全消除也只省 17.6%, 收益有限
