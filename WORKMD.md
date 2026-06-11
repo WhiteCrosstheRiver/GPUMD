@@ -485,3 +485,59 @@ NEP4 计算分布:
   理论上限 ~2×
 - B-spline 换基 (descriptor→simpler radial): NEP4 radial 仅 17.6%,
   即使完全消除也只省 17.6%, 收益有限
+
+---
+
+# 第四轮：决策与立项 (电脑A, 2026-06-12)
+
+## 基于 V1-V3 数据的结论
+
+1. **UF3 显式 triplet 路线封顶**: 3B kernel 90.6%, 辅助开销仅 2.1%,
+   工程优化已尽, 剩余瓶颈是 O(NN²) 公式本身; 且 UF3 速度随 Stage 波动
+   (z² 对温度/密度敏感) 而 NEP4 稳定 (O(z))
+   → **冻结 UF3, uf3-dev 作为稳定交付线, 不再做性能改动**
+2. **NEP4 融合收益 ~1.5-2×**: 88.6% 时间在三个力 kernel
+   (find_descriptor 47.7% + angular 23.3% + radial 17.6%),
+   对同一邻居表跑三遍循环 + Fp/sum_fxyz 走 global 往返 → M1 主攻方向
+3. **B-spline 换基降级为可选项**: radial 占比 ≤25%, 全消除也收益有限,
+   不作为大工程主轴
+4. **机器速度参照 (RTX 5090D, 66990 atoms)**: 2B-only 164.5M /
+   NEP4 25.4M / UF3 2B+3B 23.8M → 新模型现实目标 60-100M
+
+## 立项
+
+### M1 — NEP4 推理 kernel 融合 (分支 `nep-fusion-dev`, 自 uf3-dev 切出)
+
+- 内容: `find_descriptor` + `find_force_radial` + `find_partial_force_angular`
+  融合为单 kernel; 第二遍邻居循环重算基函数 (recompute over store),
+  不再把 Fp / sum_fxyz / 部分力写回 global 往返
+- **不改模型公式**, 现有 nep.txt (含 UNEP-v1) 直接兼容, 零训练风险
+- 验收标准:
+  1. 与原版 NEP 同模型同构型: |ΔE| < 1e-5 eV/atom, |ΔF| < 1e-4 eV/Å
+  2. 66990-atom 基准 ≥ 1.4× (≥ 35 M atom·step/s)
+  3. NVE 能量守恒不劣化 (drift 与原版同量级)
+- 电脑A产出第一版 patch 后, 下发逐条编译+验证清单
+
+### M2 — 新势函数 (M1 验收后从 nep-fusion-dev 切出新分支, 命名待定)
+
+- 形式: pair spline + moment 角向描述符 + per-type 小 readout
+  (H≈16, 16 元素全部权重可进 shared memory)
+- 训练: 复用 main_uf3 基建 (lstsq/virial 行/extxyz), 两阶段拟合
+  (线性 pair lstsq 吃掉大头 → 残差小 NN + 现成 NEP4 蒸馏)
+- 验收门槛: 速度 ≥ 3× NEP4 (5090D 上 ≥ 75M);
+  SiGe 数据集 force RMSE 劣化 ≤ 15% vs NEP4
+- 未达门槛 → 回退讨论, 不硬上
+- 消融要求: 每项改动 (H、l_max、cross-radial、4-body 开关) 都要有
+  对 NEP4 原版的速度+精度对照数字
+
+## 电脑B任务 (非阻塞)
+
+1. 创建分支:
+   `git checkout uf3-dev && git checkout -b nep-fusion-dev && git push -u origin nep-fusion-dev`
+2. Windows 宿主 NVIDIA Control Panel → Developer →
+   Allow access to GPU performance counters (解锁 WSL ncu, M1 调优需要)
+
+## 待电脑A (下一轮)
+
+- M1 融合 kernel 设计与第一版 patch
+- A5 (knot 约定) 继续挂起, 与 M2 一并决策
