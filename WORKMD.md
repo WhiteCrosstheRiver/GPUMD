@@ -143,6 +143,11 @@
 4. 性能: full-test/uf3_md (66990 atoms) 对比基线 6.3-9.7 M atom*step/s;
    3B vs 2B-only 的 12.5× 差距应显著缩小
 5. ncu: 看 3b_warp kernel 的 SM 占用率 / L2 命中率 / atomic 吞吐
+6. 邻居缓存两条路径一致性: 正常体系 (NN≤64, cache 命中) 与人为高密度
+   或 max_neighbor 调大的体系 (NN>64, global fallback) 力/能量应一致;
+   可用 UF3_3B_NB_CACHE 临时改小 (如 4) 重编译强制走 fallback 对照
+7. 小盒子 multi-image + use_3b_list_ 组合: shift code 过滤传递是否正确
+   (mini-test 303 atoms 若 cell < 2*rc 会触发)
 
 ### 第二轮审查 + 进一步优化 (2026-06-11, 未编译/未测试)
 
