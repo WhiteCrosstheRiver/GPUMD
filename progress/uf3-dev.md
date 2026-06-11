@@ -622,3 +622,58 @@ tensor L2 访问模式在 H100 上不利。
 ## 任务3/4: ncu 剖析 — 阻塞
 
 等待管理员解锁 ncu profiling 权限 (RmProfilingAdminOnly=0)。
+
+---
+
+# P3-R2: 基于 P3-V0 的决策 (电脑A, 2026-06-12)
+
+## 对 P3-V0 的解读
+
+1. **rc_3b=5.5 是 12.9x 的主因**: 与 rc_2b 相同 → P2 的 3B 紧凑表零收益,
+   z(5.5)~30 → ~450 三元组/原子。UF3 论文对 W 用 5.5/4.25 分离截断,
+   理由就是速度 (三元组 ~(5.5/4.25)^6 ≈ 4.7x)。这是模型选择, 不是 kernel 问题。
+2. **tensor 108KB 进不了 smem** (15^3 x 8 blocks), 每三元组 64 系数走 L2;
+   H100 2B+3B 比 5090D 慢 40% 与 L2 依赖 + H100 低时钟一致。
+3. **P3-1 (per-j hoisting) 撤回**: 15-knot 模型的 A_mn/A'_mn 中间量
+   = 225+225 float/线程 → 必进 local memory, 违反 M1 教训 L1。
+   仅在"邻居按 r_ik 排序 + 滑动窗口"下可行, 复杂度/收益比差, 降级到无限期。
+
+## 决策: 双轨
+
+**Track 1 (模型侧, 优先, 零代码改动):** rc_3b 重拟合实验
+**Track 2 (kernel 侧, 数据先行):** ncu 解锁 + maxrregcount 探针 → 再定 P3-2
+
+## 电脑B任务 P3-V1 (Track 1, 今天可做)
+
+1. 用现有训练器重拟合 SiGe (同一 train.xyz, lstsq 路径):
+   - 变体 A: rc_3b=4.25 (2B 仍 5.5), knots 数不变
+   - 变体 B: rc_3b=4.25 + 3B 13 knots (为 smem 铺路: 13^3x4Bx6=52.7KB)
+   - (2B block 完全不动, 1B e0 照常)
+2. 每个变体验收:
+   - FD pressure (2B+3B) PASS
+   - 测试集 E/F RMSE vs 现 rc5.5 模型: 劣化 <15% 接受, >15% 回传数据再议
+   - cluster virial PASS
+3. 通过验收的变体跑 4-stage 基准 (66990 atoms):
+   预期 3B kernel 三元组数 ~4.7x 削减, 端到端 2.5-3.5x;
+   并确认日志显示 use_3b_list_ 已启用 (rc_3b < rc_2b 触发 P2-1 过滤表)
+4. 回传: 两个变体的 RMSE 对照表 + 基准表 + FD/virial 结果
+
+## 电脑B任务 P3-V2 (Track 2, 并行/非阻塞)
+
+1. 继续推进 ncu 解锁: 请管理员写
+   `/etc/modprobe.d/nvidia-profiling.conf`:
+   `options nvidia NVreg_RmProfilingAdminOnly=0` + 重载模块/重启
+2. maxrregcount 探针 (无 ncu 也能判方向):
+   - 以 CFLAGS 追加 `-maxrregcount=64` / `96` / `128` 各编译一版
+     (只为探针, 不入库), 跑 2B+3B 基准 stage-2 即可
+   - 三版性能敏感 → 寄存器/occupancy 受限; 几乎平坦 → memory-bound
+     → P3-2 (canonical + bf16 tensor 入 smem) 升主攻
+3. 回传三版数字 + 默认版 registers/thread (编译时加 `-Xptxas -v` 抓
+   uf3_3b_warp 的 reg 数, 不需要 ncu)
+
+## 预期决策树 (预先声明)
+
+- Track 1 RMSE 通过 → rc_3b=4.25 成为推荐配置, 写入文档;
+  变体 B 同时通过 → P3-2 smem staging 收益翻倍, 升优先
+- maxrregcount 敏感 → A 出寄存器瘦身 patch;
+  平坦 + ncu 解锁后确认 L2-bound → A 出 canonical+bf16 smem patch (P3-2)
