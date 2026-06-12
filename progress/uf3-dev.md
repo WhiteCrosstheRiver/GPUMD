@@ -826,3 +826,55 @@ per-thread local sum_fxyz[NUM_OF_ABC][MAX_NUM_N] 数组完全落在寄存器，
 M1 fused kernel 直接复制了这一错误。
 UF3 3B warp kernel 的 register 控制 (90) 相对好。
  (docs(progress): P3-V0 — UF3/NEP4 ncu microarchitecture profiling on H100)
+
+---
+
+# P3-V1 执行记录 (电脑B, 2026-06-12, H100)
+
+## RMSE 对比
+
+SiGe 36 frames lstsq + adam (2400 gen), 2B blocks unchanged:
+
+| Model | E_train | F_train | E_test | F_test | ΔF_test% |
+|-------|---------|---------|--------|--------|----------|
+| Baseline (rc5.5, 15 knots) | 0.00467 | 0.17288 | 0.00376 | 0.19591 | — |
+| Variant A (rc4.25, 15 knots) | 0.00662 | 0.19639 | 0.00554 | 0.22472 | **+14.7%** |
+| Variant B (rc4.25, 13 knots) | 0.00712 | 0.19999 | 0.00582 | 0.21788 | **+11.2%** |
+
+Both within 15% threshold. Variant B (13 knots, fewer params) actually outperforms A (15 knots) in F_test.
+
+## 4-Stage MD 基准 (66990 atoms, H100)
+
+| Stage | Baseline (rc5.5) | Variant A (rc4.25, 15k) | Variant B (rc4.25, 13k) |
+|-------|-----------------|------------------------|------------------------|
+| 1 (200→650K) | 18.2 M | 43.4 M (2.38×) | 50.4 M (2.77×) |
+| 2 (650K) | 16.3 M | 37.9 M (2.33×) | 45.9 M (2.82×) |
+| 3 (650K) | 12.5 M | 36.6 M (2.93×) | 44.3 M (3.54×) |
+| 4 (650→200K) | 10.1 M | 34.7 M (3.44×) | 43.6 M (4.32×) |
+| **Average** | **14.3 M** | **38.2 M (2.67×)** | **46.1 M (3.22×)** |
+
+3B cost fraction vs 2B-only (183.8 M):
+- Baseline: 12.9×
+- Variant A: **4.8×** (-63%)
+- Variant B: **4.0×** (-69%)
+
+## 关键确认
+
+- ✅ P2-1 compact 3B neighbour list 已启用: "rc_3b-filtered" + rc=(4.2,4.2,4.2) < rc_2b=(5.5,5.5)
+- ✅ use_3b_list_ 激活: 三元组候选数 ~4.7× 削减 (rc ratio^6)
+- ❌ Tensor 仍不进 smem (108KB 或 70KB >> 48KB 预算)
+- FD pressure + cluster virial 验证: 待做
+
+## P3-V2 maxrregcount 探针
+
+| maxrregcount | Speed (atom·step/s) | vs Default |
+|-------------|---------------------|-----------|
+| Default (90 regs) | 18.99 M | baseline |
+| 64 | 18.58 M | -2.1% |
+| 96 | 19.12 M | +0.7% |
+| 128 | 19.07 M | +0.4% |
+
+性能几乎平坦（<3% variation）→ 3B kernel **memory-bound**。
+Per A's 决策树: "平坦 + ncu 解锁后确认 L2-bound → A 出 canonical+bf16 smem patch (P3-2)"
+与 ncu 数据一致: L2 hit 99.74%, memory throughput 63.87%, uncoalesced global loads (4.2/32 bytes).
+
