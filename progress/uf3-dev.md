@@ -677,3 +677,152 @@ tensor L2 访问模式在 H100 上不利。
   变体 B 同时通过 → P3-2 smem staging 收益翻倍, 升优先
 - maxrregcount 敏感 → A 出寄存器瘦身 patch;
   平坦 + ncu 解锁后确认 L2-bound → A 出 canonical+bf16 smem patch (P3-2)
+---
+
+## B执行的ncu剖析 (叠加入A的P3-R2)
+
+# P3-V0 追加: ncu 已解锁 + 完整剖析 (电脑B, 2026-06-12, H100)
+
+## ncu 状态: 已解锁 ✅
+
+`RmProfilingAdminOnly` = 0, ncu 2025.3.0 正常可用。
+
+## 任务3: UF3 3B warp kernel ncu 剖析
+
+`find_force_uf3_3b_warp`, (128,1,1)x(16748,1,1), 4.70 ms/launch, CC 9.0
+
+### Occupancy & Launch
+
+| Metric | Value |
+|--------|-------|
+| Block Size | 128 |
+| Registers Per Thread | **90** |
+| Dynamic Shared Memory Per Block | 5.12 KB |
+| Shared Memory Config Size | 65.54 KB |
+| Theoretical Occupancy | 31.25% |
+| Achieved Occupancy | **27.73%** |
+| Block Limit | Registers (5 blocks/SM) |
+| Active Warps Per Scheduler | 4.45 |
+| Eligible Warps Per Scheduler | **1.08** |
+
+### Compute vs Memory
+
+| Metric | Value |
+|--------|-------|
+| SM Frequency | 1.09 GHz |
+| Compute (SM) Throughput | **55.58%** |
+| Memory Throughput | **63.87%** |
+| DRAM Throughput | 0.15% |
+| L1/TEX Cache Throughput | 64.69% |
+| L2 Cache Throughput | 38.39% |
+| L2 Hit Rate | **99.74%** |
+| L1/TEX Hit Rate | 93.18% |
+| Elapsed Cycles | 5,144,125 |
+| Duration | 4.70 ms |
+
+判定: 略偏 memory-bound (63.87% vs 55.58%)，但接近平衡。
+Compute 仍有提升空间。L2 hit rate 极高 (tensor cache resident)。
+
+### Stall Analysis
+
+| Metric | Value |
+|--------|-------|
+| Warp Cycles Per Issued Instruction | **7.89** |
+| Issued IPC (active) | 2.25 |
+| Issue Slots Busy | 56.30% |
+| No Eligible (issue slot idle) | 43.51% |
+| Eligible Warps Per Scheduler | 1.08 |
+
+**Top Stall**: L1TEX Scoreboard (global/local memory dependency) — **30.0%** (2.4 cycles/issue)
+- 主因: warp 等待 L1TEX (global/local) 数据返回
+
+**Thread Divergence**: Avg active threads = 15.85/32 (predication off = 14.91)
+- 约 29.6% warp 效率损失来自分支/谓词
+
+### Memory Access Efficiency
+
+| Metric | Value | 严重度 |
+|--------|-------|--------|
+| Global Load Efficiency | **4.2/32 bytes** (13.1%) | ⚠️ 极差: stride/uncoalesced |
+| Local Load Efficiency | **8.1/32 bytes** (25.3%) | ⚠️ 差 |
+| Local Store Efficiency | **1.1/32 bytes** (3.4%) | ⚠️ 极差 |
+| Shared Load Bank Conflicts | **2.6-way** (13.26% conflicts) | ⚠️ 中等 |
+| Local Memory Spilling | **0** | ✅ 无 spill |
+| L2 Compression Success | 0% | — |
+
+### P3 方向判定
+
+按 progress/uf3-dev.md P3 判定标准:
+- SM throughput 55.58% < 60% → 非纯 compute-bound
+- DRAM throughput 0.15% → 非 DRAM-bound
+- L2 throughput 38.39% → 中等
+- Memory throughput 63.87% → 偏 memory-bound (L1/L2)
+- Occupancy 27.73%, regs=90 < 128 → 不需要 shrink-regs-first
+
+**结论: 介于 P3-1 (compute) 和 P3-2 (memory) 之间，两方向均可尝试。**
+
+P3-1 (per-j hoisting): compute 55.58% 有提升空间，减少 FMA 可降低 L1TEX pressure
+P3-2 (tensor compression): 当前 tensor 全量在 L2 (99.74% hit)，compression
+  可让 2-4 元素模型进 smem。但本模型 8 triplets 即使压成 fp16 也需 54KB
+  (17KB/smem) — 仍超 65KB smem 预算。只有 2 元素模型能进 smem。
+- 额外方向: shared memory bank conflict (2.6-way) 可优化 neighbor cache 布局
+- Thread divergence (29%+): warp-per-atom 并行, 各原子 NN 不同致 lane 间负载不均,
+  可考虑 neighbor-padding 或 NN cutoff
+
+## 任务4: NEP4 legacy 三 kernel ncu 剖析 (M2 寄存器预算标定)
+
+### find_descriptor
+
+| Metric | Value |
+|--------|-------|
+| Block Size | 64 |
+| Registers Per Thread | **165** |
+| Achieved Occupancy | **14.45%** (register-limited) |
+| Duration | 2.33 ms |
+| Compute (SM) Throughput | 26.95% |
+| Memory Throughput | 42.90% |
+| L1/TEX Hit Rate | 85.24% |
+| L2 Hit Rate | 98.84% |
+| DRAM Throughput | 4.68% |
+
+### find_force_radial
+
+| Metric | Value |
+|--------|-------|
+| Block Size | 64 |
+| Registers Per Thread | **64** |
+| Achieved Occupancy | **24.72%** |
+| Duration | 0.74 ms |
+| Compute (SM) Throughput | 39.88% |
+| Memory Throughput | 36.62% |
+| L1/TEX Hit Rate | 70.59% |
+| L2 Hit Rate | 96.49% |
+
+### find_partial_force_angular
+
+| Metric | Value |
+|--------|-------|
+| Block Size | 64 |
+| Registers Per Thread | **255** |
+| Achieved Occupancy | **11.11%** (heavily register-limited) |
+| Duration | 1.49 ms |
+| Compute (SM) Throughput | 29.59% |
+| Memory Throughput | 11.85% |
+| L1/TEX Hit Rate | 58.44% |
+| L2 Hit Rate | 79.91% |
+
+### NEP4 kernel 寄存器预算总结 (M2 参考)
+
+| Kernel | Regs/Thread | Occupancy | SM Util | 特征 |
+|--------|------------|-----------|---------|------|
+| descriptor | 165 | 14.45% | 26.95% | 基函数计算重, large local arrays |
+| radial | 64 | 24.72% | 39.88% | 最轻量, 效率最高 |
+| angular | 255 | 11.11% | 29.59% | sum_fxyz local arrays 吃寄存器 |
+| **UF3 3B warp** | **90** | **27.73%** | **55.58%** | 寄存器控制好, 但 memory pattern 差 |
+
+M2 教训: NEP4 angular kernel 的 255 reg/thread 是设计反例 —
+per-thread local sum_fxyz[NUM_OF_ABC][MAX_NUM_N] 数组完全落在寄存器，
+致 occupancy 仅 11%。M2 应避免此类 large per-thread arrays。
+M1 fused kernel 直接复制了这一错误。
+UF3 3B warp kernel 的 register 控制 (90) 相对好。
+ (docs(progress): P3-V0 — UF3/NEP4 ncu microarchitecture profiling on H100)
