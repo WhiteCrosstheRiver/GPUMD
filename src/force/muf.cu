@@ -157,6 +157,40 @@ __device__ inline void muf_eval_bspline_smooth_deriv(
   dbtilde[3] = (0.5*x*x * dinv) * fc + b3 * fcp;
 }
 
+// Combined value+derivative: saves one cos() per neighbor
+__device__ inline void muf_eval_bspline_smooth_both(
+    double r, double r_min, double rc, double inv_kdelta, int K,
+    double* btilde, double* dbtilde, int& p0)
+{
+  if (r >= rc) {
+    btilde[0] = btilde[1] = btilde[2] = btilde[3] = 0.0;
+    dbtilde[0] = dbtilde[1] = dbtilde[2] = dbtilde[3] = 0.0;
+    p0 = K - 4;
+    return;
+  }
+  double arg = M_PI * r / rc;
+  double fc = 0.5 * (cos(arg) + 1.0);
+  double fcp = -0.5 * (M_PI / rc) * sin(arg);
+  double t = (r - r_min) * inv_kdelta;
+  p0 = (int)floor(t);
+  if (p0 < 0) p0 = 0;
+  if (p0 > K - 4) p0 = K - 4;
+  double x = t - p0;
+  double dinv = inv_kdelta;
+  double inv6 = 1.0 / 6.0;
+  double omx = 1.0 - x;
+  double b0 = inv6 * omx * omx * omx;
+  double b1 = inv6 * (3.0*x*x*x - 6.0*x*x + 4.0);
+  double b2 = inv6 * (-3.0*x*x*x + 3.0*x*x + 3.0*x + 1.0);
+  double b3 = inv6 * x*x*x;
+  btilde[0] = b0 * fc;  btilde[1] = b1 * fc;
+  btilde[2] = b2 * fc;  btilde[3] = b3 * fc;
+  dbtilde[0] = (-0.5 * omx * omx * dinv) * fc + b0 * fcp;
+  dbtilde[1] = ((1.5*x*x - 2.0*x) * dinv) * fc + b1 * fcp;
+  dbtilde[2] = ((-1.5*x*x + x + 0.5) * dinv) * fc + b2 * fcp;
+  dbtilde[3] = (0.5*x*x * dinv) * fc + b3 * fcp;
+}
+
 // ============================================================================
 // Device: SH accumulation (spherical harmonics, NEP convention)
 // ============================================================================
@@ -237,6 +271,51 @@ __device__ void muf_accumulate_f12_one(double d12inv, double fn, double fnp,
 }
 
 // ============================================================================
+// Device: SH force backprop — FP32 for Blackwell (128 FP32 units vs 2 FP64 per SM)
+// ============================================================================
+template <int L>
+__device__ void muf_accumulate_f12_one_f32(float d12inv, float fn, float fnp,
+                                            const float* s, const float* r12, float* f12)
+{
+  float dx[3] = {(1.0f-r12[0]*r12[0])*d12inv, -r12[0]*r12[1]*d12inv, -r12[0]*r12[2]*d12inv};
+  float dy[3] = {-r12[0]*r12[1]*d12inv, (1.0f-r12[1]*r12[1])*d12inv, -r12[1]*r12[2]*d12inv};
+  float dz[3] = {-r12[0]*r12[2]*d12inv, -r12[1]*r12[2]*d12inv, (1.0f-r12[2]*r12[2])*d12inv};
+
+  float z_pow[9]; z_pow[0] = 1.0f;
+  for (int n = 1; n <= L; ++n) z_pow[n] = r12[2] * z_pow[n - 1];
+  float real_part = 1.0f, imag_part = 0.0f;
+  for (int n1 = 0; n1 <= L; ++n1) {
+    int n2_start = (L + n1) % 2 == 0 ? 0 : 1;
+    float z_factor = 0.0f, dz_factor = 0.0f;
+    for (int n2 = n2_start; n2 <= L - n1; n2 += 2) {
+      float zc = (float)muf_get_z_coeff(L, n1, n2);
+      z_factor += zc * z_pow[n2];
+      if (n2 > 0) dz_factor += zc * (float)n2 * z_pow[n2 - 1];
+    }
+    if (n1 == 0) {
+      for (int d = 0; d < 3; ++d)
+        f12[d] += s[0] * (z_factor * fnp * r12[d] + fn * dz_factor * dz[d]);
+    } else {
+      float real_part_n1 = (float)n1 * real_part, imag_part_n1 = (float)n1 * imag_part;
+      for (int d = 0; d < 3; ++d) {
+        float real_part_dx = dx[d], imag_part_dy = dy[d];
+        float cp_real = real_part_n1 * real_part_dx - imag_part_n1 * imag_part_dy;
+        float cp_imag = real_part_n1 * imag_part_dy + imag_part_n1 * real_part_dx;
+        f12[d] += (s[2*n1-1]*cp_real + s[2*n1-0]*cp_imag) * z_factor * fn;
+      }
+      float xy_real = r12[0]*real_part - r12[1]*imag_part;
+      float xy_imag = r12[0]*imag_part + r12[1]*real_part;
+      float xy_temp = s[2*n1-1]*xy_real + s[2*n1-0]*xy_imag;
+      for (int d = 0; d < 3; ++d)
+        f12[d] += xy_temp * (z_factor * fnp * r12[d] + fn * dz_factor * dz[d]);
+      float rp_real = r12[0]*real_part - r12[1]*imag_part;
+      float rp_imag = r12[0]*imag_part + r12[1]*real_part;
+      real_part = rp_real; imag_part = rp_imag;
+    }
+  }
+}
+
+// ============================================================================
 // Kernel: MUF-C 2B energy + force + virial (type-pair aware)
 // ============================================================================
 static __global__ void muf_kernel_2b(
@@ -263,6 +342,7 @@ static __global__ void muf_kernel_2b(
   int n_neigh = g_NN[i];
   double xi = g_x[i], yi = g_y[i], zi = g_z[i];
   double e2_i = 0.0;
+  double fx_i = 0.0, fy_i = 0.0, fz_i = 0.0;
   double virial_xx = 0.0, virial_yy = 0.0, virial_zz = 0.0;
   double virial_xy = 0.0, virial_xz = 0.0, virial_yz = 0.0;
 
@@ -275,10 +355,11 @@ static __global__ void muf_kernel_2b(
     double r = sqrt(r2);
     if (r >= rc_2b || r < 1e-12) continue;
 
+    // Combined B-spline value + derivative (single cos/sin call)
     double btilde[4], dbtilde[4];
     int p0;
-    muf_eval_bspline_smooth(r, r_min_2b, rc_2b, inv_kdelta_2b, K, btilde, p0);
-    muf_eval_bspline_smooth_deriv(r, r_min_2b, rc_2b, inv_kdelta_2b, K, dbtilde, p0);
+    muf_eval_bspline_smooth_both(r, r_min_2b, rc_2b, inv_kdelta_2b, K,
+                                  btilde, dbtilde, p0);
 
     int J = g_type[j];
     int I_eff = min(I, J), J_eff = max(I, J);
@@ -296,21 +377,23 @@ static __global__ void muf_kernel_2b(
     // Energy with 0.5 factor (undirected neighbor list)
     e2_i += 0.5 * v2;
 
-    // Force with 0.5 factor + Newton's 3rd law
+    // Force: accumulate atom i in registers (one write at end)
     double rinv = 1.0 / r;
     double f_mag = 0.5 * (-dv2);
     double fx = f_mag * dx * rinv;
     double fy = f_mag * dy * rinv;
     double fz = f_mag * dz * rinv;
 
-    atomicAdd(&g_fx[i], fx);
-    atomicAdd(&g_fy[i], fy);
-    atomicAdd(&g_fz[i], fz);
+    fx_i += fx;
+    fy_i += fy;
+    fz_i += fz;
+
+    // Atom j still needs atomicAdd (other threads may target j)
     atomicAdd(&g_fx[j], -fx);
     atomicAdd(&g_fy[j], -fy);
     atomicAdd(&g_fz[j], -fz);
 
-    // 2B virial: force * displacement
+    // 2B virial: accumulate in registers (written once at end)
     double f_raw = -dv2;
     double frx = f_raw * dx * rinv;
     double fry = f_raw * dy * rinv;
@@ -324,6 +407,11 @@ static __global__ void muf_kernel_2b(
   }
 
   g_energy[i] = e2_i;
+
+  // Write atom i's force (non-atomic: one thread per atom)
+  g_fx[i] = fx_i;
+  g_fy[i] = fy_i;
+  g_fz[i] = fz_i;
 
   // GPUMD virial format: [xx, yy, zz, xy, xz, yz, yx, zx, zy] per atom
   g_virial[i * 9 + 0] = virial_xx;
@@ -354,13 +442,13 @@ static __global__ void muf_kernel_descriptors(
     int MN,
     double rc_3b, double r_min_3b, double inv_kdelta_3b, int K, int L_max,
     int num_sh_terms,
-    double* __restrict__ g_moments)
+    float* __restrict__ g_moments)
 {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= N) return;
 
   int stride = num_types * K * num_sh_terms;
-  double* A_i = g_moments + i * stride;
+  float* A_i = g_moments + i * stride;
   int n_neigh = g_NN[i];
   double xi = g_x[i], yi = g_y[i], zi = g_z[i];
 
@@ -384,11 +472,11 @@ static __global__ void muf_kernel_descriptors(
     for (int p = 0; p < 4; ++p) {
       int a = p0 + p;
       if (a >= K) continue;
-      double weight = btilde[p];
+      float weight = (float)btilde[p];  // FP32 for accumulation
       // Offset for type channel J, B-spline a
-      double* A_aJ = A_i + J * K * num_sh_terms + a * num_sh_terms;
+      float* A_aJ = A_i + J * K * num_sh_terms + a * num_sh_terms;
       for (int sh = 0; sh < num_sh_terms; ++sh)
-        A_aJ[sh] += weight * s_local[sh];
+        A_aJ[sh] += weight * (float)s_local[sh];
     }
   }
 }
@@ -447,7 +535,7 @@ static __global__ void muf_kernel_3b_contract_v2(
           double A_J1a_w[17];
           int off_J1a = J1_base + a * num_sh_terms + start;
           for (int k = 1; k < ncomp; ++k)
-            A_J1a_w[k] = C3B_L[k] * A_i[off_J1a + k];
+            A_J1a_w[k] = C3B_L[k] * (double)A_i[off_J1a + k];
 
           int b_lo = max(a, a - band_width);
           int b_hi = min(K - 1, a + band_width);
@@ -462,7 +550,7 @@ static __global__ void muf_kernel_3b_contract_v2(
             double S = 0.0;
             int off_J2b = J2_base + b * num_sh_terms + start;
             for (int k = 1; k < ncomp; ++k)
-              S += A_J1a_w[k] * A_i[off_J2b + k];
+              S += A_J1a_w[k] * (double)A_i[off_J2b + k];
             e3_i += W_val * c_jj * c_ab * S;
           }
         }
@@ -523,7 +611,7 @@ static __global__ void muf_kernel_3b_contract_v2(
       for (int b = 0; b < K; ++b) {
         int off_J2b = J2_base + b * num_sh_terms + start;
         for (int k = 1; k < ncomp; ++k) {
-          double A_val = C3B_L[k] * A_i[off_J2b + k];
+          double A_val = C3B_L[k] * (double)A_i[off_J2b + k];
           if (A_val == 0.0) continue;
           // Scatter to all (J1,a)
           for (int J1 = 0; J1 < num_types; ++J1) {
@@ -618,7 +706,7 @@ static __global__ void muf_kernel_3b_contract_force_v4(
           double A_J1a_w[17];
           int off_J1a = J1_base + a * num_sh_terms + start;
           for (int k = 1; k < ncomp; ++k)
-            A_J1a_w[k] = C3B_L[k] * A_i[off_J1a + k];
+            A_J1a_w[k] = C3B_L[k] * (double)A_i[off_J1a + k];
 
           int b_lo = max(a, a - band_width);
           int b_hi = min(K - 1, a + band_width);
@@ -633,7 +721,7 @@ static __global__ void muf_kernel_3b_contract_force_v4(
             double S = 0.0;
             int off_J2b = J2_base + b * num_sh_terms + start;
             for (int k = 1; k < ncomp; ++k)
-              S += A_J1a_w[k] * A_i[off_J2b + k];
+              S += A_J1a_w[k] * (double)A_i[off_J2b + k];
             e3_i += W_val * c_jj * c_ab * S;
           }
         }
@@ -655,7 +743,7 @@ static __global__ void muf_kernel_3b_contract_force_v4(
       for (int b = 0; b < K; ++b) {
         int off_J2b = J2_base + b * num_sh_terms + start;
         for (int k = 1; k < ncomp; ++k) {
-          double A_val = C3B_L[k] * A_i[off_J2b + k];
+          double A_val = C3B_L[k] * (double)A_i[off_J2b + k];
           if (A_val == 0.0) continue;
 
           for (int J1 = 0; J1 < num_types; ++J1) {
@@ -784,7 +872,7 @@ static __global__ void muf_kernel_3b_contract_force_v4(
 //
 // Launch: grid=(N+127)/128, block=128 (thread-per-atom, full parallelism)
 // ============================================================================
-static __global__ void muf_kernel_3b_contract_force_v5(
+static __global__ void muf_kernel_3b_contract_force_v7(
     const double* __restrict__ g_x,
     const double* __restrict__ g_y,
     const double* __restrict__ g_z,
@@ -796,7 +884,7 @@ static __global__ void muf_kernel_3b_contract_force_v5(
     double rc_3b, double r_min_3b, double inv_kdelta_3b,
     int K, int L_max, int num_sh_terms,
     int num_JJ_pairs, int num_ab_pairs, int band_width,
-    const double* __restrict__ g_moments,
+    const float* __restrict__ g_moments,
     const double* __restrict__ g_W,
     const double* __restrict__ g_e0,
     double* __restrict__ g_potential,
@@ -805,15 +893,16 @@ static __global__ void muf_kernel_3b_contract_force_v5(
     double* __restrict__ g_fz,
     double* __restrict__ g_virial)
 {
-  // s_W_eff[type_I][J1][a][J2][b], 2×2×10×2×10 = 800 doubles = 6.4KB
-  __shared__ double s_W_eff[2][2][10][2][10];
+  // V7: s_W_eff precomputed for ALL L, all 128 threads participate
+  // s_W_eff[l_slot][type_I][J1][a][J2][b], 4×2×2×10×2×10 = 3200 doubles = 25.6KB
+  __shared__ double s_W_eff[4][2][2][10][2][10];
 
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i >= N) return;
 
   int I = g_type[i];
   int stride = num_types * K * num_sh_terms;
-  const double* A_i = g_moments + i * stride;
+  const float* A_i = g_moments + i * stride;
   double e3_i = 0.0;
 
   // Per-thread dE_dA accumulation across all L
@@ -825,7 +914,61 @@ static __global__ void muf_kernel_3b_contract_force_v5(
   double virial_xx = 0.0, virial_yy = 0.0, virial_zz = 0.0;
   double virial_xy = 0.0, virial_xz = 0.0, virial_yz = 0.0;
 
-  // ====== Per-L: energy + scatter dE_dA ======
+  // ====== Phase 1: Fill s_W_eff for ALL L (all 128 threads, single barrier) ======
+  // Total elements: L_max * 2 * 2 * 10 * 2 * 10 = 4*800 = 3200
+  // Each thread handles ~25 elements. Use stride over linear index.
+  int total_we = L_max * 2 * num_types * K * num_types * K; // 4*2*2*10*2*10 = 3200
+  // First, zero the shared memory (all threads)
+  for (int idx = threadIdx.x; idx < total_we; idx += blockDim.x)
+    ((double*)s_W_eff)[idx] = 0.0;
+  __syncthreads();
+
+  // Fill W_eff for all L, all type pairs — parallelized across all threads
+  for (int idx = threadIdx.x; idx < total_we; idx += blockDim.x) {
+    // Decode linear index: [l_slot][It][J1][a][J2][b]
+    int tmp = idx;
+    int b = tmp % K;        tmp /= K;
+    int J2 = tmp % num_types; tmp /= num_types;
+    int a = tmp % K;         tmp /= K;
+    int J1 = tmp % num_types; tmp /= num_types;
+    int It = tmp % 2;        tmp /= 2;
+    int l_slot = tmp;        // 0..L_max-1
+
+    int W_stride_It = It * num_JJ_pairs * num_ab_pairs * L_max;
+    double val = 0.0;
+
+    if (J2 >= J1) {
+      int jj = muf_JJ_idx(J1, J2, num_types);
+      int bmin = max(0, a - band_width), bmax = min(K - 1, a + band_width);
+      if (b >= bmin && b <= bmax) {
+        int aa = (a < b) ? a : b, bb = (a < b) ? b : a;
+        int ab = muf_ab_idx(aa, bb, K);
+        double w = g_W[W_stride_It + jj * num_ab_pairs * L_max + ab * L_max + l_slot];
+        if (w != 0.0) {
+          double c_jj = (J1 == J2) ? 1.0 : 2.0;
+          double c_ab = (aa == bb) ? 1.0 : 2.0;
+          val = 2.0 * c_jj * c_ab * w;
+        }
+      }
+    } else {
+      // J2 < J1: cross-type term, factor 4 instead of 2
+      int jj = muf_JJ_idx(J2, J1, num_types);
+      int bmin = max(0, a - band_width), bmax = min(K - 1, a + band_width);
+      if (b >= bmin && b <= bmax) {
+        int aa = (a < b) ? a : b, bb = (a < b) ? b : a;
+        int ab = muf_ab_idx(aa, bb, K);
+        double w = g_W[W_stride_It + jj * num_ab_pairs * L_max + ab * L_max + l_slot];
+        if (w != 0.0) {
+          double c_ab = (aa == bb) ? 1.0 : 2.0;
+          val = 4.0 * c_ab * w;
+        }
+      }
+    }
+    ((double*)s_W_eff)[idx] = val;
+  }
+  __syncthreads();
+
+  // ====== Phase 2+3: Energy + scatter for all L (no barriers needed) ======
   for (int L = 1; L <= L_max; ++L) {
     int start = L * L - 1;
     int ncomp = 2 * L + 1;
@@ -835,51 +978,7 @@ static __global__ void muf_kernel_3b_contract_force_v5(
     for (int k = 0; k < ncomp; ++k)
       C3B_L[k] = muf_C3B[start + k];
 
-    // Phase 1: Fill s_W_eff for this L (threads 0,1)
-    if (threadIdx.x < 2) {
-      int It = threadIdx.x;
-      int W_stride_It = It * num_JJ_pairs * num_ab_pairs * L_max;
-      for (int j1 = 0; j1 < num_types; ++j1)
-        for (int aa = 0; aa < K; ++aa)
-          for (int j2 = 0; j2 < num_types; ++j2)
-            for (int bb = 0; bb < K; ++bb)
-              s_W_eff[It][j1][aa][j2][bb] = 0.0;
-
-      for (int J1 = 0; J1 < num_types; ++J1) {
-        for (int a = 0; a < K; ++a) {
-          for (int J2 = J1; J2 < num_types; ++J2) {
-            int jj = muf_JJ_idx(J1, J2, num_types);
-            double c_jj = (J1 == J2) ? 1.0 : 2.0;
-            int W_jj_base = W_stride_It + jj * num_ab_pairs * L_max;
-            for (int b = max(0, a - band_width);
-                 b <= min(K - 1, a + band_width); ++b) {
-              int aa = (a < b) ? a : b, bb = (a < b) ? b : a;
-              int ab = muf_ab_idx(aa, bb, K);
-              double w = g_W[W_jj_base + ab * L_max + l_slot];
-              if (w == 0.0) continue;
-              double c_ab = (aa == bb) ? 1.0 : 2.0;
-              s_W_eff[It][J1][a][J2][b] += 2.0 * c_jj * c_ab * w;
-            }
-          }
-          for (int J2 = 0; J2 < J1; ++J2) {
-            int jj = muf_JJ_idx(J2, J1, num_types);
-            int W_jj_base = W_stride_It + jj * num_ab_pairs * L_max;
-            for (int b = max(0, a - band_width);
-                 b <= min(K - 1, a + band_width); ++b) {
-              int aa = (a < b) ? a : b, bb = (a < b) ? b : a;
-              int ab = muf_ab_idx(aa, bb, K);
-              double w = g_W[W_jj_base + ab * L_max + l_slot];
-              if (w == 0.0) continue;
-              double c_ab = (aa == bb) ? 1.0 : 2.0;
-              s_W_eff[It][J1][a][J2][b] += 4.0 * c_ab * w;
-            }
-          }
-        }
-      }
-    }
-    __syncthreads();
-
-    // Phase 2: Energy (register-hoisted)
+    // Phase 2: Energy (register-hoisted, reads W directly from global)
     int W_stride_I = I * num_JJ_pairs * num_ab_pairs * L_max;
     for (int J1 = 0; J1 < num_types; ++J1) {
       int J1_base = J1 * K * num_sh_terms;
@@ -892,7 +991,7 @@ static __global__ void muf_kernel_3b_contract_force_v5(
           double A_J1a_w[17];
           int off_J1a = J1_base + a * num_sh_terms + start;
           for (int k = 1; k < ncomp; ++k)
-            A_J1a_w[k] = C3B_L[k] * A_i[off_J1a + k];
+            A_J1a_w[k] = C3B_L[k] * (double)A_i[off_J1a + k];
           for (int b = max(a, a - band_width);
                b <= min(K - 1, a + band_width); ++b) {
             int aa = (a < b) ? a : b, bb = (a < b) ? b : a;
@@ -904,26 +1003,25 @@ static __global__ void muf_kernel_3b_contract_force_v5(
             double S = 0.0;
             int off_J2b = J2_base + b * num_sh_terms + start;
             for (int k = 1; k < ncomp; ++k)
-              S += A_J1a_w[k] * A_i[off_J2b + k];
+              S += A_J1a_w[k] * (double)A_i[off_J2b + k];
             e3_i += W_val * c_jj * c_ab * S;
           }
         }
       }
     }
 
-    // Phase 3: Scatter dE_dA for this L (uses s_W_eff from shared memory)
-    const double (*W_eff_I)[10][2][10] = (const double(*)[10][2][10])&s_W_eff[I][0][0][0][0];
+    // Phase 3: Scatter dE_dA for this L (uses ALL-L s_W_eff from shared memory)
     for (int J2 = 0; J2 < num_types; ++J2) {
       int J2_base = J2 * K * num_sh_terms;
       for (int b = 0; b < K; ++b) {
         int off_J2b = J2_base + b * num_sh_terms + start;
         for (int k = 1; k < ncomp; ++k) {
-          double A_val = C3B_L[k] * A_i[off_J2b + k];
+          double A_val = C3B_L[k] * (double)A_i[off_J2b + k];
           if (A_val == 0.0) continue;
           for (int J1 = 0; J1 < num_types; ++J1) {
             int dA_J1_base = J1 * K * num_sh_terms;
             for (int a = 0; a < K; ++a) {
-              double we = W_eff_I[J1][a][J2][b];
+              double we = s_W_eff[l_slot][I][J1][a][J2][b];
               if (we != 0.0)
                 dE_dA_all[dA_J1_base + a * num_sh_terms + start + k] += we * A_val;
             }
@@ -934,6 +1032,8 @@ static __global__ void muf_kernel_3b_contract_force_v5(
   }  // end of L loop
 
   // ====== Single neighbor pass: force backprop for ALL L ======
+  // V7: Accumulate atom i's force in registers (3 atomicAdd at end, not per-neighbor)
+  double fx_i = 0.0, fy_i = 0.0, fz_i = 0.0;
   int n_neigh = g_NN[i];
   for (int n = 0; n < n_neigh; ++n) {
     int j = g_NL[i * MN + n];
@@ -945,13 +1045,14 @@ static __global__ void muf_kernel_3b_contract_force_v5(
     if (r >= rc_3b || r < 1e-12) continue;
 
     double rinv = 1.0 / r;
-    double r12[3] = {dx * rinv, dy * rinv, dz * rinv};
+    // Precompute FP32 unit vector + rinv for fast SH backprop
+    float rinv_f = (float)rinv;
+    float r12_f[3] = {(float)(dx * rinv), (float)(dy * rinv), (float)(dz * rinv)};
 
     double btilde[4], dbtilde[4];
     int p0;
-    muf_eval_bspline_smooth(r, r_min_3b, rc_3b, inv_kdelta_3b, K, btilde, p0);
-    muf_eval_bspline_smooth_deriv(r, r_min_3b, rc_3b, inv_kdelta_3b,
-                                   K, dbtilde, p0);
+    muf_eval_bspline_smooth_both(r, r_min_3b, rc_3b, inv_kdelta_3b, K,
+                                  btilde, dbtilde, p0);
 
     int J = g_type[j];
     int dA_J_off = J * K * num_sh_terms;
@@ -960,32 +1061,34 @@ static __global__ void muf_kernel_3b_contract_force_v5(
     for (int p = 0; p < 4; ++p) {
       int a = p0 + p;
       if (a >= K) continue;
-      double fn = btilde[p], fnp = dbtilde[p];
+      float fn_f = (float)btilde[p], fnp_f = (float)dbtilde[p];
       const double* dA_aJ = dE_dA_all + dA_J_off + a * num_sh_terms;
 
       for (int L = 1; L <= L_max; ++L) {
         int start = L * L - 1;
         int ncomp = 2 * L + 1;
-        double s_L[17];
+        float s_L_f[17];
         for (int kk = 0; kk < ncomp; ++kk)
-          s_L[kk] = dA_aJ[start + kk];
+          s_L_f[kk] = (float)dA_aJ[start + kk];
 
-        double f12[3] = {0.0, 0.0, 0.0};
+        float f12_f[3] = {0.0f, 0.0f, 0.0f};
         switch (L) {
-          case 1: muf_accumulate_f12_one<1>(rinv, fn, fnp, s_L, r12, f12); break;
-          case 2: muf_accumulate_f12_one<2>(rinv, fn, fnp, s_L, r12, f12); break;
-          case 3: muf_accumulate_f12_one<3>(rinv, fn, fnp, s_L, r12, f12); break;
-          case 4: muf_accumulate_f12_one<4>(rinv, fn, fnp, s_L, r12, f12); break;
+          case 1: muf_accumulate_f12_one_f32<1>(rinv_f, fn_f, fnp_f, s_L_f, r12_f, f12_f); break;
+          case 2: muf_accumulate_f12_one_f32<2>(rinv_f, fn_f, fnp_f, s_L_f, r12_f, f12_f); break;
+          case 3: muf_accumulate_f12_one_f32<3>(rinv_f, fn_f, fnp_f, s_L_f, r12_f, f12_f); break;
+          case 4: muf_accumulate_f12_one_f32<4>(rinv_f, fn_f, fnp_f, s_L_f, r12_f, f12_f); break;
         }
-        f12_total[0] += f12[0];
-        f12_total[1] += f12[1];
-        f12_total[2] += f12[2];
+        f12_total[0] += (double)f12_f[0];
+        f12_total[1] += (double)f12_f[1];
+        f12_total[2] += (double)f12_f[2];
       }
     }
 
-    atomicAdd(&g_fx[i], -f12_total[0]);
-    atomicAdd(&g_fy[i], -f12_total[1]);
-    atomicAdd(&g_fz[i], -f12_total[2]);
+    // Accumulate atom i's force in registers (one atomicAdd at end)
+    fx_i -= f12_total[0];
+    fy_i -= f12_total[1];
+    fz_i -= f12_total[2];
+    // Atom j still needs per-neighbor atomicAdd (other threads may target j)
     atomicAdd(&g_fx[j], f12_total[0]);
     atomicAdd(&g_fy[j], f12_total[1]);
     atomicAdd(&g_fz[j], f12_total[2]);
@@ -998,16 +1101,22 @@ static __global__ void muf_kernel_3b_contract_force_v5(
     virial_yz += -f12_total[1] * dz;
   }
 
+  // One atomicAdd for atom i (instead of per-neighbor)
+  atomicAdd(&g_fx[i], fx_i);
+  atomicAdd(&g_fy[i], fy_i);
+  atomicAdd(&g_fz[i], fz_i);
+
+  // Non-atomic stores: one thread per atom i (safe for virial and potential)
   g_potential[i] += e3_i + g_e0[I];
-  atomicAdd(&g_virial[i * 9 + 0], virial_xx);
-  atomicAdd(&g_virial[i * 9 + 1], virial_yy);
-  atomicAdd(&g_virial[i * 9 + 2], virial_zz);
-  atomicAdd(&g_virial[i * 9 + 3], virial_xy);
-  atomicAdd(&g_virial[i * 9 + 4], virial_xz);
-  atomicAdd(&g_virial[i * 9 + 5], virial_yz);
-  atomicAdd(&g_virial[i * 9 + 6], virial_xy);
-  atomicAdd(&g_virial[i * 9 + 7], virial_xz);
-  atomicAdd(&g_virial[i * 9 + 8], virial_yz);
+  g_virial[i * 9 + 0] += virial_xx;
+  g_virial[i * 9 + 1] += virial_yy;
+  g_virial[i * 9 + 2] += virial_zz;
+  g_virial[i * 9 + 3] += virial_xy;
+  g_virial[i * 9 + 4] += virial_xz;
+  g_virial[i * 9 + 5] += virial_yz;
+  g_virial[i * 9 + 6] += virial_xy;
+  g_virial[i * 9 + 7] += virial_xz;
+  g_virial[i * 9 + 8] += virial_yz;
 }
 
 // ============================================================================
@@ -1322,10 +1431,10 @@ void MUF::compute(
     muf_data.moments.data());
   cudaEventRecord(evt_desc_stop);
 
-  // Step 3: 3B contract + force + energy FUSED (V5)
+  // Step 3: 3B contract + force + energy FUSED (V7: all-L W_eff, full parallelism)
   // W_eff in shared memory, dE_dA accumulated across all L,
   // single neighbor pass. Eliminates dE_dA+energy_3b global arrays.
-  muf_kernel_3b_contract_force_v5<<<grid_size, block_size>>>(
+  muf_kernel_3b_contract_force_v7<<<grid_size, block_size>>>(
     g_x, g_y, g_z, g_type, N, param.num_types,
     neighbor.NN.data(), neighbor.NL.data(), param.MN,
     param.rc_3b, param.r_min_3b, param.inv_kdelta_3b,

@@ -58,7 +58,7 @@ struct MUF_Data {
   GPU_Vector<int> NN;           // neighbor count per atom
   GPU_Vector<int> NL;           // flat neighbor list (GPU)
 
-  GPU_Vector<double> moments;   // type-channel descriptors
+  GPU_Vector<float> moments;    // type-channel descriptors (FP32: halved memory)
   // [N * num_types * K * num_sh_terms]
   GPU_Vector<double> dE_dA;     // gradient adjoint (same size as moments)
   GPU_Vector<double> energy_3b; // per-atom 3B energy

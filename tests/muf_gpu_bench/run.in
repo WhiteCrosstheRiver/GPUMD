@@ -2,5 +2,5 @@ potential   SiGe_full.muf
 velocity    1
 ensemble    nve
 time_step   0
-dump_force  1
-run         5
+dump_force  10000
+run         500
