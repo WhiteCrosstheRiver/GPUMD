@@ -1,6 +1,6 @@
 ###########################################################
 # Note: 
-# 1) You can modify -arch=sm_60 according to 
+# 1) You can modify -arch=sm_90 according to 
 #    your GPU architecture. For compute capability < 6.0,
 #    need to add -DUSE_KEPLER to CFLAGS.
 # 2) For Windows systems, if you get errors like 
@@ -14,15 +14,15 @@
 ###########################################################
 # some flags
 ###########################################################
-CC = nvcc
-CUDA_ARCH=-arch=sm_60
+CC = /usr/bin/nvcc
+CUDA_ARCH=-arch=sm_90
 ifdef OS # For Windows with the cl.exe compiler
 CFLAGS = -O3 $(CUDA_ARCH)
 else # For linux
-CFLAGS = -std=c++14 -O3 $(CUDA_ARCH)
+CFLAGS = -std=c++17 -O3 $(CUDA_ARCH)
 endif
 INC = -I./
-LDFLAGS = 
+LDFLAGS = --cudart=shared
 LIBS = -lcublas -lcusolver -lcufft
 
 

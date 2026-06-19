@@ -30,6 +30,7 @@ The driver class calculating force and related quantities.
 #include "ilp_tmd_sw.cuh"
 #include "ilp_tersoff.cuh"
 #include "lj.cuh"
+#include "muf.cuh"
 #include "nep.cuh"
 #include "nep_multigpu.cuh"
 #include "nep_charge.cuh"
@@ -214,6 +215,9 @@ void Force::parse_potential(
       }
     }
     potential.reset(new UF3(param[1], number_of_atoms, max_neigh));
+  } else if (strcmp(potential_name, "muf") == 0) {
+    potential.reset(new MUF(fid_potential, num_types, number_of_atoms));
+    is_nep = false;
   } else {
     PRINT_INPUT_ERROR("illegal potential model.\n");
   }
