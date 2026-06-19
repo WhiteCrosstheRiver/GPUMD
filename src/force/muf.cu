@@ -543,7 +543,475 @@ static __global__ void muf_kernel_3b_contract_v2(
 }
 
 // ============================================================================
-// Kernel: MUF-C 3B force + virial from dE/dA
+// Kernel: MUF-C 3B contract + force + energy fused (V4)
+//
+// Fuses contract (energy + dE/dA) + 3B force backprop + energy addition
+// into a single kernel. Eliminates dE_dA global memory (514MB write+read).
+//
+// Key design:
+//   - Per-L outer loop: dE_dA_L fits in ~180 doubles (L=4 worst case)
+//   - Scatter: each A[J2][b][k] read once, scatter to all (J1,a) targets
+//     with g_W read directly (L1-cached, no W_eff table needed)
+//   - Force backprop: per-L neighbor iteration, SH backprop immediately
+//   - 4x neighbor iterations (once per L), but B-spline eval is cheap
+//
+// Launch: grid=(N+127)/128, block=128 (thread-per-atom, full parallelism)
+// ============================================================================
+static __global__ void muf_kernel_3b_contract_force_v4(
+    const double* __restrict__ g_x,
+    const double* __restrict__ g_y,
+    const double* __restrict__ g_z,
+    const int* __restrict__ g_type,
+    int N, int num_types,
+    const int* __restrict__ g_NN,
+    const int* __restrict__ g_NL,
+    int MN,
+    double rc_3b, double r_min_3b, double inv_kdelta_3b,
+    int K, int L_max, int num_sh_terms,
+    int num_JJ_pairs, int num_ab_pairs, int band_width,
+    const double* __restrict__ g_moments,
+    const double* __restrict__ g_W,
+    const double* __restrict__ g_e0,
+    double* __restrict__ g_potential,  // in: 2B energy, out: 2B+3B+e0
+    double* __restrict__ g_fx,
+    double* __restrict__ g_fy,
+    double* __restrict__ g_fz,
+    double* __restrict__ g_virial)
+{
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= N) return;
+
+  int I = g_type[i];
+  int stride = num_types * K * num_sh_terms;
+  const double* A_i = g_moments + i * stride;
+  double e3_i = 0.0;
+
+  int W_stride_I = I * num_JJ_pairs * num_ab_pairs * L_max;
+  double xi = g_x[i], yi = g_y[i], zi = g_z[i];
+
+  // Virial accumulators
+  double virial_xx = 0.0, virial_yy = 0.0, virial_zz = 0.0;
+  double virial_xy = 0.0, virial_xz = 0.0, virial_yz = 0.0;
+
+  // ====== Per-L outer loop ======
+  for (int L = 1; L <= L_max; ++L) {
+    int start = L * L - 1;
+    int ncomp = 2 * L + 1;
+    int l_slot = L - 1;
+
+    // Load C3B for this L
+    double C3B_L[17];
+    for (int k = 0; k < ncomp; ++k)
+      C3B_L[k] = muf_C3B[start + k];
+
+    // ====== Part 1: Energy (register-hoisted, same as V3) ======
+    for (int J1 = 0; J1 < num_types; ++J1) {
+      int J1_base = J1 * K * num_sh_terms;
+      for (int J2 = J1; J2 < num_types; ++J2) {
+        int jj = muf_JJ_idx(J1, J2, num_types);
+        double c_jj = (J1 == J2) ? 1.0 : 2.0;
+        int W_jj_base = W_stride_I + jj * num_ab_pairs * L_max;
+        int J2_base = J2 * K * num_sh_terms;
+
+        for (int a = 0; a < K; ++a) {
+          // Register-hoist C3B-weighted A[J1][a] values
+          double A_J1a_w[17];
+          int off_J1a = J1_base + a * num_sh_terms + start;
+          for (int k = 1; k < ncomp; ++k)
+            A_J1a_w[k] = C3B_L[k] * A_i[off_J1a + k];
+
+          int b_lo = max(a, a - band_width);
+          int b_hi = min(K - 1, a + band_width);
+          for (int b = b_lo; b <= b_hi; ++b) {
+            int aa = min(a, b), bb = max(a, b);
+            if (aa != a) continue;
+            int ab = muf_ab_idx(a, b, K);
+            double W_val = g_W[W_jj_base + ab * L_max + l_slot];
+            if (W_val == 0.0) continue;
+            double c_ab = (a == b) ? 1.0 : 2.0;
+
+            double S = 0.0;
+            int off_J2b = J2_base + b * num_sh_terms + start;
+            for (int k = 1; k < ncomp; ++k)
+              S += A_J1a_w[k] * A_i[off_J2b + k];
+            e3_i += W_val * c_jj * c_ab * S;
+          }
+        }
+      }
+    }
+
+    // ====== Part 2: dE_dA scatter (per-L, in registers/stack) ======
+    // dE_dA_L[J1][a][k] — each thread's private copy for this L
+    // Compiler manages register spillage to L1 for L=4 (180 doubles)
+    double dE_dA_L[2][10][17];  // [num_types][K][2L+1], max 17 for L=4
+    for (int j1 = 0; j1 < num_types; ++j1)
+      for (int aa = 0; aa < K; ++aa)
+        for (int kk = 0; kk < ncomp; ++kk)
+          dE_dA_L[j1][aa][kk] = 0.0;
+
+    // Scatter: read each A[J2][b][k] once, distribute to all (J1,a)
+    for (int J2 = 0; J2 < num_types; ++J2) {
+      int J2_base = J2 * K * num_sh_terms;
+      for (int b = 0; b < K; ++b) {
+        int off_J2b = J2_base + b * num_sh_terms + start;
+        for (int k = 1; k < ncomp; ++k) {
+          double A_val = C3B_L[k] * A_i[off_J2b + k];
+          if (A_val == 0.0) continue;
+
+          for (int J1 = 0; J1 < num_types; ++J1) {
+            for (int a = 0; a < K; ++a) {
+              if (abs(a - b) > band_width) continue;
+
+              double w_eff;
+              if (J1 <= J2) {
+                int jj = muf_JJ_idx(J1, J2, num_types);
+                double c_jj = (J1 == J2) ? 1.0 : 2.0;
+                int ab = muf_ab_idx(min(a, b), max(a, b), K);
+                double w = g_W[W_stride_I + jj * num_ab_pairs * L_max
+                               + ab * L_max + l_slot];
+                double c_ab = (a == b) ? 1.0 : 2.0;
+                w_eff = 2.0 * c_jj * c_ab * w;
+              } else {
+                int jj = muf_JJ_idx(J2, J1, num_types);
+                int ab = muf_ab_idx(min(a, b), max(a, b), K);
+                double w = g_W[W_stride_I + jj * num_ab_pairs * L_max
+                               + ab * L_max + l_slot];
+                double c_ab = (a == b) ? 1.0 : 2.0;
+                w_eff = 4.0 * c_ab * w;
+              }
+
+              if (w_eff != 0.0)
+                dE_dA_L[J1][a][k] += w_eff * A_val;
+            }
+          }
+        }
+      }
+    }
+
+    // ====== Part 3: Force backprop for this L ======
+    int n_neigh = g_NN[i];
+    for (int n = 0; n < n_neigh; ++n) {
+      int j = g_NL[i * MN + n];
+      double dx = xi - g_x[j];
+      double dy = yi - g_y[j];
+      double dz = zi - g_z[j];
+      double r2 = dx*dx + dy*dy + dz*dz;
+      double r = sqrt(r2);
+      if (r >= rc_3b || r < 1e-12) continue;
+
+      double rinv = 1.0 / r;
+      double r12[3] = {dx * rinv, dy * rinv, dz * rinv};
+
+      double btilde[4], dbtilde[4];
+      int p0;
+      muf_eval_bspline_smooth(r, r_min_3b, rc_3b, inv_kdelta_3b, K, btilde, p0);
+      muf_eval_bspline_smooth_deriv(r, r_min_3b, rc_3b, inv_kdelta_3b,
+                                     K, dbtilde, p0);
+
+      int J = g_type[j];
+      double f12_total[3] = {0.0, 0.0, 0.0};
+
+      for (int p = 0; p < 4; ++p) {
+        int a = p0 + p;
+        if (a >= K) continue;
+        double fn = btilde[p], fnp = dbtilde[p];
+
+        // Extract dE_dA_L for this (J,a) into s_L array
+        double s_L[17];
+        for (int kk = 0; kk < ncomp; ++kk)
+          s_L[kk] = dE_dA_L[J][a][kk];
+
+        double f12[3] = {0.0, 0.0, 0.0};
+        switch (L) {
+          case 1: muf_accumulate_f12_one<1>(rinv, fn, fnp, s_L, r12, f12); break;
+          case 2: muf_accumulate_f12_one<2>(rinv, fn, fnp, s_L, r12, f12); break;
+          case 3: muf_accumulate_f12_one<3>(rinv, fn, fnp, s_L, r12, f12); break;
+          case 4: muf_accumulate_f12_one<4>(rinv, fn, fnp, s_L, r12, f12); break;
+        }
+        f12_total[0] += f12[0];
+        f12_total[1] += f12[1];
+        f12_total[2] += f12[2];
+      }
+
+      // Newton's 3rd law: dA_i contributes to f_i → -f12, f_j → +f12
+      atomicAdd(&g_fx[i], -f12_total[0]);
+      atomicAdd(&g_fy[i], -f12_total[1]);
+      atomicAdd(&g_fz[i], -f12_total[2]);
+      atomicAdd(&g_fx[j], f12_total[0]);
+      atomicAdd(&g_fy[j], f12_total[1]);
+      atomicAdd(&g_fz[j], f12_total[2]);
+
+      // 3B virial
+      virial_xx += -f12_total[0] * dx;
+      virial_yy += -f12_total[1] * dy;
+      virial_zz += -f12_total[2] * dz;
+      virial_xy += -f12_total[0] * dy;
+      virial_xz += -f12_total[0] * dz;
+      virial_yz += -f12_total[1] * dz;
+    }
+
+    // End of L loop
+  }
+
+  // ====== Write results (after all L processed) ======
+  // 3B energy + e0 added to potential (2B already there)
+  g_potential[i] += e3_i + g_e0[I];
+
+  // 3B virial (atomic: 2B kernel already wrote there)
+  atomicAdd(&g_virial[i * 9 + 0], virial_xx);
+  atomicAdd(&g_virial[i * 9 + 1], virial_yy);
+  atomicAdd(&g_virial[i * 9 + 2], virial_zz);
+  atomicAdd(&g_virial[i * 9 + 3], virial_xy);
+  atomicAdd(&g_virial[i * 9 + 4], virial_xz);
+  atomicAdd(&g_virial[i * 9 + 5], virial_yz);
+  atomicAdd(&g_virial[i * 9 + 6], virial_xy);
+  atomicAdd(&g_virial[i * 9 + 7], virial_xz);
+  atomicAdd(&g_virial[i * 9 + 8], virial_yz);
+}
+
+// ============================================================================
+// Kernel: MUF-C 3B contract + force + energy fused (V5)
+//
+// Fuses contract (energy + dE/dA) + 3B force backprop + energy addition.
+// Eliminates dE_dA global memory (514MB write+read).
+//
+// Key design:
+//   - W_eff precomputed in SHARED memory (2 types × 400 doubles = 6.4KB)
+//     Filled by 2 threads per block, reused by all threads during scatter
+//   - dE_dA accumulated across ALL L in per-thread local memory (480 doubles)
+//     Then ONE neighbor pass backprops all L simultaneously
+//   - Eliminates both scatter g_W reads AND multiple neighbor iterations
+//
+// Launch: grid=(N+127)/128, block=128 (thread-per-atom, full parallelism)
+// ============================================================================
+static __global__ void muf_kernel_3b_contract_force_v5(
+    const double* __restrict__ g_x,
+    const double* __restrict__ g_y,
+    const double* __restrict__ g_z,
+    const int* __restrict__ g_type,
+    int N, int num_types,
+    const int* __restrict__ g_NN,
+    const int* __restrict__ g_NL,
+    int MN,
+    double rc_3b, double r_min_3b, double inv_kdelta_3b,
+    int K, int L_max, int num_sh_terms,
+    int num_JJ_pairs, int num_ab_pairs, int band_width,
+    const double* __restrict__ g_moments,
+    const double* __restrict__ g_W,
+    const double* __restrict__ g_e0,
+    double* __restrict__ g_potential,
+    double* __restrict__ g_fx,
+    double* __restrict__ g_fy,
+    double* __restrict__ g_fz,
+    double* __restrict__ g_virial)
+{
+  // s_W_eff[type_I][J1][a][J2][b], 2×2×10×2×10 = 800 doubles = 6.4KB
+  __shared__ double s_W_eff[2][2][10][2][10];
+
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= N) return;
+
+  int I = g_type[i];
+  int stride = num_types * K * num_sh_terms;
+  const double* A_i = g_moments + i * stride;
+  double e3_i = 0.0;
+
+  // Per-thread dE_dA accumulation across all L
+  double dE_dA_all[480];  // num_types*K*num_sh_terms = 480
+  for (int idx = 0; idx < num_types * K * num_sh_terms; ++idx)
+    dE_dA_all[idx] = 0.0;
+
+  double xi = g_x[i], yi = g_y[i], zi = g_z[i];
+  double virial_xx = 0.0, virial_yy = 0.0, virial_zz = 0.0;
+  double virial_xy = 0.0, virial_xz = 0.0, virial_yz = 0.0;
+
+  // ====== Per-L: energy + scatter dE_dA ======
+  for (int L = 1; L <= L_max; ++L) {
+    int start = L * L - 1;
+    int ncomp = 2 * L + 1;
+    int l_slot = L - 1;
+
+    double C3B_L[17];
+    for (int k = 0; k < ncomp; ++k)
+      C3B_L[k] = muf_C3B[start + k];
+
+    // Phase 1: Fill s_W_eff for this L (threads 0,1)
+    if (threadIdx.x < 2) {
+      int It = threadIdx.x;
+      int W_stride_It = It * num_JJ_pairs * num_ab_pairs * L_max;
+      for (int j1 = 0; j1 < num_types; ++j1)
+        for (int aa = 0; aa < K; ++aa)
+          for (int j2 = 0; j2 < num_types; ++j2)
+            for (int bb = 0; bb < K; ++bb)
+              s_W_eff[It][j1][aa][j2][bb] = 0.0;
+
+      for (int J1 = 0; J1 < num_types; ++J1) {
+        for (int a = 0; a < K; ++a) {
+          for (int J2 = J1; J2 < num_types; ++J2) {
+            int jj = muf_JJ_idx(J1, J2, num_types);
+            double c_jj = (J1 == J2) ? 1.0 : 2.0;
+            int W_jj_base = W_stride_It + jj * num_ab_pairs * L_max;
+            for (int b = max(0, a - band_width);
+                 b <= min(K - 1, a + band_width); ++b) {
+              int aa = (a < b) ? a : b, bb = (a < b) ? b : a;
+              int ab = muf_ab_idx(aa, bb, K);
+              double w = g_W[W_jj_base + ab * L_max + l_slot];
+              if (w == 0.0) continue;
+              double c_ab = (aa == bb) ? 1.0 : 2.0;
+              s_W_eff[It][J1][a][J2][b] += 2.0 * c_jj * c_ab * w;
+            }
+          }
+          for (int J2 = 0; J2 < J1; ++J2) {
+            int jj = muf_JJ_idx(J2, J1, num_types);
+            int W_jj_base = W_stride_It + jj * num_ab_pairs * L_max;
+            for (int b = max(0, a - band_width);
+                 b <= min(K - 1, a + band_width); ++b) {
+              int aa = (a < b) ? a : b, bb = (a < b) ? b : a;
+              int ab = muf_ab_idx(aa, bb, K);
+              double w = g_W[W_jj_base + ab * L_max + l_slot];
+              if (w == 0.0) continue;
+              double c_ab = (aa == bb) ? 1.0 : 2.0;
+              s_W_eff[It][J1][a][J2][b] += 4.0 * c_ab * w;
+            }
+          }
+        }
+      }
+    }
+    __syncthreads();
+
+    // Phase 2: Energy (register-hoisted)
+    int W_stride_I = I * num_JJ_pairs * num_ab_pairs * L_max;
+    for (int J1 = 0; J1 < num_types; ++J1) {
+      int J1_base = J1 * K * num_sh_terms;
+      for (int J2 = J1; J2 < num_types; ++J2) {
+        int jj = muf_JJ_idx(J1, J2, num_types);
+        double c_jj = (J1 == J2) ? 1.0 : 2.0;
+        int W_jj_base = W_stride_I + jj * num_ab_pairs * L_max;
+        int J2_base = J2 * K * num_sh_terms;
+        for (int a = 0; a < K; ++a) {
+          double A_J1a_w[17];
+          int off_J1a = J1_base + a * num_sh_terms + start;
+          for (int k = 1; k < ncomp; ++k)
+            A_J1a_w[k] = C3B_L[k] * A_i[off_J1a + k];
+          for (int b = max(a, a - band_width);
+               b <= min(K - 1, a + band_width); ++b) {
+            int aa = (a < b) ? a : b, bb = (a < b) ? b : a;
+            if (aa != a) continue;
+            int ab = muf_ab_idx(a, b, K);
+            double W_val = g_W[W_jj_base + ab * L_max + l_slot];
+            if (W_val == 0.0) continue;
+            double c_ab = (a == b) ? 1.0 : 2.0;
+            double S = 0.0;
+            int off_J2b = J2_base + b * num_sh_terms + start;
+            for (int k = 1; k < ncomp; ++k)
+              S += A_J1a_w[k] * A_i[off_J2b + k];
+            e3_i += W_val * c_jj * c_ab * S;
+          }
+        }
+      }
+    }
+
+    // Phase 3: Scatter dE_dA for this L (uses s_W_eff from shared memory)
+    const double (*W_eff_I)[10][2][10] = (const double(*)[10][2][10])&s_W_eff[I][0][0][0][0];
+    for (int J2 = 0; J2 < num_types; ++J2) {
+      int J2_base = J2 * K * num_sh_terms;
+      for (int b = 0; b < K; ++b) {
+        int off_J2b = J2_base + b * num_sh_terms + start;
+        for (int k = 1; k < ncomp; ++k) {
+          double A_val = C3B_L[k] * A_i[off_J2b + k];
+          if (A_val == 0.0) continue;
+          for (int J1 = 0; J1 < num_types; ++J1) {
+            int dA_J1_base = J1 * K * num_sh_terms;
+            for (int a = 0; a < K; ++a) {
+              double we = W_eff_I[J1][a][J2][b];
+              if (we != 0.0)
+                dE_dA_all[dA_J1_base + a * num_sh_terms + start + k] += we * A_val;
+            }
+          }
+        }
+      }
+    }
+  }  // end of L loop
+
+  // ====== Single neighbor pass: force backprop for ALL L ======
+  int n_neigh = g_NN[i];
+  for (int n = 0; n < n_neigh; ++n) {
+    int j = g_NL[i * MN + n];
+    double dx = xi - g_x[j];
+    double dy = yi - g_y[j];
+    double dz = zi - g_z[j];
+    double r2 = dx*dx + dy*dy + dz*dz;
+    double r = sqrt(r2);
+    if (r >= rc_3b || r < 1e-12) continue;
+
+    double rinv = 1.0 / r;
+    double r12[3] = {dx * rinv, dy * rinv, dz * rinv};
+
+    double btilde[4], dbtilde[4];
+    int p0;
+    muf_eval_bspline_smooth(r, r_min_3b, rc_3b, inv_kdelta_3b, K, btilde, p0);
+    muf_eval_bspline_smooth_deriv(r, r_min_3b, rc_3b, inv_kdelta_3b,
+                                   K, dbtilde, p0);
+
+    int J = g_type[j];
+    int dA_J_off = J * K * num_sh_terms;
+    double f12_total[3] = {0.0, 0.0, 0.0};
+
+    for (int p = 0; p < 4; ++p) {
+      int a = p0 + p;
+      if (a >= K) continue;
+      double fn = btilde[p], fnp = dbtilde[p];
+      const double* dA_aJ = dE_dA_all + dA_J_off + a * num_sh_terms;
+
+      for (int L = 1; L <= L_max; ++L) {
+        int start = L * L - 1;
+        int ncomp = 2 * L + 1;
+        double s_L[17];
+        for (int kk = 0; kk < ncomp; ++kk)
+          s_L[kk] = dA_aJ[start + kk];
+
+        double f12[3] = {0.0, 0.0, 0.0};
+        switch (L) {
+          case 1: muf_accumulate_f12_one<1>(rinv, fn, fnp, s_L, r12, f12); break;
+          case 2: muf_accumulate_f12_one<2>(rinv, fn, fnp, s_L, r12, f12); break;
+          case 3: muf_accumulate_f12_one<3>(rinv, fn, fnp, s_L, r12, f12); break;
+          case 4: muf_accumulate_f12_one<4>(rinv, fn, fnp, s_L, r12, f12); break;
+        }
+        f12_total[0] += f12[0];
+        f12_total[1] += f12[1];
+        f12_total[2] += f12[2];
+      }
+    }
+
+    atomicAdd(&g_fx[i], -f12_total[0]);
+    atomicAdd(&g_fy[i], -f12_total[1]);
+    atomicAdd(&g_fz[i], -f12_total[2]);
+    atomicAdd(&g_fx[j], f12_total[0]);
+    atomicAdd(&g_fy[j], f12_total[1]);
+    atomicAdd(&g_fz[j], f12_total[2]);
+
+    virial_xx += -f12_total[0] * dx;
+    virial_yy += -f12_total[1] * dy;
+    virial_zz += -f12_total[2] * dz;
+    virial_xy += -f12_total[0] * dy;
+    virial_xz += -f12_total[0] * dz;
+    virial_yz += -f12_total[1] * dz;
+  }
+
+  g_potential[i] += e3_i + g_e0[I];
+  atomicAdd(&g_virial[i * 9 + 0], virial_xx);
+  atomicAdd(&g_virial[i * 9 + 1], virial_yy);
+  atomicAdd(&g_virial[i * 9 + 2], virial_zz);
+  atomicAdd(&g_virial[i * 9 + 3], virial_xy);
+  atomicAdd(&g_virial[i * 9 + 4], virial_xz);
+  atomicAdd(&g_virial[i * 9 + 5], virial_yz);
+  atomicAdd(&g_virial[i * 9 + 6], virial_xy);
+  atomicAdd(&g_virial[i * 9 + 7], virial_xz);
+  atomicAdd(&g_virial[i * 9 + 8], virial_yz);
+}
+
+// ============================================================================
+// Kernel: MUF-C 3B force + virial from dE/dA (for testing/fallback)
 // ============================================================================
 static __global__ void muf_kernel_3b_force(
     const double* __restrict__ g_x,
@@ -831,8 +1299,6 @@ void MUF::compute(
   virial_per_atom.fill(0.0);
   potential_per_atom.fill(0.0);
   muf_data.moments.fill(0.0);
-  muf_data.dE_dA.fill(0.0);
-  muf_data.energy_3b.fill(0.0);
 
   // Step 1: 2B energy + force + virial
   muf_kernel_2b<<<grid_size, block_size>>>(
@@ -856,34 +1322,24 @@ void MUF::compute(
     muf_data.moments.data());
   cudaEventRecord(evt_desc_stop);
 
-  // Step 3: 3B contraction (scatter-optimized dE/dA)
-  muf_kernel_3b_contract_v2<<<grid_size, block_size>>>(
-    N, param.num_types, param.K, param.L_max, param.num_sh_terms,
-    param.num_JJ_pairs, param.num_ab_pairs, param.band_width,
-    g_type,
-    muf_data.moments.data(), param.W.data(),
-    muf_data.energy_3b.data(), muf_data.dE_dA.data());
-  cudaEventRecord(evt_cont_stop);
-
-  // Step 4: 3B force + virial
-  muf_kernel_3b_force<<<grid_size, block_size>>>(
+  // Step 3: 3B contract + force + energy FUSED (V5)
+  // W_eff in shared memory, dE_dA accumulated across all L,
+  // single neighbor pass. Eliminates dE_dA+energy_3b global arrays.
+  muf_kernel_3b_contract_force_v5<<<grid_size, block_size>>>(
     g_x, g_y, g_z, g_type, N, param.num_types,
     neighbor.NN.data(), neighbor.NL.data(), param.MN,
     param.rc_3b, param.r_min_3b, param.inv_kdelta_3b,
     param.K, param.L_max, param.num_sh_terms,
-    muf_data.dE_dA.data(),
+    param.num_JJ_pairs, param.num_ab_pairs, param.band_width,
+    muf_data.moments.data(), param.W.data(), param.e0.data(),
+    potential_per_atom.data(),
     force_per_atom.data(),
     force_per_atom.data() + N,
     force_per_atom.data() + 2 * N,
     virial_per_atom.data());
-  cudaEventRecord(evt_force_stop);
-
-  // Step 5: Add 3B energy + e0 to per-atom potential (GPU, no roundtrip!)
-  muf_kernel_add_energy<<<grid_size, block_size>>>(
-    N, param.num_types, g_type,
-    param.e0.data(), muf_data.energy_3b.data(),
-    potential_per_atom.data());
-  cudaEventRecord(evt_add_stop);
+  cudaEventRecord(evt_cont_stop);
+  cudaEventRecord(evt_force_stop);  // fused: no-op
+  cudaEventRecord(evt_add_stop);    // fused: no-op
 
   GPU_CHECK_KERNEL
 
@@ -903,9 +1359,7 @@ void MUF::compute(
     fprintf(stderr, "  Neighbor:   %7.3f ms (%5.1f%%)\n", t_nl, 100*t_nl/total);
     fprintf(stderr, "  2B kernel:  %7.3f ms (%5.1f%%)\n", t_2b, 100*t_2b/total);
     fprintf(stderr, "  Descriptor: %7.3f ms (%5.1f%%)\n", t_desc, 100*t_desc/total);
-    fprintf(stderr, "  Contract:   %7.3f ms (%5.1f%%)\n", t_cont, 100*t_cont/total);
-    fprintf(stderr, "  3B Force:   %7.3f ms (%5.1f%%)\n", t_force, 100*t_force/total);
-    fprintf(stderr, "  AddEnergy:  %7.3f ms (%5.1f%%)\n", t_add, 100*t_add/total);
+    fprintf(stderr, "  Cont+Force+Add(fused): %7.3f ms (%5.1f%%)\n", t_cont, 100*t_cont/total);
     fprintf(stderr, "  Total GPU:  %7.3f ms\n", total);
   }
 }
