@@ -884,7 +884,6 @@ static __global__ void muf_kernel_3b_contract_force_v7(
     double rc_3b, double r_min_3b, double inv_kdelta_3b,
     int K, int L_max, int num_sh_terms,
     int num_JJ_pairs, int num_ab_pairs, int band_width,
-    const float* __restrict__ g_moments,
     const double* __restrict__ g_W,
     const double* __restrict__ g_e0,
     double* __restrict__ g_potential,
@@ -893,7 +892,7 @@ static __global__ void muf_kernel_3b_contract_force_v7(
     double* __restrict__ g_fz,
     double* __restrict__ g_virial)
 {
-  // V7: s_W_eff precomputed for ALL L, all 128 threads participate
+  // V9: Descriptor+Contract+Force fused — A_i computed in local memory (no global rountrip)
   // s_W_eff[l_slot][type_I][J1][a][J2][b], 4×2×2×10×2×10 = 3200 doubles = 25.6KB
   __shared__ double s_W_eff[4][2][2][10][2][10];
 
@@ -901,18 +900,49 @@ static __global__ void muf_kernel_3b_contract_force_v7(
   if (i >= N) return;
 
   int I = g_type[i];
-  int stride = num_types * K * num_sh_terms;
-  const float* A_i = g_moments + i * stride;
-  double e3_i = 0.0;
-
-  // Per-thread dE_dA accumulation across all L (FP32: halves local memory + trivially maps to FP32 F12)
   float dE_dA_all[480];  // num_types*K*num_sh_terms = 480
   for (int idx = 0; idx < num_types * K * num_sh_terms; ++idx)
-    dE_dA_all[idx] = 0.0;
+    dE_dA_all[idx] = 0.0f;
 
   double xi = g_x[i], yi = g_y[i], zi = g_z[i];
   double virial_xx = 0.0, virial_yy = 0.0, virial_zz = 0.0;
   double virial_xy = 0.0, virial_xz = 0.0, virial_yz = 0.0;
+
+  // ====== Phase 0: Compute A_i descriptors in local memory (V9: fused from descriptor kernel) ======
+  float A_i_local[480];
+  for (int idx = 0; idx < num_types * K * num_sh_terms; ++idx)
+    A_i_local[idx] = 0.0f;
+
+  int n_neigh = g_NN[i];
+  for (int k = 0; k < n_neigh; ++k) {
+    int j = g_NL[i * MN + k];
+    double dx = xi - g_x[j];
+    double dy = yi - g_y[j];
+    double dz = zi - g_z[j];
+    double r2 = dx*dx + dy*dy + dz*dz;
+    double r = sqrt(r2);
+    if (r >= rc_3b || r < 1e-12) continue;
+
+    double btilde[4];
+    int p0;
+    muf_eval_bspline_smooth(r, r_min_3b, rc_3b, inv_kdelta_3b, K, btilde, p0);
+
+    int J = g_type[j];
+    double s_local[80] = {0.0};
+    muf_accumulate_s(L_max, r, dx, dy, dz, 1.0, s_local);
+
+    for (int p = 0; p < 4; ++p) {
+      int a = p0 + p;
+      if (a >= K) continue;
+      float weight = (float)btilde[p];
+      float* A_aJ = A_i_local + J * K * num_sh_terms + a * num_sh_terms;
+      for (int sh = 0; sh < num_sh_terms; ++sh)
+        A_aJ[sh] += weight * (float)s_local[sh];
+    }
+  }
+
+  double e3_i = 0.0;
+  const float* A_i = A_i_local;
 
   // ====== Phase 1: Fill s_W_eff for ALL L (all 128 threads, single barrier) ======
   // Total elements: L_max * 2 * 2 * 10 * 2 * 10 = 4*800 = 3200
@@ -1032,9 +1062,9 @@ static __global__ void muf_kernel_3b_contract_force_v7(
   }  // end of L loop
 
   // ====== Single neighbor pass: force backprop for ALL L ======
-  // V7: Accumulate atom i's force in registers (3 atomicAdd at end, not per-neighbor)
+  // V9: Accumulate atom i's force in registers (3 atomicAdd at end, not per-neighbor)
   double fx_i = 0.0, fy_i = 0.0, fz_i = 0.0;
-  int n_neigh = g_NN[i];
+  // n_neigh already declared in Phase 0 (V9: fused descriptor)
   for (int n = 0; n < n_neigh; ++n) {
     int j = g_NL[i * MN + n];
     double dx = xi - g_x[j];
@@ -1422,16 +1452,10 @@ void MUF::compute(
     virial_per_atom.data());
   cudaEventRecord(evt_2b_stop);
 
-  // Step 2: 3B type-channel descriptors
-  muf_kernel_descriptors<<<grid_size, block_size>>>(
-    g_x, g_y, g_z, g_type, N, param.num_types,
-    neighbor.NN.data(), neighbor.NL.data(), param.MN,
-    param.rc_3b, param.r_min_3b, param.inv_kdelta_3b,
-    param.K, param.L_max, param.num_sh_terms,
-    muf_data.moments.data());
-  cudaEventRecord(evt_desc_stop);
+  // Step 2: 3B descriptors+contract+force FUSED (V9: A_i in local memory)
+  cudaEventRecord(evt_desc_stop);  // V9: descriptor fused inline
 
-  // Step 3: 3B contract + force + energy FUSED (V7: all-L W_eff, full parallelism)
+  // 3B contract + force + energy FUSED (V7: all-L W_eff, full parallelism)
   // W_eff in shared memory, dE_dA accumulated across all L,
   // single neighbor pass. Eliminates dE_dA+energy_3b global arrays.
   muf_kernel_3b_contract_force_v7<<<grid_size, block_size>>>(
@@ -1440,7 +1464,7 @@ void MUF::compute(
     param.rc_3b, param.r_min_3b, param.inv_kdelta_3b,
     param.K, param.L_max, param.num_sh_terms,
     param.num_JJ_pairs, param.num_ab_pairs, param.band_width,
-    muf_data.moments.data(), param.W.data(), param.e0.data(),
+    param.W.data(), param.e0.data(),
     potential_per_atom.data(),
     force_per_atom.data(),
     force_per_atom.data() + N,
