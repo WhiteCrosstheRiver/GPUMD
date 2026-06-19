@@ -905,8 +905,8 @@ static __global__ void muf_kernel_3b_contract_force_v7(
   const float* A_i = g_moments + i * stride;
   double e3_i = 0.0;
 
-  // Per-thread dE_dA accumulation across all L
-  double dE_dA_all[480];  // num_types*K*num_sh_terms = 480
+  // Per-thread dE_dA accumulation across all L (FP32: halves local memory + trivially maps to FP32 F12)
+  float dE_dA_all[480];  // num_types*K*num_sh_terms = 480
   for (int idx = 0; idx < num_types * K * num_sh_terms; ++idx)
     dE_dA_all[idx] = 0.0;
 
@@ -1023,7 +1023,7 @@ static __global__ void muf_kernel_3b_contract_force_v7(
             for (int a = 0; a < K; ++a) {
               double we = s_W_eff[l_slot][I][J1][a][J2][b];
               if (we != 0.0)
-                dE_dA_all[dA_J1_base + a * num_sh_terms + start + k] += we * A_val;
+                dE_dA_all[dA_J1_base + a * num_sh_terms + start + k] += (float)(we * A_val);
             }
           }
         }
@@ -1062,14 +1062,14 @@ static __global__ void muf_kernel_3b_contract_force_v7(
       int a = p0 + p;
       if (a >= K) continue;
       float fn_f = (float)btilde[p], fnp_f = (float)dbtilde[p];
-      const double* dA_aJ = dE_dA_all + dA_J_off + a * num_sh_terms;
+      const float* dA_aJ = dE_dA_all + dA_J_off + a * num_sh_terms;
 
       for (int L = 1; L <= L_max; ++L) {
         int start = L * L - 1;
         int ncomp = 2 * L + 1;
         float s_L_f[17];
         for (int kk = 0; kk < ncomp; ++kk)
-          s_L_f[kk] = (float)dA_aJ[start + kk];
+          s_L_f[kk] = dA_aJ[start + kk];
 
         float f12_f[3] = {0.0f, 0.0f, 0.0f};
         switch (L) {
