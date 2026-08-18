@@ -23,6 +23,14 @@
 #include <stdio.h>
 #include <vector>
 
+class Force;
+
 void Deposit(
-  const char** param, int num_param,  Atom& atoms, std::vector<Group>& groups);
+  const char** param,
+  int num_param,
+  Box& box,
+  Atom& atoms,
+  std::vector<Group>& groups,
+  GPU_Vector<double>& thermo,
+  Force& force);
 

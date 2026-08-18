@@ -366,6 +366,36 @@ NEP::~NEP(void)
   // nothing
 }
 
+void NEP::ensure_memory_for_atoms(const int num_atoms)
+{
+  N1 = 0;
+  N2 = num_atoms;
+  if ((int)nep_data.NN_radial.size() == num_atoms) {
+    return;
+  }
+
+  nep_data.f12x.resize(num_atoms * paramb.MN_angular);
+  nep_data.f12y.resize(num_atoms * paramb.MN_angular);
+  nep_data.f12z.resize(num_atoms * paramb.MN_angular);
+  nep_data.NN_radial.resize(num_atoms);
+  nep_data.NL_radial.resize(num_atoms * paramb.MN_radial);
+  nep_data.NN_angular.resize(num_atoms);
+  nep_data.NL_angular.resize(num_atoms * paramb.MN_angular);
+  nep_data.Fp.resize(num_atoms * annmb.dim);
+  nep_data.sum_fxyz.resize(
+    num_atoms * (paramb.n_max_angular + 1) * ((paramb.L_max + 1) * (paramb.L_max + 1) - 1));
+  nep_data.cell_count.resize(num_atoms);
+  nep_data.cell_count_sum.resize(num_atoms);
+  nep_data.cell_contents.resize(num_atoms);
+  nep_data.cpu_NN_radial.resize(num_atoms);
+  nep_data.cpu_NN_angular.resize(num_atoms);
+}
+
+void NEP::update_number_of_atoms(const int number_of_atoms)
+{
+  ensure_memory_for_atoms(number_of_atoms);
+}
+
 void NEP::update_potential(float* parameters, ANN& ann)
 {
   float* pointer = parameters;
@@ -1604,6 +1634,7 @@ void NEP::compute(
   GPU_Vector<double>& force_per_atom,
   GPU_Vector<double>& virial_per_atom)
 {
+  ensure_memory_for_atoms(type.size());
   const bool is_small_box = get_expanded_box(paramb.rc_radial, box, ebox);
   if (is_small_box) {
     // update small_box_data
@@ -2149,6 +2180,7 @@ void NEP::compute(
   GPU_Vector<double>& force_per_atom,
   GPU_Vector<double>& virial_per_atom)
 {
+  ensure_memory_for_atoms(type.size());
   const bool is_small_box = get_expanded_box(paramb.rc_radial, box, ebox);
 
   if (is_small_box) {

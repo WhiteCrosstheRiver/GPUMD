@@ -20,7 +20,9 @@ Run simulation according to the inputs in the run.in file.
 #include "add_efield.cuh"
 #include "add_force.cuh"
 #include "add_random_force.cuh"
+#include "atom_mutation.cuh"
 #include "cohesive.cuh"
+#include "control.cuh"
 #include "electron_stop.cuh"
 #include "force/force.cuh"
 #include "integrate/ensemble.cuh"
@@ -183,33 +185,12 @@ void Run::execute_run_in()
   fflush(stdout);
   print_line_2();
 
-  std::ifstream input("run.in");
-  if (!input.is_open()) {
-    std::cout << "Failed to open run.in." << std::endl;
-    exit(1);
-  }
-
-  while (input.peek() != EOF) {
-    std::vector<std::string> tokens = get_tokens(input);
-    std::vector<std::string> tokens_without_comments;
-    for (const auto& t : tokens) {
-      if (t[0] != '#') {
-        tokens_without_comments.emplace_back(t);
-      } else {
-        break;
-      }
-    }
-    if (tokens_without_comments.size() > 0) {
-      parse_one_keyword(tokens_without_comments);
-    }
-  }
+  execute_control_script(*this, "run.in");
 
   print_line_1();
   printf("Finished executing the commands in run.in.\n");
   fflush(stdout);
   print_line_2();
-
-  input.close();
 }
 
 void Run::perform_a_run()
@@ -359,14 +340,14 @@ void Run::parse_one_keyword(std::vector<std::string>& tokens)
   if (strcmp(param[0], "potential") == 0) {
     force.parse_potential(param, num_param, box, atom.type.size());
   } else if (strcmp(param[0], "replicate") == 0) {
-    Replicate(param, num_param, box, atom, group);
-    allocate_memory_gpu(group, atom, thermo);
+    AtomMutation::sync_cpu_from_gpu(atom);
+    Replicate(param, num_param, box, atom, group, thermo, force);
   } else if (strcmp(param[0], "deposit") == 0) {
-    Deposit(param, num_param, atom, group);
-    allocate_memory_gpu(group, atom, thermo);
+    AtomMutation::sync_cpu_from_gpu(atom);
+    Deposit(param, num_param, box, atom, group, thermo, force);
   } else if (strcmp(param[0], "delete") == 0) {
-    Delete(param, num_param, atom, group);
-    allocate_memory_gpu(group, atom, thermo);
+    AtomMutation::sync_cpu_from_gpu(atom);
+    Delete(param, num_param, box, atom, group, thermo, force);
   } else if (strcmp(param[0], "minimize") == 0) {
     Minimize minimize;
     minimize.parse_minimize(

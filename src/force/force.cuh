@@ -52,6 +52,7 @@ public:
     GPU_Vector<double>& mass_per_atom);
 
   void finalize();
+  void update_number_of_atoms(const int number_of_atoms);
 
   int get_number_of_types(FILE* fid_potential);
   void set_hnemd_parameters(const double, const double, const double);

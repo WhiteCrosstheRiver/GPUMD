@@ -1,0 +1,10 @@
+replicate       5 5 5
+potential       ../../../../potentials/nep/C_2022_NEP3.txt
+velocity        300
+time_step       1.0
+
+for T values 300 400
+    ensemble nvt_ber ${T} ${T} 100
+    dump_thermo 1
+    run 2
+end

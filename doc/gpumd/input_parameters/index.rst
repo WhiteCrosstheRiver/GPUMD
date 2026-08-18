@@ -47,6 +47,9 @@ Below you can find a listing of keywords for the ``run.in`` input file.
 
    minimize
    run
+   for
+   deposit
+   delete
    compute
    compute_adf
    compute_cohesive

@@ -16,4 +16,3 @@ dump_exyz   1 1 1 1
 ensemble    nvt_ber 400 400 10
 run         1
 
-

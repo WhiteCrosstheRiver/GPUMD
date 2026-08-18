@@ -100,6 +100,18 @@ Actions
      - Run a number of :term:`MD` steps
      - Yes
      - No
+   * - :ref:`for <kw_for>`
+     - Repeat a block of commands
+     - Yes
+     - N/A
+   * - :ref:`deposit <kw_deposit>`
+     - Insert atom(s) (special-purpose; deposition)
+     - Yes
+     - N/A
+   * - :ref:`delete <kw_delete>`
+     - Remove atoms (``disconnected`` is special-purpose and expensive)
+     - Yes
+     - N/A
    * - :ref:`compute <kw_compute>`
      - Compute some time and space-averaged quantities
      - No

@@ -337,6 +337,14 @@ void Force::finalize()
   compute_hnemdec_ = -1;
 }
 
+void Force::update_number_of_atoms(const int number_of_atoms)
+{
+  number_of_atoms_ = number_of_atoms;
+  for (auto& potential : potentials) {
+    potential->update_number_of_atoms(number_of_atoms);
+  }
+}
+
 void Force::set_hnemd_parameters(
   const double hnemd_fe_x, const double hnemd_fe_y, const double hnemd_fe_z)
 {

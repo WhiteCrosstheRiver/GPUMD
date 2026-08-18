@@ -1,0 +1,10 @@
+replicate       25 25 23
+potential       ../../../../potentials/nep/C_2022_NEP3.txt
+velocity        300
+time_step       1.0
+ensemble        nve
+
+for i range 1 50
+    deposit C position gaussian 44.625 44.625 1.0 velocity gaussian 0.001 5 surface local 5.0 offset antivel 2.0
+    run 100
+end

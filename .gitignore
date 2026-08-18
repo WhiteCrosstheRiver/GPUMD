@@ -25,3 +25,16 @@ __pycache__/
 */__pycache__/
 README.gnep.md
 push-to-both.sh
+
+# GPUMD/NEP run outputs (keep input xyz such as model.xyz, train.xyz)
+*.out
+dump.xyz
+dump*.xyz
+movie.xyz
+movie*.xyz
+restart.xyz
+restart*.xyz
+observer.xyz
+observer*.xyz
+active.xyz
+active*.xyz

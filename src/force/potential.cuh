@@ -36,6 +36,13 @@ public:
   Potential(void);
   virtual ~Potential(void);
 
+  // Called after deposit/delete/replicate so N1/N2 and per-atom buffers match the new atom count.
+  virtual void update_number_of_atoms(const int number_of_atoms)
+  {
+    N1 = 0;
+    N2 = number_of_atoms;
+  }
+
   virtual void compute(
     Box& box,
     const GPU_Vector<int>& type,

@@ -14,10 +14,18 @@
 */
 
 #include "replicate.cuh"
+#include "atom_mutation.cuh"
 #include "utilities/gpu_macro.cuh"
 #include <cstring>
 
-void Replicate(const char** param, int num_param, Box& box, Atom& atoms, std::vector<Group>& groups)
+void Replicate(
+  const char** param,
+  int num_param,
+  Box& box,
+  Atom& atoms,
+  std::vector<Group>& groups,
+  GPU_Vector<double>& thermo,
+  Force& force)
 {
   int r[3]; // the number of replicates
   if (num_param != 4) {
@@ -76,25 +84,18 @@ void Replicate(const char** param, int num_param, Box& box, Atom& atoms, std::ve
     box.cpu_h[i] *= r[direction];
   }
   box.get_inverse();
-  // copy to old
+
+  atoms.cpu_type.swap(new_atoms.cpu_type);
+  atoms.cpu_mass.swap(new_atoms.cpu_mass);
+  atoms.cpu_charge.swap(new_atoms.cpu_charge);
+  atoms.cpu_atom_symbol.swap(new_atoms.cpu_atom_symbol);
+  atoms.cpu_position_per_atom.swap(new_atoms.cpu_position_per_atom);
+  atoms.cpu_velocity_per_atom.swap(new_atoms.cpu_velocity_per_atom);
   for (int m = 0; m < groups.size(); m++) {
     groups[m].number = new_groups[m].number;
-    groups[m].cpu_label.assign(new_groups[m].cpu_label.begin(), new_groups[m].cpu_label.end());
-    groups[m].find_size(N, m);
-    groups[m].find_contents(N);
+    groups[m].cpu_label.swap(new_groups[m].cpu_label);
   }
-  atoms.number_of_atoms = N;
-  atoms.cpu_type.assign(new_atoms.cpu_type.begin(), new_atoms.cpu_type.end());
-  atoms.cpu_mass.assign(new_atoms.cpu_mass.begin(), new_atoms.cpu_mass.end());
-  atoms.cpu_charge.assign(new_atoms.cpu_charge.begin(), new_atoms.cpu_charge.end());
-  atoms.cpu_atom_symbol.assign(new_atoms.cpu_atom_symbol.begin(), new_atoms.cpu_atom_symbol.end());
-  atoms.cpu_position_per_atom.assign(
-    new_atoms.cpu_position_per_atom.begin(), new_atoms.cpu_position_per_atom.end());
-  atoms.cpu_velocity_per_atom.assign(
-    new_atoms.cpu_velocity_per_atom.begin(), new_atoms.cpu_velocity_per_atom.end());
-  atoms.cpu_type_size.assign(atoms.cpu_type_size.begin(), atoms.cpu_type_size.end());
-  for (int& i : atoms.cpu_type_size)
-    i = i * r[0] * r[1] * r[2];
+  AtomMutation::rebuild_after_mutation(atoms, groups, thermo, force);
 
   print_line_1();
   printf("Replicate cell by %d * %d * %d.\n", r[0], r[1], r[2]);

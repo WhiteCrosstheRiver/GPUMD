@@ -118,6 +118,7 @@ public:
 
   NEP(const char* file_potential, const int num_atoms);
   virtual ~NEP(void);
+  virtual void update_number_of_atoms(const int number_of_atoms);
   virtual void compute(
     Box& box,
     const GPU_Vector<int>& type,
@@ -146,6 +147,7 @@ private:
   ExpandedBox ebox;
   DFTD3 dftd3;
 
+  void ensure_memory_for_atoms(const int num_atoms);
   void update_potential(float* parameters, ANN& ann);
 #ifdef USE_TABLE
   void construct_table(float* parameters);

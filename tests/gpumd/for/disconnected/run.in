@@ -1,0 +1,10 @@
+replicate       2 2 2
+potential       ../../../../potentials/nep/C_2022_NEP3.txt
+velocity        300
+time_step       1.0
+ensemble        nve
+
+delete disconnected cutoff 2.9
+deposit C 3.57 3.57 50.0 0.0 0.0 0.0
+delete disconnected cutoff 2.9
+run 1

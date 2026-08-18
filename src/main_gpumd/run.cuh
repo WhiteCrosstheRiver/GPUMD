@@ -35,12 +35,15 @@ class Measure;
 #include "velocity.cuh"
 #include <vector>
 
+struct CommandNode;
+
 class Run
 {
 public:
   Run();
 
 private:
+  friend struct CommandNode;
   void execute_run_in();
   void perform_a_run();
   void parse_one_keyword(std::vector<std::string>& tokens);

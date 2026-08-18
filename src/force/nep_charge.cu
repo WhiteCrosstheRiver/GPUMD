@@ -398,6 +398,45 @@ NEP_Charge::~NEP_Charge(void)
   // nothing
 }
 
+void NEP_Charge::ensure_memory_for_atoms(const int num_atoms)
+{
+  N1 = 0;
+  N2 = num_atoms;
+  if ((int)nep_data.NN_radial.size() == num_atoms) {
+    return;
+  }
+
+  nep_data.D_real.resize(num_atoms);
+  nep_data.charge.resize(num_atoms);
+  nep_data.charge_derivative.resize(num_atoms * annmb.dim);
+  nep_data.bec.resize(num_atoms * 9);
+  if (paramb.charge_mode >= 4) {
+    nep_data.C6.resize(num_atoms);
+    nep_data.C6_derivative.resize(num_atoms * annmb.dim);
+    nep_data.D_C6.resize(num_atoms);
+  }
+  nep_data.f12x.resize(num_atoms * paramb.MN_angular);
+  nep_data.f12y.resize(num_atoms * paramb.MN_angular);
+  nep_data.f12z.resize(num_atoms * paramb.MN_angular);
+  nep_data.NN_radial.resize(num_atoms);
+  nep_data.NL_radial.resize(num_atoms * paramb.MN_radial);
+  nep_data.NN_angular.resize(num_atoms);
+  nep_data.NL_angular.resize(num_atoms * paramb.MN_angular);
+  nep_data.Fp.resize(num_atoms * annmb.dim);
+  nep_data.sum_fxyz.resize(
+    num_atoms * (paramb.n_max_angular + 1) * ((paramb.L_max + 1) * (paramb.L_max + 1) - 1));
+  nep_data.cell_count.resize(num_atoms);
+  nep_data.cell_count_sum.resize(num_atoms);
+  nep_data.cell_contents.resize(num_atoms);
+  nep_data.cpu_NN_radial.resize(num_atoms);
+  nep_data.cpu_NN_angular.resize(num_atoms);
+}
+
+void NEP_Charge::update_number_of_atoms(const int number_of_atoms)
+{
+  ensure_memory_for_atoms(number_of_atoms);
+}
+
 void NEP_Charge::update_potential(float* parameters, ANN& ann)
 {
   const int num_outputs = (paramb.charge_mode >= 4) ? 3 : 2;
@@ -2467,6 +2506,7 @@ void NEP_Charge::compute(
   GPU_Vector<double>& force_per_atom,
   GPU_Vector<double>& virial_per_atom)
 {
+  ensure_memory_for_atoms(type.size());
   if (paramb.charge_mode != 3 && paramb.charge_mode != 5) {
     if (!box.pbc_x || !box.pbc_y || !box.pbc_z) {
       PRINT_INPUT_ERROR("Cannot use non-periodic boundaries with K-space.");

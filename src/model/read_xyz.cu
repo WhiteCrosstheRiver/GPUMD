@@ -138,6 +138,15 @@ const std::map<std::string, double> MASS_TABLE{
   {"No", 259},
   {"Lr", 262}};
 
+double get_mass_from_symbol(const std::string& symbol)
+{
+  auto it = MASS_TABLE.find(symbol);
+  if (it == MASS_TABLE.end()) {
+    PRINT_INPUT_ERROR("Unknown atom symbol when looking up mass.");
+  }
+  return it->second;
+}
+
 static void read_xyz_line_1(std::ifstream& input, int& N)
 {
   std::vector<std::string> tokens = get_tokens(input);
