@@ -172,6 +172,8 @@ static __global__ void gpu_find_force_many_body(
   const int number_of_particles,
   const int N1,
   const int N2,
+  const int num_centers,
+  const int* centers,
   const Box box,
   const int* g_neighbor_number,
   const int* g_neighbor_list,
@@ -186,7 +188,19 @@ static __global__ void gpu_find_force_many_body(
   double* g_fz,
   double* g_virial)
 {
-  int n1 = blockIdx.x * blockDim.x + threadIdx.x + N1;
+  int n1;
+  if (centers != nullptr) {
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= num_centers) {
+      return;
+    }
+    n1 = centers[t];
+  } else {
+    n1 = blockIdx.x * blockDim.x + threadIdx.x + N1;
+    if (n1 < N1 || n1 >= N2) {
+      return;
+    }
+  }
   float s_fx = 0.0f;  // force_x
   float s_fy = 0.0f;  // force_y
   float s_fz = 0.0f;  // force_z
@@ -306,16 +320,25 @@ void Potential::find_properties_many_body(
   const bool is_dipole,
   const GPU_Vector<double>& position_per_atom,
   GPU_Vector<double>& force_per_atom,
-  GPU_Vector<double>& virial_per_atom)
+  GPU_Vector<double>& virial_per_atom,
+  const int num_centers,
+  const int* centers)
 {
   const int number_of_atoms = position_per_atom.size() / 3;
-  int grid_size = (N2 - N1 - 1) / BLOCK_SIZE_FORCE + 1;
+  const bool use_centers = (centers != nullptr) && (num_centers >= 0);
+  int grid_size = use_centers ? ((num_centers > 0 ? num_centers : 1) - 1) / BLOCK_SIZE_FORCE + 1
+                              : (N2 - N1 - 1) / BLOCK_SIZE_FORCE + 1;
+  if (use_centers && num_centers == 0) {
+    return;
+  }
 
   gpu_find_force_many_body<<<grid_size, BLOCK_SIZE_FORCE>>>(
     is_dipole,
     number_of_atoms,
     N1,
     N2,
+    use_centers ? num_centers : 0,
+    use_centers ? centers : nullptr,
     box,
     NN,
     NL,

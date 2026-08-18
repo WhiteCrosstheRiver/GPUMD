@@ -53,6 +53,8 @@ public:
 
   void finalize();
   void update_number_of_atoms(const int number_of_atoms);
+  void set_fixed_group(const int fixed_group);
+  void set_need_full_observables(const bool need_full);
 
   int get_number_of_types(FILE* fid_potential);
   void set_hnemd_parameters(const double, const double, const double);
@@ -81,6 +83,17 @@ private:
   bool has_non_nep = false;
   std::string multiple_potentials_mode_ = "observe"; // "observe" or "average"
   std::string atom_types[NUM_ELEMENTS];
+  int fixed_group_ = -1;
+  bool logged_fix_skip_ = false;
+  ComputeRequest compute_request_;
+  GPU_Vector<char> active_mask_;
+  GPU_Vector<int> active_indices_;
+  int num_active_ = -1;
 
   void check_types(const char* file_potential);
+  void prepare_active_atoms(const int number_of_atoms, std::vector<Group>& group);
+  void zero_fixed_forces(
+    const int number_of_atoms,
+    std::vector<Group>& group,
+    GPU_Vector<double>& force_per_atom);
 };

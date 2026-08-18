@@ -33,6 +33,9 @@ struct NEP_Data {
   GPU_Vector<int> cell_count;
   GPU_Vector<int> cell_count_sum;
   GPU_Vector<int> cell_contents;
+  GPU_Vector<char> influence_mask;
+  GPU_Vector<int> influence_indices;
+  GPU_Vector<int> cell_has_active;
   std::vector<int> cpu_NN_radial;
   std::vector<int> cpu_NN_angular;
 #ifdef USE_TABLE
@@ -119,6 +122,7 @@ public:
   NEP(const char* file_potential, const int num_atoms);
   virtual ~NEP(void);
   virtual void update_number_of_atoms(const int number_of_atoms);
+  virtual InfluencePolicy influence_policy() const { return InfluencePolicy::LocalRadius; }
   virtual void compute(
     Box& box,
     const GPU_Vector<int>& type,

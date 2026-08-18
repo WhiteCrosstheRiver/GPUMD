@@ -1,0 +1,6 @@
+potential       ../../../../potentials/nep/C_2022_NEP3.txt
+replicate       2 2 2
+time_step       0
+ensemble        nve
+dump_force      1
+run             1

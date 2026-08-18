@@ -27,10 +27,14 @@ heat transport, Phys. Rev. B. 104, 104309 (2021).
 #include "utilities/error.cuh"
 #include "utilities/gpu_macro.cuh"
 #include "utilities/nep_utilities.cuh"
+#include <cmath>
 #include <cstring>
 #include <fstream>
 #include <iostream>
 #include <string>
+#include <thrust/copy.h>
+#include <thrust/execution_policy.h>
+#include <thrust/iterator/counting_iterator.h>
 #include <vector>
 
 const std::string ELEMENTS[NUM_ELEMENTS] = {
@@ -370,6 +374,12 @@ void NEP::ensure_memory_for_atoms(const int num_atoms)
 {
   N1 = 0;
   N2 = num_atoms;
+  if ((int)nep_data.influence_mask.size() != num_atoms) {
+    nep_data.influence_mask.resize(num_atoms);
+  }
+  if ((int)nep_data.influence_indices.size() != num_atoms) {
+    nep_data.influence_indices.resize(num_atoms);
+  }
   if ((int)nep_data.NN_radial.size() == num_atoms) {
     return;
   }
@@ -387,6 +397,8 @@ void NEP::ensure_memory_for_atoms(const int num_atoms)
   nep_data.cell_count.resize(num_atoms);
   nep_data.cell_count_sum.resize(num_atoms);
   nep_data.cell_contents.resize(num_atoms);
+  nep_data.influence_mask.resize(num_atoms);
+  nep_data.influence_indices.resize(num_atoms);
   nep_data.cpu_NN_radial.resize(num_atoms);
   nep_data.cpu_NN_angular.resize(num_atoms);
 }
@@ -475,6 +487,190 @@ void NEP::construct_table(float* parameters)
 }
 #endif
 
+static __global__ void gpu_mark_active_cells(
+  const int N,
+  const char* active,
+  const Box box,
+  const double* g_x,
+  const double* g_y,
+  const double* g_z,
+  const double rc_inv,
+  const int nx,
+  const int ny,
+  const int nz,
+  int* cell_has_active)
+{
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= N || active[i] == 0) {
+    return;
+  }
+  int cx, cy, cz, cell_id;
+  find_cell_id(box, g_x[i], g_y[i], g_z[i], rc_inv, nx, ny, nz, cx, cy, cz, cell_id);
+  cell_has_active[cell_id] = 1;
+}
+
+static __global__ void gpu_build_influence_mask(
+  const int N,
+  const char* active,
+  const Box box,
+  const double* g_x,
+  const double* g_y,
+  const double* g_z,
+  const double rc_inv,
+  const int nx,
+  const int ny,
+  const int nz,
+  const int sx,
+  const int sy,
+  const int sz,
+  const int* cell_has_active,
+  char* influence)
+{
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= N) {
+    return;
+  }
+  if (active[i]) {
+    influence[i] = 1;
+    return;
+  }
+  int cx, cy, cz, cell_id;
+  find_cell_id(box, g_x[i], g_y[i], g_z[i], rc_inv, nx, ny, nz, cx, cy, cz, cell_id);
+  char found = 0;
+  for (int dz = -sz; dz <= sz && !found; ++dz) {
+    for (int dy = -sy; dy <= sy && !found; ++dy) {
+      for (int dx = -sx; dx <= sx; ++dx) {
+        int x = cx + dx;
+        int y = cy + dy;
+        int z = cz + dz;
+        if (x < 0) {
+          x += nx;
+        } else if (x >= nx) {
+          x -= nx;
+        }
+        if (y < 0) {
+          y += ny;
+        } else if (y >= ny) {
+          y -= ny;
+        }
+        if (z < 0) {
+          z += nz;
+        } else if (z >= nz) {
+          z -= nz;
+        }
+        if (cell_has_active[z * ny * nx + y * nx + x]) {
+          found = 1;
+          break;
+        }
+      }
+    }
+  }
+  influence[i] = found;
+}
+
+struct NonzeroChar {
+  __host__ __device__ bool operator()(const char x) const { return x != 0; }
+};
+
+static __device__ bool select_center(
+  const int N1, const int N2, const int* centers, const int num_centers, int& n1)
+{
+  if (centers != nullptr) {
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= num_centers) {
+      return false;
+    }
+    n1 = centers[t];
+    return true;
+  }
+  n1 = blockIdx.x * blockDim.x + threadIdx.x + N1;
+  return n1 < N2;
+}
+
+static int halo_stencil(const double thickness, const int nbin, const double rc)
+{
+  if (nbin <= 1) {
+    return 0;
+  }
+  const int s = (int)ceil(rc * nbin / thickness - 1.0e-12);
+  return s < 1 ? 1 : s;
+}
+
+static int compact_mask_to_indices(const char* mask, const int N, GPU_Vector<int>& indices)
+{
+  if (indices.size() != static_cast<size_t>(N)) {
+    indices.resize(N);
+  }
+  int* compact_end = thrust::copy_if(
+    thrust::device,
+    thrust::counting_iterator<int>(0),
+    thrust::counting_iterator<int>(N),
+    mask,
+    indices.data(),
+    NonzeroChar());
+  return static_cast<int>(compact_end - indices.data());
+}
+
+// Returns the number of influence centers, or -1 to compute all atoms.
+static int build_nep_centers(
+  const GPU_Vector<char>* ptr_active_mask,
+  const int N,
+  const int nx,
+  const int ny,
+  const int nz,
+  const Box& box,
+  const GPU_Vector<double>& position_per_atom,
+  const double rc_inv,
+  const double rc,
+  GPU_Vector<char>& influence_mask,
+  GPU_Vector<int>& influence_indices,
+  GPU_Vector<int>& cell_has_active)
+{
+  if (ptr_active_mask == nullptr) {
+    return -1;
+  }
+  const int num_cells = nx * ny * nz;
+  const size_t cell_size = static_cast<size_t>(num_cells > 0 ? num_cells : 1);
+  if (cell_has_active.size() != cell_size) {
+    cell_has_active.resize(cell_size);
+  }
+  CHECK(gpuMemset(cell_has_active.data(), 0, sizeof(int) * cell_has_active.size()));
+  gpu_mark_active_cells<<<(N - 1) / 64 + 1, 64>>>(
+    N,
+    ptr_active_mask->data(),
+    box,
+    position_per_atom.data(),
+    position_per_atom.data() + N,
+    position_per_atom.data() + N * 2,
+    rc_inv,
+    nx,
+    ny,
+    nz,
+    cell_has_active.data());
+  GPU_CHECK_KERNEL
+  const int sx = halo_stencil(box.thickness_x, nx, rc);
+  const int sy = halo_stencil(box.thickness_y, ny, rc);
+  const int sz = halo_stencil(box.thickness_z, nz, rc);
+  gpu_build_influence_mask<<<(N - 1) / 64 + 1, 64>>>(
+    N,
+    ptr_active_mask->data(),
+    box,
+    position_per_atom.data(),
+    position_per_atom.data() + N,
+    position_per_atom.data() + N * 2,
+    rc_inv,
+    nx,
+    ny,
+    nz,
+    sx,
+    sy,
+    sz,
+    cell_has_active.data(),
+    influence_mask.data());
+  GPU_CHECK_KERNEL
+  return compact_mask_to_indices(influence_mask.data(), N, influence_indices);
+}
+
 static __global__ void find_neighbor_list_large_box(
   NEP::ParaMB paramb,
   const int N,
@@ -494,10 +690,12 @@ static __global__ void find_neighbor_list_large_box(
   int* g_NN_radial,
   int* g_NL_radial,
   int* g_NN_angular,
-  int* g_NL_angular)
+  int* g_NL_angular,
+  const int* g_centers,
+  const int num_centers)
 {
-  int n1 = blockIdx.x * blockDim.x + threadIdx.x + N1;
-  if (n1 >= N2) {
+  int n1;
+  if (!select_center(N1, N2, g_centers, num_centers, n1)) {
     return;
   }
 
@@ -622,10 +820,12 @@ static __global__ void find_descriptor(
   float* g_sum_fxyz,
   bool need_B_projection,
   double* B_projection,
-  int B_projection_size)
+  int B_projection_size,
+  const int* g_centers,
+  const int num_centers)
 {
-  int n1 = blockIdx.x * blockDim.x + threadIdx.x + N1;
-  if (n1 < N2) {
+  int n1;
+  if (select_center(N1, N2, g_centers, num_centers, n1)) {
     int t1 = g_type[n1];
     double x1 = g_x[n1];
     double y1 = g_y[n1];
@@ -836,10 +1036,12 @@ static __global__ void find_force_radial(
   double* g_fx,
   double* g_fy,
   double* g_fz,
-  double* g_virial)
+  double* g_virial,
+  const int* g_centers,
+  const int num_centers)
 {
-  int n1 = blockIdx.x * blockDim.x + threadIdx.x + N1;
-  if (n1 < N2) {
+  int n1;
+  if (select_center(N1, N2, g_centers, num_centers, n1)) {
     int t1 = g_type[n1];
     float s_fx = 0.0f;
     float s_fy = 0.0f;
@@ -985,10 +1187,12 @@ static __global__ void find_partial_force_angular(
 #endif
   float* g_f12x,
   float* g_f12y,
-  float* g_f12z)
+  float* g_f12z,
+  const int* g_centers,
+  const int num_centers)
 {
-  int n1 = blockIdx.x * blockDim.x + threadIdx.x + N1;
-  if (n1 < N2) {
+  int n1;
+  if (select_center(N1, N2, g_centers, num_centers, n1)) {
 
     float Fp[MAX_DIM_ANGULAR] = {0.0f};
     float sum_fxyz[NUM_OF_ABC * MAX_NUM_N];
@@ -1108,10 +1312,12 @@ static __global__ void find_force_ZBL(
   double* g_fy,
   double* g_fz,
   double* g_virial,
-  double* g_pe)
+  double* g_pe,
+  const int* g_centers,
+  const int num_centers)
 {
-  int n1 = blockIdx.x * blockDim.x + threadIdx.x + N1;
-  if (n1 < N2) {
+  int n1;
+  if (select_center(N1, N2, g_centers, num_centers, n1)) {
     float s_pe = 0.0f;
     float s_fx = 0.0f;
     float s_fy = 0.0f;
@@ -1216,7 +1422,7 @@ void NEP::compute_large_box(
 {
   const int BLOCK_SIZE = 64;
   const int N = type.size();
-  const int grid_size = (N2 - N1 - 1) / BLOCK_SIZE + 1;
+  int grid_size = (N2 - N1 - 1) / BLOCK_SIZE + 1;
 
   const double rc_cell_list = 0.5 * rc;
 
@@ -1231,6 +1437,29 @@ void NEP::compute_large_box(
     nep_data.cell_count,
     nep_data.cell_count_sum,
     nep_data.cell_contents);
+
+  const int num_centers = build_nep_centers(
+    ptr_active_mask,
+    N,
+    num_bins[0],
+    num_bins[1],
+    num_bins[2],
+    box,
+    position_per_atom,
+    2.0 / rc,
+    rc,
+    nep_data.influence_mask,
+    nep_data.influence_indices,
+    nep_data.cell_has_active);
+  const int* centers = (num_centers >= 0) ? nep_data.influence_indices.data() : nullptr;
+  if (num_centers >= 0) {
+    grid_size = (num_centers > 0) ? ((num_centers - 1) / BLOCK_SIZE + 1) : 1;
+    CHECK(gpuMemset(nep_data.NN_radial.data(), 0, sizeof(int) * N));
+    CHECK(gpuMemset(nep_data.NN_angular.data(), 0, sizeof(int) * N));
+  }
+  if (num_centers == 0) {
+    return;
+  }
 
   find_neighbor_list_large_box<<<grid_size, BLOCK_SIZE>>>(
     paramb,
@@ -1251,7 +1480,9 @@ void NEP::compute_large_box(
     nep_data.NN_radial.data(),
     nep_data.NL_radial.data(),
     nep_data.NN_angular.data(),
-    nep_data.NL_angular.data());
+    nep_data.NL_angular.data(),
+    centers,
+    num_centers);
   GPU_CHECK_KERNEL
 
   static int num_calls = 0;
@@ -1276,13 +1507,21 @@ void NEP::compute_large_box(
     output_file.close();
   }
 
-  gpu_sort_neighbor_list<<<N, paramb.MN_radial, paramb.MN_radial * sizeof(int)>>>(
-    N, nep_data.NN_radial.data(), nep_data.NL_radial.data());
-  GPU_CHECK_KERNEL
-
-  gpu_sort_neighbor_list<<<N, paramb.MN_angular, paramb.MN_angular * sizeof(int)>>>(
-    N, nep_data.NN_angular.data(), nep_data.NL_angular.data());
-  GPU_CHECK_KERNEL
+  if (centers != nullptr) {
+    gpu_sort_neighbor_list_centers<<<num_centers, paramb.MN_radial, paramb.MN_radial * sizeof(int)>>>(
+      N, centers, nep_data.NN_radial.data(), nep_data.NL_radial.data());
+    GPU_CHECK_KERNEL
+    gpu_sort_neighbor_list_centers<<<num_centers, paramb.MN_angular, paramb.MN_angular * sizeof(int)>>>(
+      N, centers, nep_data.NN_angular.data(), nep_data.NL_angular.data());
+    GPU_CHECK_KERNEL
+  } else {
+    gpu_sort_neighbor_list<<<N, paramb.MN_radial, paramb.MN_radial * sizeof(int)>>>(
+      N, nep_data.NN_radial.data(), nep_data.NL_radial.data());
+    GPU_CHECK_KERNEL
+    gpu_sort_neighbor_list<<<N, paramb.MN_angular, paramb.MN_angular * sizeof(int)>>>(
+      N, nep_data.NN_angular.data(), nep_data.NL_angular.data());
+    GPU_CHECK_KERNEL
+  }
 
   bool is_polarizability = paramb.model_type == 2;
   find_descriptor<<<grid_size, BLOCK_SIZE>>>(
@@ -1311,7 +1550,8 @@ void NEP::compute_large_box(
     nep_data.sum_fxyz.data(),
     need_B_projection,
     B_projection,
-    B_projection_size);
+    B_projection_size,
+    centers, num_centers);
   GPU_CHECK_KERNEL
 
   bool is_dipole = paramb.model_type == 1;
@@ -1336,7 +1576,8 @@ void NEP::compute_large_box(
     force_per_atom.data(),
     force_per_atom.data() + N,
     force_per_atom.data() + N * 2,
-    virial_per_atom.data());
+    virial_per_atom.data(),
+    centers, num_centers);
   GPU_CHECK_KERNEL
 
   find_partial_force_angular<<<grid_size, BLOCK_SIZE>>>(
@@ -1360,7 +1601,8 @@ void NEP::compute_large_box(
 #endif
     nep_data.f12x.data(),
     nep_data.f12y.data(),
-    nep_data.f12z.data());
+    nep_data.f12z.data(),
+    centers, num_centers);
   GPU_CHECK_KERNEL
 
   find_properties_many_body(
@@ -1373,7 +1615,9 @@ void NEP::compute_large_box(
     is_dipole,
     position_per_atom,
     force_per_atom,
-    virial_per_atom);
+    virial_per_atom,
+    num_centers,
+    centers);
   GPU_CHECK_KERNEL
 
   if (zbl.enabled) {
@@ -1394,7 +1638,8 @@ void NEP::compute_large_box(
       force_per_atom.data() + N,
       force_per_atom.data() + N * 2,
       virial_per_atom.data(),
-      potential_per_atom.data());
+      potential_per_atom.data(),
+      centers, num_centers);
     GPU_CHECK_KERNEL
   }
 }
@@ -1685,10 +1930,12 @@ static __global__ void find_descriptor(
   double* g_pe,
   float* g_Fp,
   double* g_virial,
-  float* g_sum_fxyz)
+  float* g_sum_fxyz,
+  const int* g_centers,
+  const int num_centers)
 {
-  int n1 = blockIdx.x * blockDim.x + threadIdx.x + N1;
-  if (n1 < N2) {
+  int n1;
+  if (select_center(N1, N2, g_centers, num_centers, n1)) {
     int t1 = g_type[n1];
     double x1 = g_x[n1];
     double y1 = g_y[n1];
@@ -1829,7 +2076,7 @@ void NEP::compute_large_box(
 {
   const int BLOCK_SIZE = 64;
   const int N = type.size();
-  const int grid_size = (N2 - N1 - 1) / BLOCK_SIZE + 1;
+  int grid_size = (N2 - N1 - 1) / BLOCK_SIZE + 1;
 
   const double rc_cell_list = 0.5 * rc;
 
@@ -1844,6 +2091,29 @@ void NEP::compute_large_box(
     nep_data.cell_count,
     nep_data.cell_count_sum,
     nep_data.cell_contents);
+
+  const int num_centers = build_nep_centers(
+    ptr_active_mask,
+    N,
+    num_bins[0],
+    num_bins[1],
+    num_bins[2],
+    box,
+    position_per_atom,
+    2.0 / rc,
+    rc,
+    nep_data.influence_mask,
+    nep_data.influence_indices,
+    nep_data.cell_has_active);
+  const int* centers = (num_centers >= 0) ? nep_data.influence_indices.data() : nullptr;
+  if (num_centers >= 0) {
+    grid_size = (num_centers > 0) ? ((num_centers - 1) / BLOCK_SIZE + 1) : 1;
+    CHECK(gpuMemset(nep_data.NN_radial.data(), 0, sizeof(int) * N));
+    CHECK(gpuMemset(nep_data.NN_angular.data(), 0, sizeof(int) * N));
+  }
+  if (num_centers == 0) {
+    return;
+  }
 
   find_neighbor_list_large_box<<<grid_size, BLOCK_SIZE>>>(
     paramb,
@@ -1864,7 +2134,9 @@ void NEP::compute_large_box(
     nep_data.NN_radial.data(),
     nep_data.NL_radial.data(),
     nep_data.NN_angular.data(),
-    nep_data.NL_angular.data());
+    nep_data.NL_angular.data(),
+    centers,
+    num_centers);
   GPU_CHECK_KERNEL
 
   static int num_calls = 0;
@@ -1889,13 +2161,21 @@ void NEP::compute_large_box(
     output_file.close();
   }
 
-  gpu_sort_neighbor_list<<<N, paramb.MN_radial, paramb.MN_radial * sizeof(int)>>>(
-    N, nep_data.NN_radial.data(), nep_data.NL_radial.data());
-  GPU_CHECK_KERNEL
-
-  gpu_sort_neighbor_list<<<N, paramb.MN_angular, paramb.MN_angular * sizeof(int)>>>(
-    N, nep_data.NN_angular.data(), nep_data.NL_angular.data());
-  GPU_CHECK_KERNEL
+  if (centers != nullptr) {
+    gpu_sort_neighbor_list_centers<<<num_centers, paramb.MN_radial, paramb.MN_radial * sizeof(int)>>>(
+      N, centers, nep_data.NN_radial.data(), nep_data.NL_radial.data());
+    GPU_CHECK_KERNEL
+    gpu_sort_neighbor_list_centers<<<num_centers, paramb.MN_angular, paramb.MN_angular * sizeof(int)>>>(
+      N, centers, nep_data.NN_angular.data(), nep_data.NL_angular.data());
+    GPU_CHECK_KERNEL
+  } else {
+    gpu_sort_neighbor_list<<<N, paramb.MN_radial, paramb.MN_radial * sizeof(int)>>>(
+      N, nep_data.NN_radial.data(), nep_data.NL_radial.data());
+    GPU_CHECK_KERNEL
+    gpu_sort_neighbor_list<<<N, paramb.MN_angular, paramb.MN_angular * sizeof(int)>>>(
+      N, nep_data.NN_angular.data(), nep_data.NL_angular.data());
+    GPU_CHECK_KERNEL
+  }
 
   find_descriptor<<<grid_size, BLOCK_SIZE>>>(
     temperature,
@@ -1920,7 +2200,8 @@ void NEP::compute_large_box(
     potential_per_atom.data(),
     nep_data.Fp.data(),
     virial_per_atom.data(),
-    nep_data.sum_fxyz.data());
+    nep_data.sum_fxyz.data(),
+    centers, num_centers);
   GPU_CHECK_KERNEL
 
   bool is_dipole = paramb.model_type == 1;
@@ -1945,7 +2226,8 @@ void NEP::compute_large_box(
     force_per_atom.data(),
     force_per_atom.data() + N,
     force_per_atom.data() + N * 2,
-    virial_per_atom.data());
+    virial_per_atom.data(),
+    centers, num_centers);
   GPU_CHECK_KERNEL
 
   find_partial_force_angular<<<grid_size, BLOCK_SIZE>>>(
@@ -1969,7 +2251,8 @@ void NEP::compute_large_box(
 #endif
     nep_data.f12x.data(),
     nep_data.f12y.data(),
-    nep_data.f12z.data());
+    nep_data.f12z.data(),
+    centers, num_centers);
   GPU_CHECK_KERNEL
 
   find_properties_many_body(
@@ -1982,7 +2265,9 @@ void NEP::compute_large_box(
     is_dipole,
     position_per_atom,
     force_per_atom,
-    virial_per_atom);
+    virial_per_atom,
+    num_centers,
+    centers);
   GPU_CHECK_KERNEL
 
   if (zbl.enabled) {
@@ -2003,7 +2288,8 @@ void NEP::compute_large_box(
       force_per_atom.data() + N,
       force_per_atom.data() + N * 2,
       virial_per_atom.data(),
-      potential_per_atom.data());
+      potential_per_atom.data(),
+      centers, num_centers);
     GPU_CHECK_KERNEL
   }
 }

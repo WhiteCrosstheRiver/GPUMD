@@ -40,6 +40,19 @@ void find_neighbor(
   GPU_Vector<int>& NN,
   GPU_Vector<int>& NL);
 
+void find_neighbor(
+  const int num_centers,
+  const int* center_indices,
+  double rc,
+  Box& box,
+  const GPU_Vector<int>& type,
+  const GPU_Vector<double>& position_per_atom,
+  GPU_Vector<int>& cell_count,
+  GPU_Vector<int>& cell_count_sum,
+  GPU_Vector<int>& cell_contents,
+  GPU_Vector<int>& NN,
+  GPU_Vector<int>& NL);
+
 // For ILP
 void find_neighbor_ilp(
   const int N1,
@@ -112,6 +125,33 @@ static __device__ void find_cell_id(
 static __global__ void gpu_sort_neighbor_list(const int N, const int* NN, int* NL)
 {
   int bid = blockIdx.x;
+  int tid = threadIdx.x;
+  int neighbor_number = NN[bid];
+  int atom_index;
+  extern __shared__ int atom_index_copy[];
+
+  if (tid < neighbor_number) {
+    atom_index = NL[bid + tid * N];
+    atom_index_copy[tid] = atom_index;
+  }
+  int count = 0;
+  __syncthreads();
+
+  for (int j = 0; j < neighbor_number; ++j) {
+    if (atom_index > atom_index_copy[j]) {
+      count++;
+    }
+  }
+
+  if (tid < neighbor_number) {
+    NL[bid + count * N] = atom_index;
+  }
+}
+
+static __global__ void gpu_sort_neighbor_list_centers(
+  const int N, const int* centers, const int* NN, int* NL)
+{
+  int bid = centers[blockIdx.x];
   int tid = threadIdx.x;
   int neighbor_number = NN[bid];
   int atom_index;

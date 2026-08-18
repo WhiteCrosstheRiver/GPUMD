@@ -199,6 +199,11 @@ void Run::perform_a_run()
   mc.initialize();
   measure.initialize(number_of_steps, time_step, integrate, group, atom, box, force);
 
+  force.set_fixed_group(integrate.fixed_group);
+  const bool need_full_observables =
+    (integrate.type >= 11 && integrate.type <= 20) || (integrate.type >= 21 && integrate.type <= 23);
+  force.set_need_full_observables(need_full_observables);
+
   const auto time_begin = std::chrono::high_resolution_clock::now();
 
   // compute force for the first integrate step

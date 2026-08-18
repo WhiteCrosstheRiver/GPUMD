@@ -161,6 +161,84 @@ static __global__ void gpu_find_neighbor_ON1(
   }
 }
 
+static __global__ void gpu_find_neighbor_ON1_centers(
+  const Box box,
+  const int N,
+  const int num_centers,
+  const int* __restrict__ centers,
+  const int* __restrict__ type,
+  const int* __restrict__ cell_counts,
+  const int* __restrict__ cell_count_sum,
+  const int* __restrict__ cell_contents,
+  int* NN,
+  int* NL,
+  const double* __restrict__ x,
+  const double* __restrict__ y,
+  const double* __restrict__ z,
+  const int nx,
+  const int ny,
+  const int nz,
+  const double rc_inv,
+  const double cutoff_square)
+{
+  const int t = blockIdx.x * blockDim.x + threadIdx.x;
+  if (t >= num_centers) {
+    return;
+  }
+  const int n1 = centers[t];
+  int count = 0;
+  const double x1 = x[n1];
+  const double y1 = y[n1];
+  const double z1 = z[n1];
+  int cell_id;
+  int cell_id_x;
+  int cell_id_y;
+  int cell_id_z;
+  find_cell_id(box, x1, y1, z1, rc_inv, nx, ny, nz, cell_id_x, cell_id_y, cell_id_z, cell_id);
+
+  const int z_lim = box.pbc_z ? 2 : 0;
+  const int y_lim = box.pbc_y ? 2 : 0;
+  const int x_lim = box.pbc_x ? 2 : 0;
+
+  for (int k = -z_lim; k <= z_lim; ++k) {
+    for (int j = -y_lim; j <= y_lim; ++j) {
+      for (int i = -x_lim; i <= x_lim; ++i) {
+        int neighbor_cell = cell_id + k * nx * ny + j * nx + i;
+        if (cell_id_x + i < 0)
+          neighbor_cell += nx;
+        if (cell_id_x + i >= nx)
+          neighbor_cell -= nx;
+        if (cell_id_y + j < 0)
+          neighbor_cell += ny * nx;
+        if (cell_id_y + j >= ny)
+          neighbor_cell -= ny * nx;
+        if (cell_id_z + k < 0)
+          neighbor_cell += nz * ny * nx;
+        if (cell_id_z + k >= nz)
+          neighbor_cell -= nz * ny * nx;
+
+        const int num_atoms_neighbor_cell = cell_counts[neighbor_cell];
+        const int num_atoms_previous_cells = cell_count_sum[neighbor_cell];
+
+        for (int m = 0; m < num_atoms_neighbor_cell; ++m) {
+          const int n2 = cell_contents[num_atoms_previous_cells + m];
+          if (n1 != n2) {
+            double x12 = x[n2] - x1;
+            double y12 = y[n2] - y1;
+            double z12 = z[n2] - z1;
+            apply_mic(box, x12, y12, z12);
+            const double d2 = x12 * x12 + y12 * y12 + z12 * z12;
+            if (d2 < cutoff_square) {
+              NL[count++ * N + n1] = n2;
+            }
+          }
+        }
+      }
+    }
+  }
+  NN[n1] = count;
+}
+
 void find_cell_list(
   const double rc,
   const int* num_bins,
@@ -351,6 +429,67 @@ void find_neighbor(
   const int MN = NL.size() / NN.size();
   gpu_sort_neighbor_list<<<N, MN, MN * sizeof(int)>>>(N, NN.data(), NL.data());
   GPU_CHECK_KERNEL
+}
+
+void find_neighbor(
+  const int num_centers,
+  const int* center_indices,
+  double rc,
+  Box& box,
+  const GPU_Vector<int>& type,
+  const GPU_Vector<double>& position_per_atom,
+  GPU_Vector<int>& cell_count,
+  GPU_Vector<int>& cell_count_sum,
+  GPU_Vector<int>& cell_contents,
+  GPU_Vector<int>& NN,
+  GPU_Vector<int>& NL)
+{
+  const int N = NN.size();
+  const int block_size = 256;
+  const int grid_size = (num_centers - 1) / block_size + 1;
+  const double* x = position_per_atom.data();
+  const double* y = position_per_atom.data() + N;
+  const double* z = position_per_atom.data() + N * 2;
+  const double rc_cell_list = 0.5 * rc;
+  const double rc_inv_cell_list = 2.0 / rc;
+
+  int num_bins[3];
+  box.get_num_bins(rc_cell_list, num_bins);
+
+  find_cell_list(
+    rc_cell_list, num_bins, box, position_per_atom, cell_count, cell_count_sum, cell_contents);
+
+  CHECK(gpuMemset(NN.data(), 0, sizeof(int) * N));
+
+  if (num_centers > 0) {
+    gpu_find_neighbor_ON1_centers<<<grid_size, block_size>>>(
+      box,
+      N,
+      num_centers,
+      center_indices,
+      type.data(),
+      cell_count.data(),
+      cell_count_sum.data(),
+      cell_contents.data(),
+      NN.data(),
+      NL.data(),
+      x,
+      y,
+      z,
+      num_bins[0],
+      num_bins[1],
+      num_bins[2],
+      rc_inv_cell_list,
+      rc * rc);
+    GPU_CHECK_KERNEL
+  }
+
+  const int MN = NL.size() / NN.size();
+  if (num_centers > 0) {
+    gpu_sort_neighbor_list_centers<<<num_centers, MN, MN * sizeof(int)>>>(
+      N, center_indices, NN.data(), NL.data());
+    GPU_CHECK_KERNEL
+  }
 }
 
 // For ILP, the neighbor could not contain atoms in the same layer

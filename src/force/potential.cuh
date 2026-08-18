@@ -14,6 +14,7 @@
 */
 
 #pragma once
+#include "force_domain.cuh"
 #include "model/box.cuh"
 #include "model/group.cuh"
 #include "utilities/gpu_vector.cuh"
@@ -42,6 +43,13 @@ public:
     N1 = 0;
     N2 = number_of_atoms;
   }
+
+  // Default: no active-region optimization. Force sets these only when fix is on
+  // and this potential opts in via influence_policy().
+  virtual InfluencePolicy influence_policy() const { return InfluencePolicy::Full; }
+  const GPU_Vector<char>* ptr_active_mask = nullptr;    // 1 = unfixed
+  const GPU_Vector<int>* ptr_active_indices = nullptr; // compact unfixed atom ids
+  int num_active = -1;                                 // -1 = all atoms
 
   virtual void compute(
     Box& box,
@@ -116,5 +124,7 @@ protected:
     const bool is_dipole,
     const GPU_Vector<double>& position_per_atom,
     GPU_Vector<double>& force_per_atom,
-    GPU_Vector<double>& virial_per_atom);
+    GPU_Vector<double>& virial_per_atom,
+    const int num_centers = -1,
+    const int* centers = nullptr);
 };

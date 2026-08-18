@@ -42,6 +42,9 @@ The driver class calculating force and related quantities.
 #include "utilities/read_file.cuh"
 #include <cstring>
 #include <iostream>
+#include <thrust/copy.h>
+#include <thrust/execution_policy.h>
+#include <thrust/iterator/counting_iterator.h>
 #include <vector>
 
 #define BLOCK_SIZE 128
@@ -331,10 +334,128 @@ static __global__ void initialize_properties(
   }
 }
 
+static __global__ void gpu_fill_active_mask(
+  const int N, const int fixed_group, const int* group_id, char* active_mask)
+{
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < N) {
+    active_mask[i] = (group_id[i] != fixed_group) ? 1 : 0;
+  }
+}
+
+struct NonzeroChar {
+  __host__ __device__ bool operator()(const char x) const { return x != 0; }
+};
+
+static __global__ void gpu_zero_fixed_force(
+  const int N,
+  const int fixed_group,
+  const int* group_id,
+  double* g_fx,
+  double* g_fy,
+  double* g_fz)
+{
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < N && group_id[i] == fixed_group) {
+    g_fx[i] = 0.0;
+    g_fy[i] = 0.0;
+    g_fz[i] = 0.0;
+  }
+}
+
+void Force::set_fixed_group(const int fixed_group) { fixed_group_ = fixed_group; }
+
+void Force::set_need_full_observables(const bool need_full)
+{
+  compute_request_.need_full_energy = need_full;
+  compute_request_.need_full_virial = need_full;
+}
+
+void Force::prepare_active_atoms(const int number_of_atoms, std::vector<Group>& group)
+{
+  const bool can_optimize = (fixed_group_ >= 0) && (!group.empty()) &&
+                            (!compute_request_.need_full_energy) &&
+                            (!compute_request_.need_full_virial) && (!compute_hnemd_) &&
+                            (compute_hnemdec_ < 0);
+
+  if (!can_optimize) {
+    for (auto& potential : potentials) {
+      potential->ptr_active_mask = nullptr;
+      potential->ptr_active_indices = nullptr;
+      potential->num_active = -1;
+    }
+    return;
+  }
+
+  if (active_mask_.size() != static_cast<size_t>(number_of_atoms)) {
+    active_mask_.resize(number_of_atoms);
+  }
+  if (active_indices_.size() != static_cast<size_t>(number_of_atoms)) {
+    active_indices_.resize(number_of_atoms);
+  }
+  gpu_fill_active_mask<<<(number_of_atoms - 1) / 128 + 1, 128>>>(
+    number_of_atoms, fixed_group_, group[0].label.data(), active_mask_.data());
+  GPU_CHECK_KERNEL
+
+  int* compact_end = thrust::copy_if(
+    thrust::device,
+    thrust::counting_iterator<int>(0),
+    thrust::counting_iterator<int>(number_of_atoms),
+    active_mask_.data(),
+    active_indices_.data(),
+    NonzeroChar());
+  num_active_ = static_cast<int>(compact_end - active_indices_.data());
+
+  bool any_skip = false;
+  for (auto& potential : potentials) {
+    if (potential->influence_policy() == InfluencePolicy::Full) {
+      potential->ptr_active_mask = nullptr;
+      potential->ptr_active_indices = nullptr;
+      potential->num_active = -1;
+    } else {
+      any_skip = true;
+      potential->ptr_active_mask = &active_mask_;
+      potential->ptr_active_indices = &active_indices_;
+      potential->num_active = num_active_;
+    }
+  }
+
+  if (!logged_fix_skip_ && any_skip && num_active_ >= 0 && num_active_ < number_of_atoms) {
+    printf(
+      "Fix skip is on: thermo potential/virial omit deep frozen atoms; "
+      "active forces remain correct.\n");
+    logged_fix_skip_ = true;
+  }
+}
+
+void Force::zero_fixed_forces(
+  const int number_of_atoms,
+  std::vector<Group>& group,
+  GPU_Vector<double>& force_per_atom)
+{
+  if (fixed_group_ < 0 || group.empty()) {
+    return;
+  }
+  gpu_zero_fixed_force<<<(number_of_atoms - 1) / 128 + 1, 128>>>(
+    number_of_atoms,
+    fixed_group_,
+    group[0].label.data(),
+    force_per_atom.data(),
+    force_per_atom.data() + number_of_atoms,
+    force_per_atom.data() + 2 * number_of_atoms);
+  GPU_CHECK_KERNEL
+}
+
 void Force::finalize()
 {
   compute_hnemd_ = false;
   compute_hnemdec_ = -1;
+  fixed_group_ = -1;
+  for (auto& potential : potentials) {
+    potential->ptr_active_mask = nullptr;
+    potential->ptr_active_indices = nullptr;
+    potential->num_active = -1;
+  }
 }
 
 void Force::update_number_of_atoms(const int number_of_atoms)
@@ -516,6 +637,8 @@ void Force::compute(
     virial_per_atom.data());
   GPU_CHECK_KERNEL
 
+  prepare_active_atoms(number_of_atoms, group);
+
   if (multiple_potentials_mode_.compare("observe") == 0) {
     // If observing, calculate using main potential only
     if (3 == potentials[0]->nep_model_type) {
@@ -634,6 +757,8 @@ void Force::compute(
       GPU_CHECK_KERNEL
     }
   }
+
+  zero_fixed_forces(number_of_atoms, group, force_per_atom);
 }
 
 static __global__ void gpu_find_per_atom_tensor(
@@ -802,6 +927,8 @@ void Force::compute(
     potential_per_atom.data(),
     virial_per_atom.data());
   GPU_CHECK_KERNEL
+
+  prepare_active_atoms(number_of_atoms, group);
 
   temperature += delta_T;
   if (multiple_potentials_mode_.compare("observe") == 0) {
@@ -985,4 +1112,6 @@ void Force::compute(
       GPU_CHECK_KERNEL
     }
   }
+
+  zero_fixed_forces(number_of_atoms, group, force_per_atom);
 }

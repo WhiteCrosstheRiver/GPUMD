@@ -1,0 +1,5 @@
+potential       ../../deposite_O3/nep.txt
+velocity        300
+time_step       1.0
+ensemble        nve
+run             100

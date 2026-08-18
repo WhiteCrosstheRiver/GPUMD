@@ -83,6 +83,8 @@ static __global__ void gpu_find_force(
   const int number_of_particles,
   const int N1,
   const int N2,
+  const int num_centers,
+  const int* centers,
   const Box box,
   const int* g_neighbor_number,
   const int* g_neighbor_list,
@@ -96,7 +98,19 @@ static __global__ void gpu_find_force(
   double* g_virial,
   double* g_potential)
 {
-  int n1 = blockIdx.x * blockDim.x + threadIdx.x + N1; // particle index
+  int n1;
+  if (centers != nullptr) {
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= num_centers) {
+      return;
+    }
+    n1 = centers[t];
+  } else {
+    n1 = blockIdx.x * blockDim.x + threadIdx.x + N1;
+    if (n1 >= N2) {
+      return;
+    }
+  }
   double s_fx = 0.0;                                   // force_x
   double s_fy = 0.0;                                   // force_y
   double s_fz = 0.0;                                   // force_z
@@ -111,8 +125,7 @@ static __global__ void gpu_find_force(
   double s_szy = 0.0;                                  // virial_stress_zy
   double s_szz = 0.0;                                  // virial_stress_zz
 
-  if (n1 < N2) {
-    int neighbor_number = g_neighbor_number[n1];
+  int neighbor_number = g_neighbor_number[n1];
     int type1 = g_type[n1];
     double x1 = g_x[n1];
     double y1 = g_y[n1];
@@ -181,7 +194,6 @@ static __global__ void gpu_find_force(
 
     // save potential
     g_potential[n1] += s_pe;
-  }
 }
 
 // Find force and related quantities for pair potentials (A wrapper)
@@ -194,7 +206,10 @@ void LJ::compute(
   GPU_Vector<double>& virial_per_atom)
 {
   const int number_of_atoms = type.size();
-  int grid_size = (N2 - N1 - 1) / BLOCK_SIZE_FORCE + 1;
+  const bool use_active =
+    (ptr_active_indices != nullptr) && (num_active > 0) && (num_active < number_of_atoms);
+  int grid_size = use_active ? ((num_active - 1) / BLOCK_SIZE_FORCE + 1)
+                             : ((N2 - N1 - 1) / BLOCK_SIZE_FORCE + 1);
 
 #ifdef USE_FIXED_NEIGHBOR
   static int num_calls = 0;
@@ -202,18 +217,33 @@ void LJ::compute(
 #ifdef USE_FIXED_NEIGHBOR
   if (num_calls++ == 0) {
 #endif
-    find_neighbor(
-      N1,
-      N2,
-      rc,
-      box,
-      type,
-      position_per_atom,
-      lj_data.cell_count,
-      lj_data.cell_count_sum,
-      lj_data.cell_contents,
-      lj_data.NN,
-      lj_data.NL); // TODO: generalize
+    if (use_active) {
+      find_neighbor(
+        num_active,
+        ptr_active_indices->data(),
+        rc,
+        box,
+        type,
+        position_per_atom,
+        lj_data.cell_count,
+        lj_data.cell_count_sum,
+        lj_data.cell_contents,
+        lj_data.NN,
+        lj_data.NL);
+    } else {
+      find_neighbor(
+        N1,
+        N2,
+        rc,
+        box,
+        type,
+        position_per_atom,
+        lj_data.cell_count,
+        lj_data.cell_count_sum,
+        lj_data.cell_contents,
+        lj_data.NN,
+        lj_data.NL);
+    }
 #ifdef USE_FIXED_NEIGHBOR
   }
 #endif
@@ -223,6 +253,8 @@ void LJ::compute(
     number_of_atoms,
     N1,
     N2,
+    use_active ? num_active : 0,
+    use_active ? ptr_active_indices->data() : nullptr,
     box,
     lj_data.NN.data(),
     lj_data.NL.data(),

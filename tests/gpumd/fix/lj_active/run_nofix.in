@@ -1,0 +1,5 @@
+potential       ../../../../potentials/lj/Ar_10A.txt
+time_step       0
+ensemble        nve
+dump_force      1
+run             1
