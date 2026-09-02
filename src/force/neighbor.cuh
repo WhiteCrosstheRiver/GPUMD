@@ -107,18 +107,39 @@ static __device__ void find_cell_id(
   cell_id_y = floor(sy * box.thickness_y * rc_inv);
   cell_id_z = floor(sz * box.thickness_z * rc_inv);
 
-  while (cell_id_x < 0)
-    cell_id_x += nx;
-  while (cell_id_x >= nx)
-    cell_id_x -= nx;
-  while (cell_id_y < 0)
-    cell_id_y += ny;
-  while (cell_id_y >= ny)
-    cell_id_y -= ny;
-  while (cell_id_z < 0)
-    cell_id_z += nz;
-  while (cell_id_z >= nz)
-    cell_id_z -= nz;
+  if (box.pbc_x) {
+    while (cell_id_x < 0)
+      cell_id_x += nx;
+    while (cell_id_x >= nx)
+      cell_id_x -= nx;
+  } else {
+    if (cell_id_x < 0)
+      cell_id_x = 0;
+    if (cell_id_x >= nx)
+      cell_id_x = nx - 1;
+  }
+  if (box.pbc_y) {
+    while (cell_id_y < 0)
+      cell_id_y += ny;
+    while (cell_id_y >= ny)
+      cell_id_y -= ny;
+  } else {
+    if (cell_id_y < 0)
+      cell_id_y = 0;
+    if (cell_id_y >= ny)
+      cell_id_y = ny - 1;
+  }
+  if (box.pbc_z) {
+    while (cell_id_z < 0)
+      cell_id_z += nz;
+    while (cell_id_z >= nz)
+      cell_id_z -= nz;
+  } else {
+    if (cell_id_z < 0)
+      cell_id_z = 0;
+    if (cell_id_z >= nz)
+      cell_id_z = nz - 1;
+  }
   cell_id = cell_id_x + nx * cell_id_y + nx * ny * cell_id_z;
 }
 

@@ -509,6 +509,23 @@ static __global__ void gpu_mark_active_cells(
   cell_has_active[cell_id] = 1;
 }
 
+static __device__ int shift_bin(const int center, const int delta, const int n, const int pbc)
+{
+  int x = center + delta;
+  if (pbc) {
+    if (x < 0) {
+      x += n;
+    } else if (x >= n) {
+      x -= n;
+    }
+    return x;
+  }
+  if (x < 0 || x >= n) {
+    return -1;
+  }
+  return x;
+}
+
 static __global__ void gpu_build_influence_mask(
   const int N,
   const char* active,
@@ -538,25 +555,19 @@ static __global__ void gpu_build_influence_mask(
   find_cell_id(box, g_x[i], g_y[i], g_z[i], rc_inv, nx, ny, nz, cx, cy, cz, cell_id);
   char found = 0;
   for (int dz = -sz; dz <= sz && !found; ++dz) {
+    const int z = shift_bin(cz, dz, nz, box.pbc_z);
+    if (z < 0) {
+      continue;
+    }
     for (int dy = -sy; dy <= sy && !found; ++dy) {
+      const int y = shift_bin(cy, dy, ny, box.pbc_y);
+      if (y < 0) {
+        continue;
+      }
       for (int dx = -sx; dx <= sx; ++dx) {
-        int x = cx + dx;
-        int y = cy + dy;
-        int z = cz + dz;
+        const int x = shift_bin(cx, dx, nx, box.pbc_x);
         if (x < 0) {
-          x += nx;
-        } else if (x >= nx) {
-          x -= nx;
-        }
-        if (y < 0) {
-          y += ny;
-        } else if (y >= ny) {
-          y -= ny;
-        }
-        if (z < 0) {
-          z += nz;
-        } else if (z >= nz) {
-          z -= nz;
+          continue;
         }
         if (cell_has_active[z * ny * nx + y * nx + x]) {
           found = 1;
@@ -671,6 +682,46 @@ static int build_nep_centers(
   return compact_mask_to_indices(influence_mask.data(), N, influence_indices);
 }
 
+static void fill_large_box_bins(Box& box, const double rc_cell_list, int num_bins[3])
+{
+  box.get_num_bins(rc_cell_list, num_bins);
+  if (!box.pbc_x) {
+    num_bins[0] = int(floor(box.thickness_x / rc_cell_list));
+    if (num_bins[0] < 1) {
+      num_bins[0] = 1;
+    }
+  }
+  if (!box.pbc_y) {
+    num_bins[1] = int(floor(box.thickness_y / rc_cell_list));
+    if (num_bins[1] < 1) {
+      num_bins[1] = 1;
+    }
+  }
+  if (!box.pbc_z) {
+    num_bins[2] = int(floor(box.thickness_z / rc_cell_list));
+    if (num_bins[2] < 1) {
+      num_bins[2] = 1;
+    }
+  }
+}
+
+static void log_nep_large_box_cells(
+  const int nx, const int ny, const int nz, const int num_centers, const int N)
+{
+  static int logged = 0;
+  if (logged++) {
+    return;
+  }
+  printf(
+    "NEP large-box cells = %d x %d x %d (%d), centers = %d / %d\n",
+    nx,
+    ny,
+    nz,
+    nx * ny * nz,
+    num_centers,
+    N);
+}
+
 static __global__ void find_neighbor_list_large_box(
   NEP::ParaMB paramb,
   const int N,
@@ -724,26 +775,26 @@ static __global__ void find_neighbor_list_large_box(
     cell_id_z,
     cell_id);
 
-  const int z_lim = box.pbc_z ? 2 : 0;
-  const int y_lim = box.pbc_y ? 2 : 0;
-  const int x_lim = box.pbc_x ? 2 : 0;
+  const int z_lim = (nz > 1) ? 2 : 0;
+  const int y_lim = (ny > 1) ? 2 : 0;
+  const int x_lim = (nx > 1) ? 2 : 0;
 
   for (int zz = -z_lim; zz <= z_lim; ++zz) {
+    const int z = shift_bin(cell_id_z, zz, nz, box.pbc_z);
+    if (z < 0) {
+      continue;
+    }
     for (int yy = -y_lim; yy <= y_lim; ++yy) {
+      const int y = shift_bin(cell_id_y, yy, ny, box.pbc_y);
+      if (y < 0) {
+        continue;
+      }
       for (int xx = -x_lim; xx <= x_lim; ++xx) {
-        int neighbor_cell = cell_id + zz * nx * ny + yy * nx + xx;
-        if (cell_id_x + xx < 0)
-          neighbor_cell += nx;
-        if (cell_id_x + xx >= nx)
-          neighbor_cell -= nx;
-        if (cell_id_y + yy < 0)
-          neighbor_cell += ny * nx;
-        if (cell_id_y + yy >= ny)
-          neighbor_cell -= ny * nx;
-        if (cell_id_z + zz < 0)
-          neighbor_cell += nz * ny * nx;
-        if (cell_id_z + zz >= nz)
-          neighbor_cell -= nz * ny * nx;
+        const int x = shift_bin(cell_id_x, xx, nx, box.pbc_x);
+        if (x < 0) {
+          continue;
+        }
+        const int neighbor_cell = x + nx * y + nx * ny * z;
 
         const int num_atoms_neighbor_cell = g_cell_count[neighbor_cell];
         const int num_atoms_previous_cells = g_cell_count_sum[neighbor_cell];
@@ -1427,7 +1478,7 @@ void NEP::compute_large_box(
   const double rc_cell_list = 0.5 * rc;
 
   int num_bins[3];
-  box.get_num_bins(rc_cell_list, num_bins);
+  fill_large_box_bins(box, rc_cell_list, num_bins);
 
   find_cell_list(
     rc_cell_list,
@@ -1451,6 +1502,7 @@ void NEP::compute_large_box(
     nep_data.influence_mask,
     nep_data.influence_indices,
     nep_data.cell_has_active);
+  log_nep_large_box_cells(num_bins[0], num_bins[1], num_bins[2], num_centers, N);
   const int* centers = (num_centers >= 0) ? nep_data.influence_indices.data() : nullptr;
   if (num_centers >= 0) {
     grid_size = (num_centers > 0) ? ((num_centers - 1) / BLOCK_SIZE + 1) : 1;
@@ -2081,7 +2133,7 @@ void NEP::compute_large_box(
   const double rc_cell_list = 0.5 * rc;
 
   int num_bins[3];
-  box.get_num_bins(rc_cell_list, num_bins);
+  fill_large_box_bins(box, rc_cell_list, num_bins);
 
   find_cell_list(
     rc_cell_list,
@@ -2105,6 +2157,7 @@ void NEP::compute_large_box(
     nep_data.influence_mask,
     nep_data.influence_indices,
     nep_data.cell_has_active);
+  log_nep_large_box_cells(num_bins[0], num_bins[1], num_bins[2], num_centers, N);
   const int* centers = (num_centers >= 0) ? nep_data.influence_indices.data() : nullptr;
   if (num_centers >= 0) {
     grid_size = (num_centers > 0) ? ((num_centers - 1) / BLOCK_SIZE + 1) : 1;
