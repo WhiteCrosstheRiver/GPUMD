@@ -37,11 +37,16 @@ The driver class for the various integrators.
 #include "ensemble_wall_mirror.cuh"
 #include "ensemble_wall_piston.cuh"
 #include "integrate.cuh"
+#include <nvtx3/nvToolsExt.h>
 #include "model/atom.cuh"
 #include "utilities/common.cuh"
 #include "utilities/gpu_macro.cuh"
 #include "utilities/read_file.cuh"
+#include "../../extensions/common/surface/substrate_shell.cuh"
 #include <cstring>
+#include <string>
+#include <unordered_set>
+#include <vector>
 
 void Integrate::initialize(
   double time_step,
@@ -214,6 +219,8 @@ void Integrate::finalize()
 {
   fixed_group = -1; // no group has an index of -1
   move_group = -1;
+  fix_accumulating = false;
+  fix_frozen.clear();
   deform_x = 0;
   deform_y = 0;
   deform_z = 0;
@@ -988,29 +995,324 @@ void Integrate::parse_ensemble(
   }
 }
 
-void Integrate::parse_fix(const char** param, int num_param, std::vector<Group>& group)
+static bool is_fix_shell_keyword(const char* token)
 {
-  if (num_param != 2) {
-    PRINT_INPUT_ERROR("Keyword 'fix' should have 1 parameter.");
+  return strcmp(token, "substrate") == 0 || strcmp(token, "cutoff") == 0 ||
+         strcmp(token, "offset") == 0 || strcmp(token, "type") == 0 ||
+         strcmp(token, "region") == 0;
+}
+
+static int source_group_label(const Group& group, int n)
+{
+  if (n >= 0 && n < (int)group.cpu_label_user.size()) {
+    return group.cpu_label_user[n];
+  }
+  if (n >= 0 && n < (int)group.cpu_label.size()) {
+    return group.cpu_label[n];
+  }
+  return 0;
+}
+
+static void apply_group0_shell_labels(std::vector<Group>& group, const std::vector<int>& label)
+{
+  const int N = static_cast<int>(label.size());
+  if (group.empty()) {
+    group.resize(1);
+  }
+  if (group[0].cpu_label_user.size() != static_cast<size_t>(N)) {
+    group[0].cpu_label_user = group[0].cpu_label;
+    if (group[0].cpu_label_user.size() != static_cast<size_t>(N)) {
+      group[0].cpu_label_user.assign(N, 0);
+    }
+  }
+  group[0].number = 2;
+  group[0].cpu_label = label;
+  group[0].find_size(N, 0);
+  group[0].find_contents(N);
+  group[0].label.resize(N);
+  group[0].size.resize(group[0].number);
+  group[0].size_sum.resize(group[0].number);
+  group[0].contents.resize(N);
+  group[0].label.copy_from_host(group[0].cpu_label.data());
+  group[0].size.copy_from_host(group[0].cpu_size.data());
+  group[0].size_sum.copy_from_host(group[0].cpu_size_sum.data());
+  group[0].contents.copy_from_host(group[0].cpu_contents.data());
+}
+
+static void commit_fix_union(
+  Integrate& integrate, std::vector<Group>& group, Atom& atom, const std::vector<char>& frozen)
+{
+  const int N = static_cast<int>(frozen.size());
+  std::vector<int> label(N);
+  for (int i = 0; i < N; ++i) {
+    label[i] = frozen[i] ? 1 : 0;
+  }
+  apply_group0_shell_labels(group, label);
+  atom.cpu_fixed = frozen;
+  integrate.fixed_group = 1;
+  printf(
+    "    unfixed %d atoms, frozen %d atoms (union, group 1).\n",
+    group[0].cpu_size[0],
+    group[0].cpu_size[1]);
+}
+
+void Integrate::parse_fix(const char** param, int num_param, std::vector<Group>& group, Atom& atom, Box& box)
+{
+  if (num_param < 2) {
+    PRINT_INPUT_ERROR("Keyword 'fix' needs parameters.");
   }
 
-  if (!is_valid_int(param[1], &fixed_group)) {
-    PRINT_INPUT_ERROR("Fixed group ID should be an integer.");
+  const int N = atom.number_of_atoms;
+  if (N < 1) {
+    PRINT_INPUT_ERROR("fix needs existing atoms.");
+  }
+  if (!fix_accumulating || (int)fix_frozen.size() != N) {
+    fix_frozen.assign(N, 0);
+    fix_accumulating = true;
   }
 
-  if (group.size() < 1) {
-    PRINT_INPUT_ERROR("Cannot use 'fix' without grouping method.");
+  if (strcmp(param[1], "shell") == 0) {
+    int axis = -1;
+    double cutoff = 0.0;
+    double offset = 0.0;
+    bool has_substrate = false;
+    bool has_cutoff = false;
+    bool has_offset = false;
+    bool has_region = false;
+    std::unordered_set<std::string> types;
+    double region_cubic[6];
+
+    int i = 2;
+    while (i < num_param) {
+      if (strcmp(param[i], "substrate") == 0) {
+        if (i + 1 >= num_param) {
+          PRINT_INPUT_ERROR("Usage: fix shell substrate <x|y|z> ...");
+        }
+        if (strcmp(param[i + 1], "x") == 0 || strcmp(param[i + 1], "X") == 0) {
+          axis = 0;
+        } else if (strcmp(param[i + 1], "y") == 0 || strcmp(param[i + 1], "Y") == 0) {
+          axis = 1;
+        } else if (strcmp(param[i + 1], "z") == 0 || strcmp(param[i + 1], "Z") == 0) {
+          axis = 2;
+        } else {
+          PRINT_INPUT_ERROR("fix shell substrate should be x, y, or z.");
+        }
+        has_substrate = true;
+        i += 2;
+      } else if (strcmp(param[i], "cutoff") == 0) {
+        if (i + 1 >= num_param) {
+          PRINT_INPUT_ERROR("Usage: fix shell ... cutoff <r>");
+        }
+        if (!is_valid_real(param[i + 1], &cutoff)) {
+          PRINT_INPUT_ERROR("fix shell cutoff should be a number.");
+        }
+        if (cutoff <= 0.0) {
+          PRINT_INPUT_ERROR("fix shell cutoff should be > 0.");
+        }
+        has_cutoff = true;
+        i += 2;
+      } else if (strcmp(param[i], "offset") == 0) {
+        if (i + 1 >= num_param) {
+          PRINT_INPUT_ERROR("Usage: fix shell ... offset <thickness>");
+        }
+        if (!is_valid_real(param[i + 1], &offset)) {
+          PRINT_INPUT_ERROR("fix shell offset should be a number.");
+        }
+        if (offset <= 0.0) {
+          PRINT_INPUT_ERROR("fix shell offset should be > 0.");
+        }
+        has_offset = true;
+        i += 2;
+      } else if (strcmp(param[i], "type") == 0) {
+        i += 1;
+        int n_type = 0;
+        while (i < num_param && !is_fix_shell_keyword(param[i])) {
+          types.insert(std::string(param[i]));
+          ++n_type;
+          ++i;
+        }
+        if (n_type == 0) {
+          PRINT_INPUT_ERROR("Usage: fix shell ... type <symbol> [symbol ...]");
+        }
+      } else if (strcmp(param[i], "region") == 0) {
+        if (i + 7 >= num_param || strcmp(param[i + 1], "cubic") != 0) {
+          PRINT_INPUT_ERROR(
+            "Usage: fix shell ... region cubic <xmin> <xmax> <ymin> <ymax> <zmin> <zmax>");
+        }
+        for (int k = 0; k < 6; ++k) {
+          if (!is_valid_real(param[i + 2 + k], region_cubic + k)) {
+            PRINT_INPUT_ERROR("fix shell region cubic bounds should be numbers.");
+          }
+        }
+        if (region_cubic[0] > region_cubic[1] || region_cubic[2] > region_cubic[3] ||
+            region_cubic[4] > region_cubic[5]) {
+          PRINT_INPUT_ERROR("fix shell region cubic min should be <= max for each component.");
+        }
+        has_region = true;
+        i += 8;
+      } else {
+        PRINT_INPUT_ERROR(
+          "Unknown keyword in fix shell. Expected substrate, cutoff, offset, type, or region.");
+      }
+    }
+
+    if (!has_substrate || !has_cutoff || !has_offset) {
+      PRINT_INPUT_ERROR(
+        "Usage: fix shell substrate <x|y|z> cutoff <r> offset <d> [type <sym> ...] "
+        "[region cubic <xmin> <xmax> <ymin> <ymax> <zmin> <zmax>]");
+    }
+
+    std::vector<char> eligible;
+    const std::vector<char>* eligible_ptr = nullptr;
+    if (!types.empty()) {
+      eligible.assign(N, 0);
+      int n_ok = 0;
+      for (int n = 0; n < N; ++n) {
+        if (types.count(atom.cpu_atom_symbol[n])) {
+          eligible[n] = 1;
+          ++n_ok;
+        }
+      }
+      if (n_ok == 0) {
+        PRINT_INPUT_ERROR("fix shell type matched no atoms.");
+      }
+      eligible_ptr = &eligible;
+    }
+
+    std::vector<int> label;
+    nvtxRangePushA("fix_shell");
+    if (!classify_substrate_shell(
+          atom,
+          box,
+          axis,
+          cutoff,
+          offset,
+          eligible_ptr,
+          has_region ? region_cubic : nullptr,
+          label)) {
+      nvtxRangePop();
+      PRINT_INPUT_ERROR("fix shell found no substrate connected to the minimum along that axis.");
+    }
+    nvtxRangePop();
+    for (int n = 0; n < N; ++n) {
+      if (label[n] == 1) {
+        fix_frozen[n] = 1;
+      }
+    }
+
+    const char axis_name[3] = {'x', 'y', 'z'};
+    printf(
+      "Fix shell (union): substrate along %c, cutoff = %g, unfix shear offset = %g A.\n",
+      axis_name[axis],
+      cutoff,
+      offset);
+    if (!types.empty()) {
+      printf("    substrate types:");
+      for (const auto& symbol : types) {
+        printf(" %s", symbol.c_str());
+      }
+      printf("\n");
+    }
+    if (has_region) {
+      printf(
+        "    region cubic [%g, %g] [%g, %g] [%g, %g]\n",
+        region_cubic[0],
+        region_cubic[1],
+        region_cubic[2],
+        region_cubic[3],
+        region_cubic[4],
+        region_cubic[5]);
+    }
+    commit_fix_union(*this, group, atom, fix_frozen);
+    return;
   }
 
-  if (fixed_group < 0) {
-    PRINT_INPUT_ERROR("Fixed group ID should >= 0.");
+  std::vector<int> group_ids;
+  std::unordered_set<std::string> types;
+  int i = 1;
+  while (i < num_param) {
+    if (strcmp(param[i], "type") == 0) {
+      i += 1;
+      int n_type = 0;
+      while (i < num_param && strcmp(param[i], "type") != 0) {
+        int dummy = 0;
+        if (is_valid_int(param[i], &dummy)) {
+          break;
+        }
+        types.insert(std::string(param[i]));
+        ++n_type;
+        ++i;
+      }
+      if (n_type == 0) {
+        PRINT_INPUT_ERROR("Usage: fix type <symbol> [symbol ...]");
+      }
+    } else {
+      int gid = 0;
+      if (!is_valid_int(param[i], &gid)) {
+        PRINT_INPUT_ERROR("Usage: fix <group_id> [group_id ...] [type <symbol> ...]");
+      }
+      if (gid < 0) {
+        PRINT_INPUT_ERROR("Fixed group ID should >= 0.");
+      }
+      group_ids.push_back(gid);
+      ++i;
+    }
   }
 
-  if (fixed_group >= group[0].number) {
-    PRINT_INPUT_ERROR("Fixed group ID should < number of groups.");
+  if (group_ids.empty() && types.empty()) {
+    PRINT_INPUT_ERROR("Usage: fix <group_id> [group_id ...] [type <symbol> ...]");
   }
 
-  printf("Group %d in grouping method 0 will be fixed.\n", fixed_group);
+  if (!group_ids.empty()) {
+    if (group.empty()) {
+      PRINT_INPUT_ERROR("Cannot use 'fix <group>' without grouping method.");
+    }
+    int max_user = group[0].number - 1;
+    for (int n = 0; n < N && n < (int)group[0].cpu_label_user.size(); ++n) {
+      if (group[0].cpu_label_user[n] > max_user) {
+        max_user = group[0].cpu_label_user[n];
+      }
+    }
+    for (int gid : group_ids) {
+      if (gid > max_user) {
+        PRINT_INPUT_ERROR("Fixed group ID should be a grouping method 0 label.");
+      }
+    }
+  }
+
+  std::unordered_set<int> gid_set(group_ids.begin(), group_ids.end());
+  int n_added = 0;
+  for (int n = 0; n < N; ++n) {
+    bool freeze = false;
+    if (!gid_set.empty() && !group.empty()) {
+      freeze = gid_set.count(source_group_label(group[0], n)) > 0;
+    }
+    if (!types.empty() && types.count(atom.cpu_atom_symbol[n])) {
+      freeze = true;
+    }
+    if (freeze && !fix_frozen[n]) {
+      ++n_added;
+    }
+    if (freeze) {
+      fix_frozen[n] = 1;
+    }
+  }
+
+  printf("Fix union:");
+  if (!group_ids.empty()) {
+    printf(" groups");
+    for (int gid : group_ids) {
+      printf(" %d", gid);
+    }
+  }
+  if (!types.empty()) {
+    printf(" type");
+    for (const auto& symbol : types) {
+      printf(" %s", symbol.c_str());
+    }
+  }
+  printf(" (+%d atoms).\n", n_added);
+  commit_fix_union(*this, group, atom, fix_frozen);
 }
 
 void Integrate::parse_move(const char** param, int num_param, std::vector<Group>& group)

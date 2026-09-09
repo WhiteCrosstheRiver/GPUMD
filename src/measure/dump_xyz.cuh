@@ -68,6 +68,7 @@ public:
     bool has_bec_ = false;
     bool has_virial_ = false;
     bool has_group_ = false;
+    bool has_volume_ = false;
   };
 
 private:
@@ -88,6 +89,18 @@ private:
   GPU_Vector<double> gpu_total_virial_;
   std::vector<double> cpu_total_virial_;
   std::vector<float> cpu_bec_;
+
+  double voronoi_radius_ = 0.0;
+  int voronoi_directions_ = 128;
+  int voronoi_mn_ = 256;
+  GPU_Vector<double> gpu_volume_per_atom_;
+  GPU_Vector<double> gpu_voronoi_directions_;
+  std::vector<double> cpu_volume_per_atom_;
+  GPU_Vector<int> voronoi_cell_count_;
+  GPU_Vector<int> voronoi_cell_count_sum_;
+  GPU_Vector<int> voronoi_cell_contents_;
+  GPU_Vector<int> voronoi_NN_;
+  GPU_Vector<int> voronoi_NL_;
 
   void output_line2(
     const double time,

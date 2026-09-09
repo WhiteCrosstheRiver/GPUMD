@@ -34,3 +34,12 @@ void Delete(
   GPU_Vector<double>& thermo,
   Force& force);
 
+// Consecutive `delete isolated` commands: one cell list, one compact.
+void DeleteIsolatedSequence(
+  const std::vector<std::vector<std::string>>& commands,
+  Box& box,
+  Atom& atoms,
+  std::vector<Group>& groups,
+  GPU_Vector<double>& thermo,
+  Force& force);
+

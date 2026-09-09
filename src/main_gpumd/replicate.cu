@@ -46,6 +46,7 @@ void Replicate(
   for (int m = 0; m < groups.size(); m++) {
     new_groups[m].number = groups[m].number;
     new_groups[m].cpu_label.resize(N);
+    new_groups[m].cpu_label_user.resize(N);
   }
 
   new_atoms.number_of_atoms = N;
@@ -53,6 +54,7 @@ void Replicate(
   new_atoms.cpu_mass.resize(N);
   new_atoms.cpu_charge.resize(N);
   new_atoms.cpu_atom_symbol.resize(N);
+  new_atoms.cpu_fixed.assign(N, 0);
   new_atoms.cpu_position_per_atom.resize(N * 3);
   new_atoms.cpu_velocity_per_atom.resize(N * 3);
   int cur = 0;
@@ -64,8 +66,14 @@ void Replicate(
           new_atoms.cpu_mass[cur] = atoms.cpu_mass[nn];
           new_atoms.cpu_charge[cur] = atoms.cpu_charge[nn];
           new_atoms.cpu_atom_symbol[cur] = atoms.cpu_atom_symbol[nn];
-          for (int m = 0; m < groups.size(); m++)
+          new_atoms.cpu_fixed[cur] =
+            (nn < (int)atoms.cpu_fixed.size()) ? atoms.cpu_fixed[nn] : 0;
+          for (int m = 0; m < groups.size(); m++) {
             new_groups[m].cpu_label[cur] = groups[m].cpu_label[nn];
+            new_groups[m].cpu_label_user[cur] =
+              (nn < (int)groups[m].cpu_label_user.size()) ? groups[m].cpu_label_user[nn]
+                                                          : groups[m].cpu_label[nn];
+          }
           for (int d = 0; d < 3; d++) {
             new_atoms.cpu_position_per_atom[cur + d * N] = atoms.cpu_position_per_atom[nn + d * n];
             new_atoms.cpu_position_per_atom[cur + d * N] +=
@@ -89,11 +97,13 @@ void Replicate(
   atoms.cpu_mass.swap(new_atoms.cpu_mass);
   atoms.cpu_charge.swap(new_atoms.cpu_charge);
   atoms.cpu_atom_symbol.swap(new_atoms.cpu_atom_symbol);
+  atoms.cpu_fixed.swap(new_atoms.cpu_fixed);
   atoms.cpu_position_per_atom.swap(new_atoms.cpu_position_per_atom);
   atoms.cpu_velocity_per_atom.swap(new_atoms.cpu_velocity_per_atom);
   for (int m = 0; m < groups.size(); m++) {
     groups[m].number = new_groups[m].number;
     groups[m].cpu_label.swap(new_groups[m].cpu_label);
+    groups[m].cpu_label_user.swap(new_groups[m].cpu_label_user);
   }
   AtomMutation::rebuild_after_mutation(atoms, groups, thermo, force);
 

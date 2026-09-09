@@ -346,6 +346,7 @@ void read_xyz_in_line_3(
 
   for (int m = 0; m < group.size(); ++m) {
     group[m].cpu_label.resize(N);
+    group[m].cpu_label_user.resize(N);
     group[m].number = 0;
   }
 
@@ -398,6 +399,7 @@ void read_xyz_in_line_3(
     for (int m = 0; m < group.size(); ++m) {
       group[m].cpu_label[n] =
         get_int_from_token(tokens[property_offset[5] + m], __FILE__, __LINE__);
+      group[m].cpu_label_user[n] = group[m].cpu_label[n];
       if (group[m].cpu_label[n] < 0 || group[m].cpu_label[n] >= N) {
         PRINT_INPUT_ERROR("Group label should >= 0 and < N.");
       }
@@ -536,6 +538,7 @@ void initialize_position(
   }
 
   find_type_size(atom.number_of_atoms, number_of_types, atom.cpu_type, atom.cpu_type_size);
+  atom.cpu_fixed.assign(atom.number_of_atoms, 0);
 }
 
 void allocate_memory_gpu(std::vector<Group>& group, Atom& atom, GPU_Vector<double>& thermo)

@@ -1,0 +1,6 @@
+potential       ../../../../potentials/lj/Ar_10A.txt
+time_step       0
+ensemble        nve
+fix             1 2
+dump_xyz        -1 0 1 labeled.xyz group
+run             1

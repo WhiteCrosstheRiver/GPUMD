@@ -9,12 +9,46 @@ This keyword can be used to fix (freeze) a group of atoms
 
 Syntax
 ------
-This keyword requires a single parameter which is the label of the group in which the atoms are to be fixed (velocities and forces are always set to zero such that the atoms in the group do not move).
-The full command reads::
+Freeze grouping-method-0 labels (one or more). Several ``fix`` lines in the same run block are a **union**::
 
-  fix <group_label>
+  fix <group_id> [group_id ...]
 
-Here, the :attr:`group_label` refers to the grouping method 0 defined in the :ref:`simulation model file <model_xyz>`.
+Freeze by species::
+
+  fix type <symbol> [symbol ...]
+
+Both on one line::
+
+  fix 1 2 type Si
+
+Recompute a receding shear from the current surface (special-purpose; etching / sputtering)::
+
+  fix shell substrate <x|y|z> cutoff <r> offset <d> [type <symbol> ...] [region cubic <xmin> <xmax> <ymin> <ymax> <zmin> <zmax>]
+
+``shell`` / union rewrites grouping method 0 for the integrator: group 0 is unfixed, group 1 is the frozen union.
+Model-file group labels are kept internally so later ``fix 1 2`` in a :ref:`for <kw_for>` loop still sees the original sides.
+It is never run from :ref:`deposit <kw_deposit>` or :ref:`delete <kw_delete>`.
+:ref:`delete <kw_delete>` never removes atoms frozen by ``fix``; the freeze mask is kept after ``run``.
+
+* ``substrate <x|y|z>``: BFS starts from the lowest-coordinate atom along that axis (same connectivity idea as :ref:`delete disconnected <kw_delete>`). The two transverse directions use PBC; the substrate axis does not.
+* ``cutoff <r>``: graph edge length for the BFS (Å).
+* ``offset <d>``: unfix a shear of thickness :math:`d` (Å) below the local surface of the substrate. Typical values are around 5 Å.
+* ``type <symbol> ...``: only these species are the substrate (like :ref:`delete element <kw_delete>`). Species not listed, including incident F, stay unfixed.
+* ``region cubic ...``: optional window (same bounds as :ref:`delete cubic <kw_delete>`). Substrate atoms outside the box are frozen; atoms that are not in the substrate stay unfixed.
+
+The local surface is a height map of the substrate in the plane perpendicular to the axis, so a groove along the beam direction keeps its floor in the unfixed shell.
+
+Etch loop::
+
+  for i range 1 100
+      deposit F position gaussian 32.662 40.828 30 velocity gaussian 0.007 5 surface local 5.0 offset antivel 2.5
+      ensemble nvt_ber 300 300 100
+      fix 1 2
+      fix shell substrate z cutoff 2.4 offset 5.0 type Si Ge
+      dump_xyz 0 0 100 surface.xyz
+      run 100
+      delete disconnected cutoff 2.4
+  end
 
 How it is implemented
 ---------------------
@@ -55,3 +89,7 @@ full-system pressure.
 Caveats
 -------
 This keyword is not propagating, which means that it only affects the simulation within the run it belongs to.
+Put ``fix shell`` inside :ref:`for <kw_for>` so the frozen set follows a receding surface.
+Do not call it every MD step: it runs a full-system BFS each time it is issued.
+
+``fix shell`` replaces grouping method 0. Extra groups for ``compute`` / heat baths should use grouping method 1 or higher.

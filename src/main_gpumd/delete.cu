@@ -16,8 +16,367 @@
 #include "delete.cuh"
 #include "atom_mutation.cuh"
 #include "../../extensions/common/topology/connectivity_bfs.cuh"
+#include "../../extensions/common/topology/coord_expr.cuh"
+#include "../../extensions/common/topology/isolated_atoms.cuh"
 #include "utilities/gpu_macro.cuh"
 #include <cstring>
+#include <memory>
+#include <nvtx3/nvToolsExt.h>
+#include <string>
+#include <unordered_set>
+
+static bool atom_is_fixed(const Atom& atoms, int n)
+{
+  return n >= 0 && n < (int)atoms.cpu_fixed.size() && atoms.cpu_fixed[n];
+}
+
+static void protect_fixed_atoms(const Atom& atoms, std::vector<char>& to_delete, int& num_to_delete)
+{
+  int skipped = 0;
+  for (int n = 0; n < (int)to_delete.size(); ++n) {
+    if (to_delete[n] && atom_is_fixed(atoms, n)) {
+      to_delete[n] = 0;
+      --num_to_delete;
+      ++skipped;
+    }
+  }
+  if (skipped > 0) {
+    printf("Skipping %d fixed atoms (delete never removes fix atoms).\n", skipped);
+  }
+}
+
+static bool parse_isolated_mode(
+  const std::vector<std::string>& toks,
+  int& i,
+  IsolatedMode& mode,
+  bool& has_mode,
+  std::unordered_set<std::string>& selected)
+{
+  if (i >= (int)toks.size()) {
+    return false;
+  }
+  if (toks[i] == "only") {
+    if (has_mode) {
+      PRINT_INPUT_ERROR("delete isolated: give only one of only, full, selected.");
+    }
+    mode = IsolatedMode::Only;
+    has_mode = true;
+    ++i;
+    return true;
+  }
+  if (toks[i] == "full") {
+    if (has_mode) {
+      PRINT_INPUT_ERROR("delete isolated: give only one of only, full, selected.");
+    }
+    mode = IsolatedMode::Full;
+    has_mode = true;
+    ++i;
+    return true;
+  }
+  if (toks[i] == "selected") {
+    if (has_mode) {
+      PRINT_INPUT_ERROR("delete isolated: give only one of only, full, selected.");
+    }
+    mode = IsolatedMode::Selected;
+    has_mode = true;
+    ++i;
+    while (i < (int)toks.size() && !is_isolated_cmd_keyword(toks[i]) &&
+           !is_isolated_expr_start(toks[i]) && toks[i] != "or" && toks[i] != "and") {
+      selected.insert(toks[i]);
+      ++i;
+    }
+    if (selected.empty()) {
+      PRINT_INPUT_ERROR("Usage: delete isolated ... selected <symbol> [symbol ...]  (X = every neighbor)");
+    }
+    return true;
+  }
+  return false;
+}
+
+struct IsolatedRequest
+{
+  double cutoff = 0.0;
+  std::unordered_set<std::string> types;
+  std::unordered_set<std::string> selected;
+  IsolatedMode mode = IsolatedMode::Only;
+  std::unique_ptr<CoordExpr> expr;
+};
+
+static IsolatedRequest parse_isolated_request(const std::vector<std::string>& toks)
+{
+  IsolatedRequest req;
+  bool has_cutoff = false;
+  int shorthand_lt = -1;
+  bool has_mode = false;
+  int i = 0;
+  const int ntok = static_cast<int>(toks.size());
+
+  while (i < ntok) {
+    if (toks[i] == "cutoff") {
+      if (i + 1 >= ntok) {
+        PRINT_INPUT_ERROR("Usage: delete isolated cutoff <r> ...");
+      }
+      int coord_from_cutoff = 0;
+      double cutoff_second = 0.0;
+      if (i + 2 < ntok && is_valid_int(toks[i + 1].c_str(), &coord_from_cutoff) &&
+          is_valid_real(toks[i + 2].c_str(), &cutoff_second) &&
+          !is_isolated_cmd_keyword(toks[i + 2]) && !is_isolated_expr_start(toks[i + 2])) {
+        if (coord_from_cutoff < 0) {
+          PRINT_INPUT_ERROR("delete isolated coord should be >= 0.");
+        }
+        if (cutoff_second <= 0.0) {
+          PRINT_INPUT_ERROR("delete isolated cutoff should be > 0.");
+        }
+        shorthand_lt = coord_from_cutoff;
+        req.cutoff = cutoff_second;
+        has_cutoff = true;
+        i += 3;
+      } else if (is_valid_real(toks[i + 1].c_str(), &req.cutoff)) {
+        if (req.cutoff <= 0.0) {
+          PRINT_INPUT_ERROR("delete isolated cutoff should be > 0.");
+        }
+        has_cutoff = true;
+        i += 2;
+      } else {
+        PRINT_INPUT_ERROR("delete isolated cutoff should be a number.");
+      }
+      continue;
+    }
+    if (toks[i] == "type") {
+      ++i;
+      int n_type = 0;
+      while (i < ntok && !is_isolated_cmd_keyword(toks[i]) && !is_isolated_expr_start(toks[i]) &&
+             toks[i] != "or" && toks[i] != "and") {
+        req.types.insert(toks[i]);
+        ++n_type;
+        ++i;
+      }
+      if (n_type == 0) {
+        PRINT_INPUT_ERROR("Usage: delete isolated ... type <symbol> [symbol ...]");
+      }
+      continue;
+    }
+    if (parse_isolated_mode(toks, i, req.mode, has_mode, req.selected)) {
+      continue;
+    }
+    break;
+  }
+  if (!has_cutoff) {
+    PRINT_INPUT_ERROR(
+      "Usage: delete isolated cutoff <r> [type <symbol> ...] [only|full|selected <symbol> ...] "
+      "[coord ...]");
+  }
+
+  const bool explicit_expr = i < ntok && !is_isolated_cmd_keyword(toks[i]);
+  if (shorthand_lt >= 0 && explicit_expr) {
+    PRINT_INPUT_ERROR(
+      "delete isolated: cutoff <n> <r> is shorthand for coord X < n; "
+      "write cutoff <r> and the coord expression instead.");
+  }
+  req.expr = parse_coord_expr(toks, i);
+  if (shorthand_lt >= 0) {
+    req.expr->value = shorthand_lt;
+  }
+  while (parse_isolated_mode(toks, i, req.mode, has_mode, req.selected)) {
+  }
+  if (i != ntok) {
+    PRINT_INPUT_ERROR("delete isolated: leftover token in coordination expression.");
+  }
+  return req;
+}
+
+static IsolatedRequest parse_isolated_command(const std::vector<std::string>& command)
+{
+  if (command.size() < 2 || command[0] != "delete" || command[1] != "isolated") {
+    PRINT_INPUT_ERROR("DeleteIsolatedSequence expects `delete isolated` commands.");
+  }
+  std::vector<std::string> toks;
+  for (size_t p = 2; p < command.size(); ++p) {
+    split_isolated_token(command[p], toks);
+  }
+  return parse_isolated_request(toks);
+}
+
+static void print_isolated_header(const IsolatedRequest& req, int num_to_delete)
+{
+  print_line_1();
+  printf("Deleting isolated atoms.\n");
+  printf("Cutoff = %.6f\n", req.cutoff);
+  printf("Condition: %s\n", format_coord_expr(*req.expr).c_str());
+  if (req.mode == IsolatedMode::Only) {
+    printf("Mode = only (matching atoms).\n");
+  } else if (req.mode == IsolatedMode::Full) {
+    printf("Mode = full (matching atoms and all neighbors in cutoff).\n");
+  } else {
+    printf("Mode = selected (matching atoms and neighbors of type");
+    for (const auto& symbol : req.selected) {
+      printf(" %s", symbol.c_str());
+    }
+    printf(").\n");
+  }
+  if (!req.types.empty()) {
+    printf("Candidate types:");
+    for (const auto& symbol : req.types) {
+      printf(" %s", symbol.c_str());
+    }
+    printf("\n");
+  }
+  printf("Number of atoms to delete: %d\n", num_to_delete);
+  print_line_2();
+}
+
+static void print_delete_remaining(const Atom& atoms, int num_deleted)
+{
+  print_line_1();
+  printf("Deleted %d atoms.\n", num_deleted);
+  printf("Remaining number of atoms: %d\n", atoms.number_of_atoms);
+  int number_of_types = atoms.cpu_type_size.size();
+  if (number_of_types == 1) {
+    printf("There is only one atom type.\n");
+  } else {
+    printf("There are %d atom types.\n", number_of_types);
+  }
+  for (int m = 0; m < number_of_types; m++) {
+    printf("    %d atoms of type %d.\n", atoms.cpu_type_size[m], m);
+  }
+  print_line_2();
+}
+
+static void mark_isolated_request(
+  const Atom& atoms,
+  const Box& box,
+  const IsolatedRequest& req,
+  const IsolatedCells* cells,
+  const std::vector<char>* skip,
+  std::vector<char>& to_delete,
+  int& num_to_delete)
+{
+  const int N = atoms.number_of_atoms;
+  std::vector<char> candidate;
+  const std::vector<char>* candidate_ptr = nullptr;
+  {
+    candidate.assign(N, 0);
+    int n_ok = 0;
+    const bool use_types = !req.types.empty();
+    const bool use_fixed = atoms.cpu_fixed.size() == static_cast<size_t>(N);
+    for (int n = 0; n < N; ++n) {
+      if (skip != nullptr && (*skip)[n]) {
+        continue;
+      }
+      if (use_fixed && atoms.cpu_fixed[n]) {
+        continue; // delete never removes fix atoms; no need to evaluate them
+      }
+      if (use_types && !req.types.count(atoms.cpu_atom_symbol[n])) {
+        continue;
+      }
+      candidate[n] = 1;
+      ++n_ok;
+    }
+    if (use_types && n_ok == 0) {
+      PRINT_INPUT_ERROR("delete isolated type matched no atoms.");
+    }
+    candidate_ptr = &candidate;
+  }
+
+  std::vector<char> isolated;
+  mark_isolated(
+    atoms, box, req.cutoff, *req.expr, candidate_ptr, req.mode, &req.selected, isolated, cells,
+    skip);
+  to_delete.assign(N, 0);
+  num_to_delete = 0;
+  for (int n = 0; n < N; n++) {
+    if (isolated[n] && (skip == nullptr || !(*skip)[n])) {
+      to_delete[n] = 1;
+      num_to_delete++;
+    }
+  }
+}
+
+void DeleteIsolatedSequence(
+  const std::vector<std::vector<std::string>>& commands,
+  Box& box,
+  Atom& atoms,
+  std::vector<Group>& groups,
+  GPU_Vector<double>& thermo,
+  Force& force)
+{
+  if (commands.empty()) {
+    return;
+  }
+
+  std::vector<IsolatedRequest> reqs;
+  reqs.reserve(commands.size());
+  double max_cutoff = 0.0;
+  for (const auto& command : commands) {
+    IsolatedRequest req = parse_isolated_command(command);
+    if (req.cutoff > max_cutoff) {
+      max_cutoff = req.cutoff;
+    }
+    reqs.push_back(std::move(req));
+  }
+
+  IsolatedCells cells;
+  nvtxRangePushA("delete_build_cells");
+  cells.build(atoms, box, max_cutoff);
+  nvtxRangePop();
+  if (commands.size() > 1) {
+    printf("Isolated neighbor cells built once for %d delete commands.\n", (int)commands.size());
+  }
+
+  const int N = atoms.number_of_atoms;
+  std::vector<char> gone(N, 0);
+  int total_deleted = 0;
+
+  for (const auto& req : reqs) {
+    std::vector<char> to_delete;
+    int num_to_delete = 0;
+    nvtxRangePushA("delete_mark");
+    mark_isolated_request(atoms, box, req, &cells, &gone, to_delete, num_to_delete);
+    nvtxRangePop();
+    print_isolated_header(req, num_to_delete);
+    protect_fixed_atoms(atoms, to_delete, num_to_delete);
+    if (num_to_delete == 0) {
+      print_line_1();
+      printf("No atoms to delete. System unchanged.\n");
+      print_line_2();
+      continue;
+    }
+    for (int n = 0; n < N; ++n) {
+      if (to_delete[n]) {
+        gone[n] = 1;
+      }
+    }
+    total_deleted += num_to_delete;
+    if (commands.size() > 1) {
+      print_line_1();
+      printf("Deleted %d atoms.\n", num_to_delete);
+      print_line_2();
+    }
+  }
+
+  if (total_deleted == 0) {
+    return;
+  }
+  nvtxRangePushA("delete_compact");
+  AtomMutation::remove_atoms(atoms, groups, thermo, force, gone);
+  nvtxRangePop();
+  if (commands.size() == 1) {
+    print_delete_remaining(atoms, total_deleted);
+  } else {
+    print_line_1();
+    printf("Remaining number of atoms: %d\n", atoms.number_of_atoms);
+    int number_of_types = atoms.cpu_type_size.size();
+    if (number_of_types == 1) {
+      printf("There is only one atom type.\n");
+    } else {
+      printf("There are %d atom types.\n", number_of_types);
+    }
+    for (int m = 0; m < number_of_types; m++) {
+      printf("    %d atoms of type %d.\n", atoms.cpu_type_size[m], m);
+    }
+    print_line_2();
+  }
+}
 
 void Delete(
   const char** param,
@@ -117,9 +476,20 @@ void Delete(
     printf("Cutoff = %.6f\n", cutoff);
     printf("Number of atoms to delete: %d\n", num_to_delete);
     print_line_2();
+  } else if (style == "isolated") {
+    std::vector<std::string> command;
+    command.reserve(num_param);
+    for (int p = 0; p < num_param; ++p) {
+      command.emplace_back(param[p]);
+    }
+    DeleteIsolatedSequence({std::move(command)}, box, atoms, groups, thermo, force);
+    return;
   } else {
-    PRINT_INPUT_ERROR("Unknown delete style. Supported styles: element, cubic, disconnected");
+    PRINT_INPUT_ERROR(
+      "Unknown delete style. Supported styles: element, cubic, disconnected, isolated");
   }
+
+  protect_fixed_atoms(atoms, to_delete, num_to_delete);
 
   if (num_to_delete == 0) {
     print_line_1();
@@ -129,19 +499,5 @@ void Delete(
   }
 
   AtomMutation::remove_atoms(atoms, groups, thermo, force, to_delete);
-  const int N_new = atoms.number_of_atoms;
-
-  print_line_1();
-  printf("Deleted %d atoms.\n", num_to_delete);
-  printf("Remaining number of atoms: %d\n", N_new);
-  int number_of_types = atoms.cpu_type_size.size();
-  if (number_of_types == 1) {
-    printf("There is only one atom type.\n");
-  } else {
-    printf("There are %d atom types.\n", number_of_types);
-  }
-  for (int m = 0; m < number_of_types; m++) {
-    printf("    %d atoms of type %d.\n", atoms.cpu_type_size[m], m);
-  }
-  print_line_2();
+  print_delete_remaining(atoms, num_to_delete);
 }

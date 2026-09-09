@@ -24,9 +24,15 @@ If :attr:`grouping_method` is negative, :attr:`group_id` will be ignored and dat
 
 If it is ended by a star (*), the data for one frame will be output to one file, named by changing the star to the step number.
 
-* Then one can write the properties to be output, and the allowed properties include: :attr:`mass`, :attr:`velocity`, :attr:`force`, :attr:`potential`, :attr:`virial`, :attr:`group`, and :attr:`unwrapped_position`.
+* Then one can write the properties to be output, and the allowed properties include: :attr:`mass`, :attr:`velocity`, :attr:`force`, :attr:`potential`, :attr:`virial`, :attr:`group`, :attr:`unwrapped_position`, and :attr:`volume`.
 
 * The wrapped positions will always be included in the output.
+
+* :attr:`volume` requests per-atom ball-restricted Voronoi volumes and must be followed by two numbers: the restriction radius :math:`R` (Å) and the number of quadrature directions (currently 128 or 256). Example::
+
+    dump_xyz -1 0 100 dump.xyz volume 3.0 128
+
+  The volume of atom :math:`i` is :math:`\Omega_i(R)=\mathrm{Vol}[C_i\cap B(\mathbf r_i,R)]`, approximated by equal-weight spherical quadrature. Neighbors are taken from a dedicated list with cutoff :math:`2R`. Each periodic box thickness must be at least :math:`4R` so that the minimum-image convention covers that neighborhood. :math:`R` should cover the farthest vertex of a bulk Voronoi cell; using half a bond length is generally too small. Volume is computed only on dump steps and does not require per-atom virial.
 
 
 Examples

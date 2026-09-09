@@ -1,0 +1,6 @@
+potential       ../../../../potentials/nep/C_2022_NEP3.txt
+time_step       0.0
+ensemble        nve
+delete isolated type C cutoff 2.9 full ( coord X < 2 )
+dump_xyz        -1 0 1 after.xyz
+run             1

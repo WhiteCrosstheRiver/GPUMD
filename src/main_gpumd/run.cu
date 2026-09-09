@@ -552,7 +552,7 @@ void Run::parse_one_keyword(std::vector<std::string>& tokens)
     property.reset(new Compute(param, num_param, group));
     measure.properties.emplace_back(std::move(property));
   } else if (strcmp(param[0], "fix") == 0) {
-    integrate.parse_fix(param, num_param, group);
+    integrate.parse_fix(param, num_param, group, atom, box);
   } else if (strcmp(param[0], "move") == 0) {
     integrate.parse_move(param, num_param, group);
   } else if (strcmp(param[0], "electron_stop") == 0) {

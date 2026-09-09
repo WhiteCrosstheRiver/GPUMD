@@ -28,6 +28,8 @@ public:
   GPU_Vector<int> contents; // atom indices sorted based on groups
   // CPU data corresponding to the above GPU data
   std::vector<int> cpu_label;
+  // Model-file labels; fix may overwrite cpu_label with the freeze 0/1 map.
+  std::vector<int> cpu_label_user;
   std::vector<int> cpu_size;
   std::vector<int> cpu_size_sum;
   std::vector<int> cpu_contents;

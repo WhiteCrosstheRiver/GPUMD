@@ -1,0 +1,6 @@
+potential       ../../../../potentials/nep/C_2022_NEP3.txt
+time_step       0.0
+ensemble        nve
+deposit C number 5 position gaussian 1.785 1.785 1.0 velocity gaussian 0.001 5 surface local 5.0 offset antivel 2.0
+dump_xyz        -1 0 1 after.xyz
+run             1

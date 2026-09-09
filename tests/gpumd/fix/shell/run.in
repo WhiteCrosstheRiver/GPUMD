@@ -1,0 +1,7 @@
+potential       ../../../../potentials/nep/C_2022_NEP3.txt
+velocity        300
+time_step       0.0
+ensemble        nve
+fix shell substrate z cutoff 2.9 offset 5.0 type C region cubic -10 20 -10 20 -10 100
+dump_xyz        -1 0 1 labeled.xyz group
+run             1

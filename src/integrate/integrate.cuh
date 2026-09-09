@@ -65,7 +65,7 @@ public:
     std::vector<Group>& group,
     GPU_Vector<double>& thermo);
   void parse_deform(const char**, int);
-  void parse_fix(const char**, int, std::vector<Group>& group);
+  void parse_fix(const char**, int, std::vector<Group>& group, Atom& atom, Box& box);
   void parse_move(const char**, int, std::vector<Group>& group);
 
   // these data will be used to initialize ensemble
@@ -75,6 +75,8 @@ public:
   int fixed_group = -1; // ID of the group in which the atoms will be fixed
   int move_group = -1;  // ID of the group in which the atoms will move with a constant velocity
   double move_velocity[3];
+  std::vector<char> fix_frozen;
+  bool fix_accumulating = false;
 
   double temperature;  // target temperature at a specific time
   double temperature1; // target initial temperature for a run

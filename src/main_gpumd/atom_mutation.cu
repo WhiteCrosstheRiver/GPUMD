@@ -22,7 +22,9 @@ GPU buffers are rebuilt (GPU_Vector::resize frees then mallocs).
 #include "force/force.cuh"
 #include "model/read_xyz.cuh"
 #include "utilities/error.cuh"
+#include <algorithm>
 #include <chrono>
+#include <thread>
 
 static void copy_soa3(
   const std::vector<double>& src, int n_src, int i_src, std::vector<double>& dst, int n_dst, int i_dst)
@@ -144,6 +146,7 @@ void AtomMutation::append_atoms(
   new_atoms.cpu_mass.resize(N_new);
   new_atoms.cpu_charge.resize(N_new);
   new_atoms.cpu_atom_symbol.resize(N_new);
+  new_atoms.cpu_fixed.assign(N_new, 0);
   new_atoms.cpu_position_per_atom.resize(N_new * 3);
   new_atoms.cpu_velocity_per_atom.resize(N_new * 3);
 
@@ -152,6 +155,7 @@ void AtomMutation::append_atoms(
     new_atoms.cpu_mass[n] = atom.cpu_mass[n];
     new_atoms.cpu_charge[n] = (n < (int)atom.cpu_charge.size()) ? atom.cpu_charge[n] : 0.0f;
     new_atoms.cpu_atom_symbol[n] = atom.cpu_atom_symbol[n];
+    new_atoms.cpu_fixed[n] = (n < (int)atom.cpu_fixed.size()) ? atom.cpu_fixed[n] : 0;
     copy_soa3(atom.cpu_position_per_atom, N_old, n, new_atoms.cpu_position_per_atom, N_new, n);
     copy_soa3(atom.cpu_velocity_per_atom, N_old, n, new_atoms.cpu_velocity_per_atom, N_new, n);
   }
@@ -166,14 +170,20 @@ void AtomMutation::append_atoms(
   }
 
   std::vector<std::vector<int>> new_labels(n_group);
+  std::vector<std::vector<int>> new_user_labels(n_group);
   for (int m = 0; m < n_group; ++m) {
     new_labels[m].resize(N_new);
+    new_user_labels[m].resize(N_new);
     for (int n = 0; n < N_old; ++n) {
       new_labels[m][n] = groups[m].cpu_label[n];
+      new_user_labels[m][n] = (n < (int)groups[m].cpu_label_user.size())
+                                ? groups[m].cpu_label_user[n]
+                                : groups[m].cpu_label[n];
     }
     for (int k = 0; k < added.n; ++k) {
       new_labels[m][N_old + k] =
         added.group_label.empty() ? 0 : added.group_label[k * n_group + m];
+      new_user_labels[m][N_old + k] = new_labels[m][N_old + k];
     }
   }
 
@@ -181,10 +191,12 @@ void AtomMutation::append_atoms(
   atom.cpu_mass.swap(new_atoms.cpu_mass);
   atom.cpu_charge.swap(new_atoms.cpu_charge);
   atom.cpu_atom_symbol.swap(new_atoms.cpu_atom_symbol);
+  atom.cpu_fixed.swap(new_atoms.cpu_fixed);
   atom.cpu_position_per_atom.swap(new_atoms.cpu_position_per_atom);
   atom.cpu_velocity_per_atom.swap(new_atoms.cpu_velocity_per_atom);
   for (int m = 0; m < n_group; ++m) {
     groups[m].cpu_label.swap(new_labels[m]);
+    groups[m].cpu_label_user.swap(new_user_labels[m]);
   }
 
   rebuild_after_mutation(atom, groups, thermo, force);
@@ -221,38 +233,74 @@ void AtomMutation::remove_atoms(
   kept.cpu_mass.resize(n_keep);
   kept.cpu_charge.resize(n_keep);
   kept.cpu_atom_symbol.resize(n_keep);
+  kept.cpu_fixed.assign(n_keep, 0);
   kept.cpu_position_per_atom.resize(n_keep * 3);
   kept.cpu_velocity_per_atom.resize(n_keep * 3);
   std::vector<std::vector<int>> new_labels(n_group);
+  std::vector<std::vector<int>> new_user_labels(n_group);
   for (int m = 0; m < n_group; ++m) {
     new_labels[m].resize(n_keep);
+    new_user_labels[m].resize(n_keep);
   }
 
+  // prefix-sum of kept atoms so the compaction loop can be parallel
+  std::vector<int> keep_index(N_old);
   int cur = 0;
   for (int n = 0; n < N_old; ++n) {
     if (delete_mask[n]) {
-      continue;
+      keep_index[n] = -1;
+    } else {
+      keep_index[n] = cur++;
     }
-    kept.cpu_type[cur] = atom.cpu_type[n];
-    kept.cpu_mass[cur] = atom.cpu_mass[n];
-    kept.cpu_charge[cur] = atom.cpu_charge[n];
-    kept.cpu_atom_symbol[cur] = atom.cpu_atom_symbol[n];
-    copy_soa3(atom.cpu_position_per_atom, N_old, n, kept.cpu_position_per_atom, n_keep, cur);
-    copy_soa3(atom.cpu_velocity_per_atom, N_old, n, kept.cpu_velocity_per_atom, n_keep, cur);
-    for (int m = 0; m < n_group; ++m) {
-      new_labels[m][cur] = groups[m].cpu_label[n];
+  }
+  {
+    const int n_thread = std::min(8, std::max(1, N_old / 65536));
+    const int chunk = (N_old + n_thread - 1) / n_thread;
+    std::vector<std::thread> workers;
+    workers.reserve(n_thread);
+    for (int t = 0; t < n_thread; ++t) {
+      const int lo = t * chunk;
+      const int hi = std::min(N_old, lo + chunk);
+      if (lo >= hi) {
+        break;
+      }
+      workers.emplace_back([&, lo, hi]() {
+        for (int n = lo; n < hi; ++n) {
+          const int dst = keep_index[n];
+          if (dst < 0) {
+            continue;
+          }
+          kept.cpu_type[dst] = atom.cpu_type[n];
+          kept.cpu_mass[dst] = atom.cpu_mass[n];
+          kept.cpu_charge[dst] = atom.cpu_charge[n];
+          kept.cpu_atom_symbol[dst] = atom.cpu_atom_symbol[n];
+          kept.cpu_fixed[dst] = (n < (int)atom.cpu_fixed.size()) ? atom.cpu_fixed[n] : 0;
+          copy_soa3(atom.cpu_position_per_atom, N_old, n, kept.cpu_position_per_atom, n_keep, dst);
+          copy_soa3(atom.cpu_velocity_per_atom, N_old, n, kept.cpu_velocity_per_atom, n_keep, dst);
+          for (int m = 0; m < n_group; ++m) {
+            new_labels[m][dst] = groups[m].cpu_label[n];
+            new_user_labels[m][dst] = (n < (int)groups[m].cpu_label_user.size())
+                                        ? groups[m].cpu_label_user[n]
+                                        : groups[m].cpu_label[n];
+          }
+        }
+      });
     }
-    ++cur;
+    for (auto& w : workers) {
+      w.join();
+    }
   }
 
   atom.cpu_type.swap(kept.cpu_type);
   atom.cpu_mass.swap(kept.cpu_mass);
   atom.cpu_charge.swap(kept.cpu_charge);
   atom.cpu_atom_symbol.swap(kept.cpu_atom_symbol);
+  atom.cpu_fixed.swap(kept.cpu_fixed);
   atom.cpu_position_per_atom.swap(kept.cpu_position_per_atom);
   atom.cpu_velocity_per_atom.swap(kept.cpu_velocity_per_atom);
   for (int m = 0; m < n_group; ++m) {
     groups[m].cpu_label.swap(new_labels[m]);
+    groups[m].cpu_label_user.swap(new_user_labels[m]);
   }
 
   rebuild_after_mutation(atom, groups, thermo, force);
