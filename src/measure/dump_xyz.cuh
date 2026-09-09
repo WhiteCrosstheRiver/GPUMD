@@ -69,6 +69,7 @@ public:
     bool has_virial_ = false;
     bool has_group_ = false;
     bool has_volume_ = false;
+    bool has_stress_ = false;
   };
 
 private:

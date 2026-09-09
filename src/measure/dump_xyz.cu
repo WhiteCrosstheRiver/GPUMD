@@ -27,6 +27,7 @@ Dump per-atom data to user-specified file(s) in the extended XYZ format
 #include "utilities/gpu_macro.cuh"
 #include "utilities/gpu_vector.cuh"
 #include "utilities/read_file.cuh"
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <vector>
@@ -52,6 +53,37 @@ static __global__ void gpu_sum(const int N, const double* g_data, double* g_data
   if (threadIdx.x == 0) {
     g_data_sum[blockIdx.x] = s_data[0];
   }
+}
+
+static void set_voronoi_params(
+  const char* radius_token,
+  const char* direction_token,
+  double& radius,
+  int& directions)
+{
+  double new_radius = 0.0;
+  int new_directions = 0;
+  if (!is_valid_real(radius_token, &new_radius)) {
+    PRINT_INPUT_ERROR("Voronoi radius R should be a number.\n");
+  }
+  if (!(new_radius > 0.0)) {
+    PRINT_INPUT_ERROR("Voronoi radius R should > 0.\n");
+  }
+  if (!is_valid_int(direction_token, &new_directions)) {
+    PRINT_INPUT_ERROR("number of Voronoi directions should be an integer.\n");
+  }
+  if (new_directions != 128 && new_directions != 256) {
+    PRINT_INPUT_ERROR("number of Voronoi directions should be 128 or 256.\n");
+  }
+  if (radius > 0.0) {
+    if (new_radius != radius || new_directions != directions) {
+      PRINT_INPUT_ERROR(
+        "dump_xyz volume and stress must use the same R and number of directions.\n");
+    }
+    return;
+  }
+  radius = new_radius;
+  directions = new_directions;
 }
 
 static void generate_fibonacci_directions(const int M, std::vector<double>& directions)
@@ -288,28 +320,36 @@ void Dump_XYZ::parse(const char** param, int num_param, const std::vector<Group>
       quantities.has_group_ = true;
       printf("    has group.\n");
     }
+    if (strcmp(param[m], "stress") == 0) {
+      quantities.has_stress_ = true;
+      printf("    has per-atom stress.\n");
+      if (m + 2 < num_param) {
+        double dummy_radius = 0.0;
+        int dummy_directions = 0;
+        if (is_valid_real(param[m + 1], &dummy_radius) &&
+            is_valid_int(param[m + 2], &dummy_directions)) {
+          set_voronoi_params(param[m + 1], param[m + 2], voronoi_radius_, voronoi_directions_);
+          printf("        R = %g Angstrom.\n", voronoi_radius_);
+          printf("        directions = %d.\n", voronoi_directions_);
+          m += 2;
+        }
+      }
+    }
     if (strcmp(param[m], "volume") == 0) {
       if (m + 2 >= num_param) {
         PRINT_INPUT_ERROR("dump_xyz volume should be followed by R and the number of directions.\n");
       }
-      if (!is_valid_real(param[m + 1], &voronoi_radius_)) {
-        PRINT_INPUT_ERROR("Voronoi radius R should be a number.\n");
-      }
-      if (!(voronoi_radius_ > 0.0)) {
-        PRINT_INPUT_ERROR("Voronoi radius R should > 0.\n");
-      }
-      if (!is_valid_int(param[m + 2], &voronoi_directions_)) {
-        PRINT_INPUT_ERROR("number of Voronoi directions should be an integer.\n");
-      }
-      if (voronoi_directions_ != 128 && voronoi_directions_ != 256) {
-        PRINT_INPUT_ERROR("number of Voronoi directions should be 128 or 256.\n");
-      }
+      set_voronoi_params(param[m + 1], param[m + 2], voronoi_radius_, voronoi_directions_);
       quantities.has_volume_ = true;
       printf("    has ball-restricted Voronoi volume.\n");
       printf("        R = %g Angstrom.\n", voronoi_radius_);
       printf("        directions = %d.\n", voronoi_directions_);
       m += 2;
     }
+  }
+  if (quantities.has_stress_ && !(voronoi_radius_ > 0.0)) {
+    PRINT_INPUT_ERROR(
+      "dump_xyz stress should be followed by R and the number of directions, or used with volume R M.\n");
   }
 }
 
@@ -337,13 +377,13 @@ void Dump_XYZ::preprocess(
   if (quantities.has_unwrapped_position_) {
     cpu_unwrapped_position_.resize(atom.number_of_atoms * 3);
   }
-  if (quantities.has_virial_) {
+  if (quantities.has_virial_ || quantities.has_stress_) {
     cpu_virial_per_atom_.resize(atom.number_of_atoms * 9);
   }
   if (quantities.has_bec_) {
     cpu_bec_.resize(atom.number_of_atoms * 9);
   }
-  if (quantities.has_volume_) {
+  if (quantities.has_volume_ || quantities.has_stress_) {
     const int N = atom.number_of_atoms;
     const double rc = 2.0 * voronoi_radius_;
     const double sphere = (4.0 / 3.0) * PI * rc * rc * rc;
@@ -431,7 +471,7 @@ void Dump_XYZ::output_line2(
     cpu_thermo[7],
     cpu_thermo[4]);
 
-  if (quantities.has_volume_) {
+  if (quantities.has_volume_ || quantities.has_stress_) {
     fprintf(
       fid_,
       " voronoi_method=\"ball_restricted\""
@@ -474,6 +514,9 @@ void Dump_XYZ::output_line2(
   if (quantities.has_volume_) {
     fprintf(fid_, ":volume_atom:R:1");
   }
+  if (quantities.has_stress_) {
+    fprintf(fid_, ":stress:R:9");
+  }
 
   // Over
   fprintf(fid_, "\n");
@@ -496,7 +539,7 @@ void Dump_XYZ::process(
   if ((step + 1) % dump_interval_ != 0)
     return;
 
-  if (quantities.has_volume_) {
+  if (quantities.has_volume_ || quantities.has_stress_) {
     const int N = atom.number_of_atoms;
     if (int(voronoi_NN_.size()) != N) {
       gpu_volume_per_atom_.resize(N);
@@ -508,6 +551,7 @@ void Dump_XYZ::process(
       voronoi_NL_.resize(N * voronoi_mn_);
     }
 
+    const auto t_vol0 = std::chrono::steady_clock::now();
     find_neighbor(
       0,
       N,
@@ -520,6 +564,8 @@ void Dump_XYZ::process(
       voronoi_cell_contents_,
       voronoi_NN_,
       voronoi_NL_);
+    CHECK(gpuDeviceSynchronize());
+    const auto t_vol1 = std::chrono::steady_clock::now();
 
     const double min_thickness = 4.0 * voronoi_radius_;
     if ((box.pbc_x && box.thickness_x < min_thickness) ||
@@ -529,10 +575,11 @@ void Dump_XYZ::process(
         "Periodic box thickness is smaller than 4R. Increase the box or decrease Voronoi R so that the 2R neighborhood is complete under the minimum-image convention.\n");
     }
 
+    int max_nn = 0;
+    auto t_vol1b = t_vol1;
     if (N > 0) {
       std::vector<int> cpu_NN(N);
       voronoi_NN_.copy_to_host(cpu_NN.data());
-      int max_nn = 0;
       for (int n = 0; n < N; ++n) {
         if (cpu_NN[n] > max_nn)
           max_nn = cpu_NN[n];
@@ -541,6 +588,7 @@ void Dump_XYZ::process(
         PRINT_INPUT_ERROR(
           "Voronoi neighbor list overflow. Decrease R or use a less dense structure.\n");
       }
+      t_vol1b = std::chrono::steady_clock::now();
 
       constexpr int BLOCK = 128;
       constexpr int ATOMS_PER_BLOCK = BLOCK / 32;
@@ -572,8 +620,25 @@ void Dump_XYZ::process(
           gpu_volume_per_atom_.data());
       }
       GPU_CHECK_KERNEL
+      CHECK(gpuDeviceSynchronize());
       gpu_volume_per_atom_.copy_to_host(cpu_volume_per_atom_.data());
     }
+    const auto t_vol2 = std::chrono::steady_clock::now();
+    const double ms_neighbor =
+      1.0e-6 * std::chrono::duration_cast<std::chrono::nanoseconds>(t_vol1 - t_vol0).count();
+    const double ms_check =
+      1.0e-6 * std::chrono::duration_cast<std::chrono::nanoseconds>(t_vol1b - t_vol1).count();
+    const double ms_kernel =
+      1.0e-6 * std::chrono::duration_cast<std::chrono::nanoseconds>(t_vol2 - t_vol1b).count();
+    printf(
+      "    Voronoi volume: neighbor %.3f ms, overflow-check %.3f ms, kernel+copy %.3f ms "
+      "(N=%d, M=%d, maxNN=%d)\n",
+      ms_neighbor,
+      ms_check,
+      ms_kernel,
+      N,
+      voronoi_directions_,
+      max_nn);
   }
 
   int number_of_atoms_to_dump = atom.number_of_atoms;
@@ -582,7 +647,7 @@ void Dump_XYZ::process(
   }
 
   atom.position_per_atom.copy_to_host(atom.cpu_position_per_atom.data());
-  if (quantities.has_mass_) {
+  if (quantities.has_mass_ || quantities.has_stress_) {
     atom.mass.copy_to_host(atom.cpu_mass.data());
   }
   if (quantities.has_charge_) {
@@ -597,7 +662,7 @@ void Dump_XYZ::process(
     GPU_Vector<float>& gpu_bec = force.potentials[0]->get_bec_reference();
     gpu_bec.copy_to_host(cpu_bec_.data());
   }
-  if (quantities.has_velocity_) {
+  if (quantities.has_velocity_ || quantities.has_stress_) {
     atom.velocity_per_atom.copy_to_host(atom.cpu_velocity_per_atom.data());
   }
   if (quantities.has_force_) {
@@ -609,7 +674,7 @@ void Dump_XYZ::process(
   if (quantities.has_unwrapped_position_) {
     atom.unwrapped_position.copy_to_host(cpu_unwrapped_position_.data());
   }
-  if (quantities.has_virial_) {
+  if (quantities.has_virial_ || quantities.has_stress_) {
     atom.virial_per_atom.copy_to_host(cpu_virial_per_atom_.data());
   }
 
@@ -681,6 +746,22 @@ void Dump_XYZ::process(
     }
     if (quantities.has_volume_) {
       fprintf(fid_, " %.10g", cpu_volume_per_atom_[m]);
+    }
+    if (quantities.has_stress_) {
+      const int index[9] = {0, 3, 4, 6, 1, 5, 7, 8, 2};
+      const int va[9] = {0, 0, 0, 1, 1, 1, 2, 2, 2};
+      const int vb[9] = {0, 1, 2, 0, 1, 2, 0, 1, 2};
+      const double vol = cpu_volume_per_atom_[m];
+      const double mass = atom.cpu_mass[m];
+      const double v[3] = {
+        atom.cpu_velocity_per_atom[m],
+        atom.cpu_velocity_per_atom[m + atom.number_of_atoms],
+        atom.cpu_velocity_per_atom[m + atom.number_of_atoms * 2]};
+      for (int d = 0; d < 9; ++d) {
+        const double w = cpu_virial_per_atom_[m + atom.number_of_atoms * index[d]];
+        const double kinetic = mass * v[va[d]] * v[vb[d]];
+        fprintf(fid_, " %.8f", (w + kinetic) / vol);
+      }
     }
     fprintf(fid_, "\n");
   }

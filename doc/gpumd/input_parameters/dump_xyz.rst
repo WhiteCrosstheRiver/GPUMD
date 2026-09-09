@@ -24,7 +24,7 @@ If :attr:`grouping_method` is negative, :attr:`group_id` will be ignored and dat
 
 If it is ended by a star (*), the data for one frame will be output to one file, named by changing the star to the step number.
 
-* Then one can write the properties to be output, and the allowed properties include: :attr:`mass`, :attr:`velocity`, :attr:`force`, :attr:`potential`, :attr:`virial`, :attr:`group`, :attr:`unwrapped_position`, and :attr:`volume`.
+* Then one can write the properties to be output, and the allowed properties include: :attr:`mass`, :attr:`velocity`, :attr:`force`, :attr:`potential`, :attr:`virial`, :attr:`group`, :attr:`unwrapped_position`, :attr:`volume`, and :attr:`stress`.
 
 * The wrapped positions will always be included in the output.
 
@@ -33,6 +33,13 @@ If it is ended by a star (*), the data for one frame will be output to one file,
     dump_xyz -1 0 100 dump.xyz volume 3.0 128
 
   The volume of atom :math:`i` is :math:`\Omega_i(R)=\mathrm{Vol}[C_i\cap B(\mathbf r_i,R)]`, approximated by equal-weight spherical quadrature. Neighbors are taken from a dedicated list with cutoff :math:`2R`. Each periodic box thickness must be at least :math:`4R` so that the minimum-image convention covers that neighborhood. :math:`R` should cover the farthest vertex of a bulk Voronoi cell; using half a bond length is generally too small. Volume is computed only on dump steps and does not require per-atom virial.
+
+* :attr:`stress` writes the per-atom stress tensor (9 components, eV/Å³) as :math:`\sigma_i=(W_i+m_i\mathbf v_i\mathbf v_i^{\mathsf T})/\Omega_i(R)`, using the same virial partitioning and kinetic convention as the header ``stress=`` field. Component order matches :attr:`virial`: ``xx xy xz yx yy yz zx zy zz``. It needs the same Voronoi :math:`R` and direction count as :attr:`volume`. Give those numbers after :attr:`stress` when volume is not requested; if :attr:`volume` already supplied them, write :attr:`stress` alone. Examples::
+
+    dump_xyz -1 0 100 dump.xyz stress 3.0 128
+    dump_xyz -1 0 100 dump.xyz volume 3.0 128 stress virial
+
+  Conflicting :math:`R` or direction counts are an error. The ``volume_atom`` column is written only when :attr:`volume` is present. Header ``stress=`` is always written, with or without this keyword.
 
 
 Examples

@@ -126,6 +126,17 @@ bool check_need_peratom_virial()
         need_peratom_virial = true;
         break;
       }
+      if (tokens[0] == "dump_xyz") {
+        for (size_t i = 1; i < tokens.size(); ++i) {
+          if (tokens[i] == "virial" || tokens[i] == "stress") {
+            need_peratom_virial = true;
+            break;
+          }
+        }
+        if (need_peratom_virial) {
+          break;
+        }
+      }
     }
   }
   input_run.close();
