@@ -1,3 +1,7 @@
 potential       ../../../../potentials/nep/C_2022_NEP3.txt
+velocity        300
+time_step       1.0
+ensemble        nve
 if 1 < Si
+    run 1
 end

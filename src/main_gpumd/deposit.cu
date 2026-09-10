@@ -14,6 +14,7 @@
 */
 
 #include "deposit.cuh"
+#include "variable.cuh"
 #include "atom_mutation.cuh"
 #include "model/read_xyz.cuh"
 #include "utilities/common.cuh"
@@ -266,8 +267,10 @@ static void deposit_one_atom_keywords(
   Atom& atoms,
   std::vector<Group>& groups,
   GPU_Vector<double>& thermo,
-  Force& force)
+  Force& force,
+  VariableScope* variables)
 {
+  (void)variables;
   const std::string symbol = param[1];
   bool has_pos_xyz = false;
   bool has_pos_gaussian = false;
@@ -275,10 +278,11 @@ static void deposit_one_atom_keywords(
   bool has_vel_gaussian = false;
   bool has_surface = false;
   bool has_offset = false;
-  double pos[3] = {0.0, 0.0, 0.0};
+  int count = 1;
+  double pos0[3] = {0.0, 0.0, 0.0};
   double xy0[2] = {0.0, 0.0};
   double xy_sigma = 0.0;
-  double vel[3] = {0.0, 0.0, 0.0};
+  double vel0[3] = {0.0, 0.0, 0.0};
   double v_mag = 0.0;
   double theta_sigma_deg = 0.0;
   double surface_radius = 0.0;
@@ -286,7 +290,15 @@ static void deposit_one_atom_keywords(
 
   int i = 2;
   while (i < num_param) {
-    if (strcmp(param[i], "position") == 0) {
+    if (strcmp(param[i], "number") == 0) {
+      if (i + 1 >= num_param || !is_valid_int(param[i + 1], &count)) {
+        PRINT_INPUT_ERROR("Usage: deposit <symbol> number <N> ...");
+      }
+      if (count < 1) {
+        PRINT_INPUT_ERROR("deposit number should be >= 1.");
+      }
+      i += 2;
+    } else if (strcmp(param[i], "position") == 0) {
       if (i + 1 >= num_param) {
         PRINT_INPUT_ERROR("Missing arguments after position.");
       }
@@ -306,9 +318,9 @@ static void deposit_one_atom_keywords(
         if (i + 3 >= num_param) {
           PRINT_INPUT_ERROR("Usage: position <x> <y> <z>");
         }
-        parse_real_token(param[i + 1], &pos[0], "position x should be a number.");
-        parse_real_token(param[i + 2], &pos[1], "position y should be a number.");
-        parse_real_token(param[i + 3], &pos[2], "position z should be a number.");
+        parse_real_token(param[i + 1], &pos0[0], "position x should be a number.");
+        parse_real_token(param[i + 2], &pos0[1], "position y should be a number.");
+        parse_real_token(param[i + 3], &pos0[2], "position z should be a number.");
         has_pos_xyz = true;
         i += 4;
       }
@@ -335,9 +347,9 @@ static void deposit_one_atom_keywords(
         if (i + 3 >= num_param) {
           PRINT_INPUT_ERROR("Usage: velocity <vx> <vy> <vz>");
         }
-        parse_real_token(param[i + 1], &vel[0], "velocity vx should be a number.");
-        parse_real_token(param[i + 2], &vel[1], "velocity vy should be a number.");
-        parse_real_token(param[i + 3], &vel[2], "velocity vz should be a number.");
+        parse_real_token(param[i + 1], &vel0[0], "velocity vx should be a number.");
+        parse_real_token(param[i + 2], &vel0[1], "velocity vy should be a number.");
+        parse_real_token(param[i + 3], &vel0[2], "velocity vz should be a number.");
         has_vel_xyz = true;
         i += 4;
       }
@@ -362,7 +374,8 @@ static void deposit_one_atom_keywords(
       has_offset = true;
       i += 3;
     } else {
-      PRINT_INPUT_ERROR("Unknown keyword in deposit. Expected position, velocity, surface, or offset.");
+      PRINT_INPUT_ERROR(
+        "Unknown keyword in deposit. Expected number, position, velocity, surface, or offset.");
     }
   }
 
@@ -381,6 +394,9 @@ static void deposit_one_atom_keywords(
   if (has_pos_gaussian && !has_surface) {
     PRINT_INPUT_ERROR("position gaussian requires surface local <radius>.");
   }
+  if (count > 1 && has_pos_xyz) {
+    PRINT_INPUT_ERROR("deposit number > 1 needs position gaussian (independent XY samples).");
+  }
   if (atoms.number_of_atoms < 1 && has_surface) {
     PRINT_INPUT_ERROR("surface local needs existing atoms.");
   }
@@ -388,32 +404,37 @@ static void deposit_one_atom_keywords(
   std::random_device rd;
   std::mt19937 gen(rd());
 
-  if (has_vel_gaussian) {
-    sample_gaussian_beam_velocity(v_mag, theta_sigma_deg, gen, vel);
-  }
-
-  if (has_pos_gaussian) {
-    sample_gaussian_xy(xy0[0], xy0[1], xy_sigma, gen, pos[0], pos[1]);
-    wrap_xy_into_box(box, pos[0], pos[1]);
-  }
-
+  LocalSurfaceMap surface_map;
   if (has_surface) {
-    query_local_zmax(atoms, box, pos[0], pos[1], surface_radius, pos[0], pos[1], pos[2]);
+    surface_map.build(atoms, box, surface_radius);
   }
 
-  if (has_offset) {
-    const double vnorm = sqrt(vel[0] * vel[0] + vel[1] * vel[1] + vel[2] * vel[2]);
-    if (vnorm <= 1.0e-30) {
-      PRINT_INPUT_ERROR("offset antivel needs a non-zero velocity.");
+  for (int k = 0; k < count; ++k) {
+    double pos[3] = {pos0[0], pos0[1], pos0[2]};
+    double vel[3] = {vel0[0], vel0[1], vel0[2]};
+    if (has_vel_gaussian) {
+      sample_gaussian_beam_velocity(v_mag, theta_sigma_deg, gen, vel);
     }
-    pos[0] -= offset_sep * vel[0] / vnorm;
-    pos[1] -= offset_sep * vel[1] / vnorm;
-    pos[2] -= offset_sep * vel[2] / vnorm;
-    wrap_xy_into_box(box, pos[0], pos[1]);
+    if (has_pos_gaussian) {
+      sample_gaussian_xy(xy0[0], xy0[1], xy_sigma, gen, pos[0], pos[1]);
+      wrap_xy_into_box(box, pos[0], pos[1]);
+    }
+    if (has_surface) {
+      pos[2] = surface_map.query(pos[0], pos[1], surface_radius);
+    }
+    if (has_offset) {
+      const double vnorm = sqrt(vel[0] * vel[0] + vel[1] * vel[1] + vel[2] * vel[2]);
+      if (vnorm <= 1.0e-30) {
+        PRINT_INPUT_ERROR("offset antivel needs a non-zero velocity.");
+      }
+      pos[0] -= offset_sep * vel[0] / vnorm;
+      pos[1] -= offset_sep * vel[1] / vnorm;
+      pos[2] -= offset_sep * vel[2] / vnorm;
+      wrap_xy_into_box(box, pos[0], pos[1]);
+    }
+    append_one_deposited_atom(
+      atoms, groups, thermo, force, symbol, pos[0], pos[1], pos[2], vel[0], vel[1], vel[2]);
   }
-
-  append_one_deposited_atom(
-    atoms, groups, thermo, force, symbol, pos[0], pos[1], pos[2], vel[0], vel[1], vel[2]);
 }
 
 static void deposit_from_molecule_file(
@@ -665,7 +686,8 @@ void Deposit(
   Atom& atoms,
   std::vector<Group>& groups,
   GPU_Vector<double>& thermo,
-  Force& force)
+  Force& force,
+  VariableScope* variables)
 {
   const auto time_begin = std::chrono::high_resolution_clock::now();
   if (num_param < 2) {
@@ -677,8 +699,9 @@ void Deposit(
   } else if (
     num_param >= 3 &&
     (strcmp(param[2], "position") == 0 || strcmp(param[2], "velocity") == 0 ||
-     strcmp(param[2], "surface") == 0 || strcmp(param[2], "offset") == 0)) {
-    deposit_one_atom_keywords(param, num_param, box, atoms, groups, thermo, force);
+     strcmp(param[2], "surface") == 0 || strcmp(param[2], "offset") == 0 ||
+     strcmp(param[2], "number") == 0)) {
+    deposit_one_atom_keywords(param, num_param, box, atoms, groups, thermo, force, variables);
   } else {
     deposit_from_molecule_file(param, num_param, atoms, groups, thermo, force);
   }

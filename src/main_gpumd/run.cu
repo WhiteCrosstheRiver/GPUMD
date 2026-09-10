@@ -178,6 +178,13 @@ Run::Run()
   execute_run_in();
 }
 
+Run::~Run() {}
+
+void Run::delete_isolated_batch(const std::vector<std::vector<std::string>>& commands)
+{
+  DeleteIsolatedSequence(commands, box, atom, group, thermo, force);
+}
+
 void Run::execute_run_in()
 {
   print_line_1();
@@ -349,7 +356,7 @@ void Run::parse_one_keyword(std::vector<std::string>& tokens)
     Replicate(param, num_param, box, atom, group, thermo, force);
   } else if (strcmp(param[0], "deposit") == 0) {
     AtomMutation::sync_cpu_from_gpu(atom);
-    Deposit(param, num_param, box, atom, group, thermo, force);
+    Deposit(param, num_param, box, atom, group, thermo, force, variables);
   } else if (strcmp(param[0], "delete") == 0) {
     AtomMutation::sync_cpu_from_gpu(atom);
     Delete(param, num_param, box, atom, group, thermo, force);
@@ -454,9 +461,7 @@ void Run::parse_one_keyword(std::vector<std::string>& tokens)
     property.reset(new Dump_EXYZ(param, num_param));
     measure.properties.emplace_back(std::move(property));
   } else if (strcmp(param[0], "dump_xyz") == 0) {
-    std::unique_ptr<Property> property;
-    property.reset(new Dump_XYZ(param, num_param, group, atom));
-    measure.properties.emplace_back(std::move(property));
+    measure.properties.emplace_back(create_dump_xyz(param, num_param, group, atom));
   } else if (strcmp(param[0], "dump_beads") == 0) {
     std::unique_ptr<Property> property;
     property.reset(new Dump_Beads(param, num_param));

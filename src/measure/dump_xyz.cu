@@ -205,6 +205,12 @@ static __global__ void gpu_voronoi_volume(
   }
 }
 
+std::unique_ptr<Property> create_dump_xyz(
+  const char** param, int num_param, const std::vector<Group>& groups, Atom& atom)
+{
+  return std::unique_ptr<Property>(new Dump_XYZ(param, num_param, groups, atom));
+}
+
 Dump_XYZ::Dump_XYZ(const char** param, int num_param, const std::vector<Group>& groups, Atom& atom) 
 {
   is_nep_charge = check_is_nep_charge();

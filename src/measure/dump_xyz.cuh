@@ -16,11 +16,15 @@
 #pragma once
 #include "property.cuh"
 #include "utilities/gpu_vector.cuh"
+#include <memory>
 #include <string>
 #include <vector>
 class Box;
 class Atom;
 class Group;
+
+std::unique_ptr<Property> create_dump_xyz(
+  const char** param, int num_param, const std::vector<Group>& groups, Atom& atom);
 
 class Dump_XYZ : public Property
 {

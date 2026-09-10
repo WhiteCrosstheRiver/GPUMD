@@ -28,7 +28,9 @@ Explicit values (integer, float, or string tokens, kept as written)::
       <GPUMD commands>
   end
 
-Inside the block, substitute with ``${variable}`` only. Nested ``for`` is allowed. Inner blocks may read outer variables. Reusing the same variable name in a nested ``for`` is an error.
+Inside the block, substitute with ``${variable}``. Nested ``for`` is allowed. Inner blocks may read outer variables. Reusing the same variable name in a nested ``for`` is an error.
+
+``${name}`` also works for :ref:`variable <kw_variable>` equal-style names: the formula is evaluated immediately and the number is substituted. ``$(formula)`` is an anonymous immediate formula. ``v_name`` is not expanded here; see :ref:`variable <kw_variable>`.
 
 Rules for ``range``:
 
@@ -37,7 +39,7 @@ Rules for ``range``:
 * ``step`` cannot be ``0``.
 * ``start > stop`` with ``step > 0``, or ``start < stop`` with ``step < 0``, is an error.
 
-V1 does not support ``if``, ``else``, ``while``, ``break``, ``continue``, assignments, or arithmetic expressions.
+V1 does not support ``while``, ``break``, ``continue``, or assignments. See :ref:`if <kw_if>` for branching.
 
 Examples
 --------
@@ -88,4 +90,4 @@ Caveats
 -------
 * ``potential`` must stay outside ``for`` and must not use ``${variable}``. Some setup code scans ``run.in`` before variable expansion.
 * Dump keywords such as :ref:`dump_thermo <kw_dump_thermo>` are not propagating. Put them inside the loop, before each :ref:`run <kw_run>`, if every iteration should dump.
-* ``${name}`` is expanded before the original command parser runs. ``$i`` and ``$(i)`` are not recognized.
+* ``${name}`` is expanded before the original command parser runs. Equal-style names from :ref:`variable <kw_variable>` are allowed. ``$i`` without braces is not recognized; ``$(formula)`` is.

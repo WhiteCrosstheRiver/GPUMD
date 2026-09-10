@@ -24,6 +24,7 @@
 #include <vector>
 
 class Force;
+class VariableScope;
 
 void Deposit(
   const char** param,
@@ -32,5 +33,5 @@ void Deposit(
   Atom& atoms,
   std::vector<Group>& groups,
   GPU_Vector<double>& thermo,
-  Force& force);
-
+  Force& force,
+  VariableScope* variables);

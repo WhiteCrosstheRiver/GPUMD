@@ -15,22 +15,12 @@
 
 #pragma once
 
+#include "variable.cuh"
 #include <memory>
 #include <string>
 #include <vector>
 
 class Run;
-
-class VariableScope
-{
-public:
-  void push(const std::string& name, const std::string& value);
-  void pop();
-  const std::string& lookup(const std::string& name) const;
-
-private:
-  std::vector<std::pair<std::string, std::string>> stack_;
-};
 
 struct Node
 {
@@ -49,6 +39,16 @@ struct ForNode : Node
   std::string variable;
   std::vector<std::string> values;
   std::vector<std::unique_ptr<Node>> body;
+  void execute(Run& run, VariableScope& scope) override;
+};
+
+struct IfNode : Node
+{
+  std::string lhs;
+  std::string op;
+  std::string rhs;
+  std::vector<std::unique_ptr<Node>> then_body;
+  std::vector<std::unique_ptr<Node>> else_body;
   void execute(Run& run, VariableScope& scope) override;
 };
 

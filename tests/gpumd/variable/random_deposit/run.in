@@ -1,0 +1,15 @@
+replicate       5 5 5
+potential       ../../../../potentials/nep/C_2022_NEP3.txt
+velocity        300
+time_step       1.0
+ensemble        nve
+variable rx equal random(0,lx,7)
+variable ry equal random(0,ly,7)
+for p range 1 5
+    variable cx equal ${rx}
+    variable cy equal ${ry}
+    deposit C number 1 position gaussian ${cx} ${cy} 1.0 velocity gaussian 0.001 5 surface local 5.0 offset antivel 2.0
+    run 1
+end
+dump_xyz -1 0 1 after.xyz
+run 1

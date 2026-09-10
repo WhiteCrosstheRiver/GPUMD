@@ -14,7 +14,8 @@
 */
 
 /*----------------------------------------------------------------------------80
-Minimal control-flow layer for run.in: for / end / ${variable}.
+Minimal control-flow layer for run.in: for / if / else / end / variable /
+${name} / $(formula). v_name is left intact for commands that evaluate it later.
 Ordinary GPUMD commands are expanded then passed to parse_one_keyword.
 ------------------------------------------------------------------------------*/
 
@@ -27,29 +28,6 @@ Ordinary GPUMD commands are expanded then passed to parse_one_keyword.
 #include <string>
 #include <vector>
 
-void VariableScope::push(const std::string& name, const std::string& value)
-{
-  stack_.emplace_back(name, value);
-}
-
-void VariableScope::pop()
-{
-  stack_.pop_back();
-}
-
-const std::string& VariableScope::lookup(const std::string& name) const
-{
-  for (int i = static_cast<int>(stack_.size()) - 1; i >= 0; --i) {
-    if (stack_[i].first == name) {
-      return stack_[i].second;
-    }
-  }
-  std::string msg = "Undefined variable '" + name + "'.";
-  PRINT_INPUT_ERROR(msg.c_str());
-  static const std::string empty;
-  return empty;
-}
-
 static bool is_ident_start(char c)
 {
   return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || c == '_';
@@ -60,20 +38,6 @@ static bool is_ident_char(char c)
   return is_ident_start(c) || (c >= '0' && c <= '9');
 }
 
-static bool is_identifier(const std::string& s)
-{
-  if (s.empty() || !is_ident_start(s[0])) {
-    return false;
-  }
-  for (size_t i = 1; i < s.size(); ++i) {
-    if (!is_ident_char(s[i])) {
-      return false;
-    }
-  }
-  return true;
-}
-
-// If text[i] is "${", parse ${ident} and set name plus index after '}'.
 static void parse_variable_ref(const std::string& text, size_t i, std::string& name, size_t& end)
 {
   size_t j = i + 2;
@@ -95,44 +59,16 @@ static void parse_variable_ref(const std::string& text, size_t i, std::string& n
   end = j + 1;
 }
 
-static std::string expand_variables(const std::string& text, const VariableScope& scope)
-{
-  std::string out;
-  for (size_t i = 0; i < text.size();) {
-    if (text[i] == '$' && i + 1 < text.size() && text[i + 1] == '{') {
-      std::string name;
-      size_t end = 0;
-      parse_variable_ref(text, i, name, end);
-      out += scope.lookup(name);
-      i = end;
-    } else {
-      out += text[i];
-      ++i;
-    }
-  }
-  return out;
-}
-
 static void check_variable_refs(
   const std::vector<std::string>& tokens, const std::vector<std::string>& enclosing)
 {
+  (void)enclosing;
   for (const auto& token : tokens) {
     for (size_t i = 0; i < token.size();) {
       if (token[i] == '$' && i + 1 < token.size() && token[i + 1] == '{') {
         std::string name;
         size_t end = 0;
         parse_variable_ref(token, i, name, end);
-        bool found = false;
-        for (const auto& v : enclosing) {
-          if (v == name) {
-            found = true;
-            break;
-          }
-        }
-        if (!found) {
-          std::string msg = "Undefined variable '" + name + "'.";
-          PRINT_INPUT_ERROR(msg.c_str());
-        }
         i = end;
       } else {
         ++i;
@@ -179,8 +115,24 @@ static std::vector<std::string> make_range(int start, int stop, int step)
   return values;
 }
 
+enum class ParseMode { Top, For, IfThen, IfElse };
+enum class CloseKind { None, End, Else };
+
 static std::vector<std::unique_ptr<Node>> parse_statements(
-  std::ifstream& input, const std::vector<std::string>& enclosing, bool inside_for);
+  std::ifstream& input,
+  const std::vector<std::string>& enclosing,
+  ParseMode mode,
+  CloseKind* close);
+
+static std::unique_ptr<ForNode> parse_for(
+  std::ifstream& input,
+  const std::vector<std::string>& header,
+  const std::vector<std::string>& enclosing);
+
+static std::unique_ptr<IfNode> parse_if(
+  std::ifstream& input,
+  const std::vector<std::string>& header,
+  const std::vector<std::string>& enclosing);
 
 static std::unique_ptr<ForNode> parse_for(
   std::ifstream& input,
@@ -188,8 +140,8 @@ static std::unique_ptr<ForNode> parse_for(
   const std::vector<std::string>& enclosing)
 {
   for (size_t i = 1; i < header.size(); ++i) {
-    if (header[i].find("${") != std::string::npos) {
-      PRINT_INPUT_ERROR("Variable substitution ${name} is not allowed in a for header.");
+    if (header[i].find("${") != std::string::npos || header[i].find("$(") != std::string::npos) {
+      PRINT_INPUT_ERROR("Variable substitution is not allowed in a for header.");
     }
   }
 
@@ -198,7 +150,7 @@ static std::unique_ptr<ForNode> parse_for(
   }
 
   const std::string& variable = header[1];
-  if (!is_identifier(variable)) {
+  if (!is_variable_identifier(variable)) {
     PRINT_INPUT_ERROR("for variable must be an identifier [A-Za-z_][A-Za-z0-9_]*.");
   }
   for (const auto& v : enclosing) {
@@ -238,13 +190,54 @@ static std::unique_ptr<ForNode> parse_for(
 
   std::vector<std::string> inner = enclosing;
   inner.emplace_back(variable);
-  node->body = parse_statements(input, inner, true);
+  CloseKind close = CloseKind::None;
+  node->body = parse_statements(input, inner, ParseMode::For, &close);
+  if (close != CloseKind::End) {
+    PRINT_INPUT_ERROR("for is missing a matching end.");
+  }
+  return node;
+}
+
+static bool is_compare_op(const std::string& op)
+{
+  return op == "==" || op == "!=" || op == "<" || op == "<=" || op == ">" || op == ">=";
+}
+
+static std::unique_ptr<IfNode> parse_if(
+  std::ifstream& input,
+  const std::vector<std::string>& header,
+  const std::vector<std::string>& enclosing)
+{
+  if (header.size() != 4) {
+    PRINT_INPUT_ERROR("Usage: if <a> <op> <b>");
+  }
+  if (!is_compare_op(header[2])) {
+    PRINT_INPUT_ERROR("if operator must be == != < <= > >=.");
+  }
+  auto node = std::make_unique<IfNode>();
+  node->lhs = header[1];
+  node->op = header[2];
+  node->rhs = header[3];
+  CloseKind close = CloseKind::None;
+  node->then_body = parse_statements(input, enclosing, ParseMode::IfThen, &close);
+  if (close == CloseKind::Else) {
+    node->else_body = parse_statements(input, enclosing, ParseMode::IfElse, &close);
+  }
+  if (close != CloseKind::End) {
+    PRINT_INPUT_ERROR("if is missing a matching end.");
+  }
   return node;
 }
 
 static std::vector<std::unique_ptr<Node>> parse_statements(
-  std::ifstream& input, const std::vector<std::string>& enclosing, bool inside_for)
+  std::ifstream& input,
+  const std::vector<std::string>& enclosing,
+  ParseMode mode,
+  CloseKind* close)
 {
+  if (close) {
+    *close = CloseKind::None;
+  }
   std::vector<std::unique_ptr<Node>> nodes;
   std::vector<std::string> tokens;
   while (next_statement(input, tokens)) {
@@ -252,13 +245,30 @@ static std::vector<std::unique_ptr<Node>> parse_statements(
       if (tokens.size() != 1) {
         PRINT_INPUT_ERROR("end takes no arguments.");
       }
-      if (!inside_for) {
-        PRINT_INPUT_ERROR("end without matching for.");
+      if (mode == ParseMode::Top) {
+        PRINT_INPUT_ERROR("end without matching for or if.");
+      }
+      if (close) {
+        *close = CloseKind::End;
+      }
+      return nodes;
+    }
+    if (tokens[0] == "else") {
+      if (tokens.size() != 1) {
+        PRINT_INPUT_ERROR("else takes no arguments.");
+      }
+      if (mode != ParseMode::IfThen) {
+        PRINT_INPUT_ERROR("else without matching if.");
+      }
+      if (close) {
+        *close = CloseKind::Else;
       }
       return nodes;
     }
     if (tokens[0] == "for") {
       nodes.emplace_back(parse_for(input, tokens, enclosing));
+    } else if (tokens[0] == "if") {
+      nodes.emplace_back(parse_if(input, tokens, enclosing));
     } else {
       check_variable_refs(tokens, enclosing);
       auto cmd = std::make_unique<CommandNode>();
@@ -266,30 +276,119 @@ static std::vector<std::unique_ptr<Node>> parse_statements(
       nodes.emplace_back(std::move(cmd));
     }
   }
-  if (inside_for) {
+  if (mode == ParseMode::For) {
     PRINT_INPUT_ERROR("for is missing a matching end.");
+  }
+  if (mode == ParseMode::IfThen || mode == ParseMode::IfElse) {
+    PRINT_INPUT_ERROR("if is missing a matching end.");
   }
   return nodes;
 }
 
-void CommandNode::execute(Run& run, VariableScope& scope)
+static std::vector<std::string> expand_tokens(
+  const std::vector<std::string>& tokens, VariableScope& scope, const Box& box)
 {
   std::vector<std::string> expanded;
   expanded.reserve(tokens.size());
   for (const auto& token : tokens) {
-    expanded.emplace_back(expand_variables(token, scope));
+    expanded.emplace_back(scope.expand_text(token, box));
+  }
+  return expanded;
+}
+
+void CommandNode::execute(Run& run, VariableScope& scope)
+{
+  run.variables = &scope;
+  std::vector<std::string> expanded = expand_tokens(tokens, scope, run.current_box());
+  if (!expanded.empty() && expanded[0] == "variable") {
+    scope.define_equal(expanded);
+    return;
   }
   run.parse_one_keyword(expanded);
+}
+
+static bool is_delete_isolated_command(
+  const Node& node, VariableScope& scope, const Box& box)
+{
+  const auto* cmd = dynamic_cast<const CommandNode*>(&node);
+  if (cmd == nullptr || cmd->tokens.size() < 2) {
+    return false;
+  }
+  const std::string a = scope.expand_text(cmd->tokens[0], box);
+  const std::string b = scope.expand_text(cmd->tokens[1], box);
+  return a == "delete" && b == "isolated";
+}
+
+static void execute_node_list(
+  Run& run, std::vector<std::unique_ptr<Node>>& nodes, VariableScope& scope)
+{
+  size_t i = 0;
+  while (i < nodes.size()) {
+    if (is_delete_isolated_command(*nodes[i], scope, run.current_box())) {
+      std::vector<std::vector<std::string>> batch;
+      while (i < nodes.size() && is_delete_isolated_command(*nodes[i], scope, run.current_box())) {
+        const auto* cmd = static_cast<const CommandNode*>(nodes[i].get());
+        batch.push_back(expand_tokens(cmd->tokens, scope, run.current_box()));
+        ++i;
+      }
+      run.variables = &scope;
+      run.delete_isolated_batch(batch);
+    } else {
+      nodes[i]->execute(run, scope);
+      ++i;
+    }
+  }
 }
 
 void ForNode::execute(Run& run, VariableScope& scope)
 {
   for (const auto& value : values) {
     scope.push(variable, value);
-    for (auto& node : body) {
-      node->execute(run, scope);
-    }
+    execute_node_list(run, body, scope);
     scope.pop();
+  }
+}
+
+static bool eval_if_condition(const IfNode& node, VariableScope& scope, const Box& box)
+{
+  const std::string a = scope.expand_text(node.lhs, box);
+  const std::string b = scope.expand_text(node.rhs, box);
+  double xa = 0.0;
+  double xb = 0.0;
+  if (is_valid_real(a.c_str(), &xa) && is_valid_real(b.c_str(), &xb)) {
+    if (node.op == "==") {
+      return xa == xb;
+    }
+    if (node.op == "!=") {
+      return xa != xb;
+    }
+    if (node.op == "<") {
+      return xa < xb;
+    }
+    if (node.op == "<=") {
+      return xa <= xb;
+    }
+    if (node.op == ">") {
+      return xa > xb;
+    }
+    return xa >= xb;
+  }
+  if (node.op == "==") {
+    return a == b;
+  }
+  if (node.op == "!=") {
+    return a != b;
+  }
+  PRINT_INPUT_ERROR("if relational operator needs numeric operands.");
+  return false;
+}
+
+void IfNode::execute(Run& run, VariableScope& scope)
+{
+  if (eval_if_condition(*this, scope, run.current_box())) {
+    execute_node_list(run, then_body, scope);
+  } else {
+    execute_node_list(run, else_body, scope);
   }
 }
 
@@ -302,9 +401,8 @@ void execute_control_script(Run& run, const char* filename)
   }
 
   std::vector<std::string> enclosing;
-  auto nodes = parse_statements(input, enclosing, false);
+  auto nodes = parse_statements(input, enclosing, ParseMode::Top, nullptr);
   VariableScope scope;
-  for (auto& node : nodes) {
-    node->execute(run, scope);
-  }
+  run.variables = &scope;
+  execute_node_list(run, nodes, scope);
 }

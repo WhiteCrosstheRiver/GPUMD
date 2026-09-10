@@ -32,6 +32,7 @@ class Measure;
 #include "model/group.cuh"
 #include "utilities/common.cuh"
 #include "utilities/gpu_vector.cuh"
+#include "variable.cuh"
 #include "velocity.cuh"
 #include <vector>
 
@@ -41,9 +42,15 @@ class Run
 {
 public:
   Run();
+  ~Run();
+  VariableScope* variables = nullptr;
+  Box& current_box() { return box; }
+  void delete_isolated_batch(const std::vector<std::vector<std::string>>& commands);
 
 private:
   friend struct CommandNode;
+  friend struct ForNode;
+  friend struct IfNode;
   void execute_run_in();
   void perform_a_run();
   void parse_one_keyword(std::vector<std::string>& tokens);
