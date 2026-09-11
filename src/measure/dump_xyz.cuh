@@ -64,7 +64,9 @@ public:
 
   struct Quantities {
     bool has_velocity_ = false;
+    bool has_speed_ = false;
     bool has_force_ = false;
+    bool has_force_norm_ = false;
     bool has_potential_ = false;
     bool has_unwrapped_position_ = false;
     bool has_mass_ = false;
@@ -74,6 +76,8 @@ public:
     bool has_group_ = false;
     bool has_volume_ = false;
     bool has_stress_ = false;
+    bool has_stress_norm_ = false;
+    bool has_pressure_ = false;
   };
 
 private:
@@ -106,6 +110,7 @@ private:
   GPU_Vector<int> voronoi_cell_contents_;
   GPU_Vector<int> voronoi_NN_;
   GPU_Vector<int> voronoi_NL_;
+  double cpu_box_pressure_ = 0.0;
 
   void output_line2(
     const double time,

@@ -21,20 +21,30 @@ Insert one atom at a given position and velocity::
 
   deposit <symbol> <x> <y> <z> <vx> <vy> <vz>
 
-Insert one atom using keywords. ``position`` and ``velocity`` are required and may appear in any order.
-``surface`` and ``offset`` are optional and are only for beam-deposition placement::
+Insert atoms using keywords. ``position`` and ``velocity`` are required and may appear in any order.
+For non-gaussian forms, both take six numbers (min/max per component) and sample uniformly in those ranges.
+``number`` may be used with the box ranges. ``surface`` and ``offset`` are only for beam-deposition placement::
 
-  deposit <symbol> position <x> <y> <z> velocity <vx> <vy> <vz>
+  deposit <symbol> number <N> velocity <vx_min> <vx_max> <vy_min> <vy_max> <vz_min> <vz_max> position <x_min> <x_max> <y_min> <y_max> <z_min> <z_max>
   deposit <symbol> position gaussian <x0> <y0> <sigma> velocity gaussian <v> <theta_sigma_deg> surface local <radius> offset antivel <sep>
 
 Insert molecules from an xyz file (uniform sampling in a box)::
 
   deposit <file.xyz> number <N> velocity <vx_min> <vx_max> <vy_min> <vy_max> <vz_min> <vz_max> position <x_min> <x_max> <y_min> <y_max> <z_min> <z_max>
 
+Uniform box sampling (atoms or molecules)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+* ``position <x_min> <x_max> <y_min> <y_max> <z_min> <z_max>``: sample the insertion point (atom coordinates, or molecule center of mass) uniformly in the axis-aligned box. If ``min = max`` on an axis, that coordinate is fixed.
+* ``velocity <vx_min> <vx_max> <vy_min> <vy_max> <vz_min> <vz_max>``: sample each velocity component independently and uniformly (Å/fs). If ``min = max``, that component is fixed.
+* ``number <N>``: insert ``N`` independent samples in one command.
+
+A single-atom species with these keywords is equivalent to depositing a one-atom molecule file with the same ranges.
+
 Beam-deposition keywords (special-purpose)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-These options are for a directed beam onto a surface. They are not needed for ordinary MD or for the molecule-file form.
+These options are for a directed beam onto a surface. They are not needed for ordinary MD or for box sampling.
 
 * ``position gaussian <x0> <y0> <sigma>``: :math:`x = x_0 + \mathcal{N}(0,\sigma)`, :math:`y = y_0 + \mathcal{N}(0,\sigma)`, then wrap XY with PBC. Requires ``surface local`` to set :math:`z`.
 * ``velocity gaussian <v> <theta_sigma_deg>``: the speed :math:`|v|` is fixed (Å/fs); :math:`\theta \sim |\mathcal{N}(0,\sigma_\theta)|` in degrees; :math:`\phi \sim U(0,2\pi)`; the beam is along :math:`-z`:
@@ -54,9 +64,13 @@ To drop flying or isolated atoms, issue :ref:`delete <kw_delete>` separately.
 Examples
 --------
 
-Insert one carbon atom::
+Insert one carbon atom at a fixed point::
 
   deposit C 8.8 8.8 16.0 0.0 0.0 -0.001
+
+Insert many F atoms uniformly in a box::
+
+  deposit F number 100 velocity -0.001 0.001 -0.001 0.001 -0.002 -0.001 position 0 50 0 50 20 30
 
 Insert molecules from a file::
 

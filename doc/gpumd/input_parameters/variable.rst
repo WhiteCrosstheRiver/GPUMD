@@ -48,8 +48,8 @@ Snapshot vs live box length::
   variable L0 equal ${tmp}
   variable L1 equal v_tmp
   change_box 1.0 0 0
-  deposit C position ${L0} 0 20 velocity 0 0 -0.001
-  deposit C position v_L1 0 20 velocity 0 0 -0.001
+  deposit C ${L0} 0 20 0 0 -0.001
+  deposit C v_L1 0 20 0 0 -0.001
 
 After ``change_box``, ``${L0}`` is still the original ``lx``; ``v_L1`` follows the new ``lx``.
 
@@ -58,15 +58,15 @@ Random XY in one pulse (one GPU rebuild)::
   variable rx equal random(0,lx,12345)
   variable ry equal random(0,ly,12345)
   for p range 1 500
-      deposit Si number 64 position v_rx v_ry 0 velocity gaussian 0.015 5 surface local 5.0 offset antivel 2.5
+      deposit Si number 64 position gaussian v_rx v_ry 0 velocity gaussian 0.015 5 surface local 5.0 offset antivel 2.5
       run 400
   end
 
-Do **not** write ``position ${rx} ${ry}`` with ``number > 1``: ``${rx}`` is one number, so every atom in that pulse sits at the same XY.
+Do **not** write ``position gaussian ${rx} ${ry} ...`` with ``number > 1``: ``${rx}`` is one number, so every atom in that pulse sits at the same XY.
 
 Anonymous immediate formula::
 
-  deposit C position $(lx/2) $(ly/2) 20 velocity 0 0 -0.001
+  deposit C $(lx/2) $(ly/2) 20 0 0 -0.001
 
 Caveats
 -------

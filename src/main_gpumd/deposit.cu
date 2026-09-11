@@ -272,17 +272,17 @@ static void deposit_one_atom_keywords(
 {
   (void)variables;
   const std::string symbol = param[1];
-  bool has_pos_xyz = false;
+  bool has_pos_box = false;
   bool has_pos_gaussian = false;
-  bool has_vel_xyz = false;
+  bool has_vel_box = false;
   bool has_vel_gaussian = false;
   bool has_surface = false;
   bool has_offset = false;
   int count = 1;
-  double pos0[3] = {0.0, 0.0, 0.0};
+  double position_ranges[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+  double velocity_ranges[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
   double xy0[2] = {0.0, 0.0};
   double xy_sigma = 0.0;
-  double vel0[3] = {0.0, 0.0, 0.0};
   double v_mag = 0.0;
   double theta_sigma_deg = 0.0;
   double surface_radius = 0.0;
@@ -315,14 +315,22 @@ static void deposit_one_atom_keywords(
         has_pos_gaussian = true;
         i += 5;
       } else {
-        if (i + 3 >= num_param) {
-          PRINT_INPUT_ERROR("Usage: position <x> <y> <z>");
+        if (i + 6 >= num_param) {
+          PRINT_INPUT_ERROR(
+            "Usage: position <x_min> <x_max> <y_min> <y_max> <z_min> <z_max>");
         }
-        parse_real_token(param[i + 1], &pos0[0], "position x should be a number.");
-        parse_real_token(param[i + 2], &pos0[1], "position y should be a number.");
-        parse_real_token(param[i + 3], &pos0[2], "position z should be a number.");
-        has_pos_xyz = true;
-        i += 4;
+        for (int d = 0; d < 6; ++d) {
+          parse_real_token(
+            param[i + 1 + d],
+            &position_ranges[d],
+            "position box values should be numbers.");
+        }
+        if (position_ranges[0] > position_ranges[1] || position_ranges[2] > position_ranges[3] ||
+            position_ranges[4] > position_ranges[5]) {
+          PRINT_INPUT_ERROR("position min should be <= max for each axis.");
+        }
+        has_pos_box = true;
+        i += 7;
       }
     } else if (strcmp(param[i], "velocity") == 0) {
       if (i + 1 >= num_param) {
@@ -344,14 +352,22 @@ static void deposit_one_atom_keywords(
         has_vel_gaussian = true;
         i += 4;
       } else {
-        if (i + 3 >= num_param) {
-          PRINT_INPUT_ERROR("Usage: velocity <vx> <vy> <vz>");
+        if (i + 6 >= num_param) {
+          PRINT_INPUT_ERROR(
+            "Usage: velocity <vx_min> <vx_max> <vy_min> <vy_max> <vz_min> <vz_max>");
         }
-        parse_real_token(param[i + 1], &vel0[0], "velocity vx should be a number.");
-        parse_real_token(param[i + 2], &vel0[1], "velocity vy should be a number.");
-        parse_real_token(param[i + 3], &vel0[2], "velocity vz should be a number.");
-        has_vel_xyz = true;
-        i += 4;
+        for (int d = 0; d < 6; ++d) {
+          parse_real_token(
+            param[i + 1 + d],
+            &velocity_ranges[d],
+            "velocity range values should be numbers.");
+        }
+        if (velocity_ranges[0] > velocity_ranges[1] || velocity_ranges[2] > velocity_ranges[3] ||
+            velocity_ranges[4] > velocity_ranges[5]) {
+          PRINT_INPUT_ERROR("velocity min should be <= max for each component.");
+        }
+        has_vel_box = true;
+        i += 7;
       }
     } else if (strcmp(param[i], "surface") == 0) {
       if (i + 2 >= num_param || strcmp(param[i + 1], "local") != 0) {
@@ -379,23 +395,28 @@ static void deposit_one_atom_keywords(
     }
   }
 
-  if (has_pos_xyz && has_pos_gaussian) {
-    PRINT_INPUT_ERROR("Specify only one of: position <x> <y> <z> or position gaussian ...");
+  if (has_pos_box && has_pos_gaussian) {
+    PRINT_INPUT_ERROR(
+      "Specify only one of: position <x_min> ... <z_max> or position gaussian ...");
   }
-  if (has_vel_xyz && has_vel_gaussian) {
-    PRINT_INPUT_ERROR("Specify only one of: velocity <vx> <vy> <vz> or velocity gaussian ...");
+  if (has_vel_box && has_vel_gaussian) {
+    PRINT_INPUT_ERROR(
+      "Specify only one of: velocity <vx_min> ... <vz_max> or velocity gaussian ...");
   }
-  if (!has_pos_xyz && !has_pos_gaussian) {
+  if (!has_pos_box && !has_pos_gaussian) {
     PRINT_INPUT_ERROR("deposit needs a position specification.");
   }
-  if (!has_vel_xyz && !has_vel_gaussian) {
+  if (!has_vel_box && !has_vel_gaussian) {
     PRINT_INPUT_ERROR("deposit needs a velocity specification.");
   }
   if (has_pos_gaussian && !has_surface) {
     PRINT_INPUT_ERROR("position gaussian requires surface local <radius>.");
   }
-  if (count > 1 && has_pos_xyz) {
-    PRINT_INPUT_ERROR("deposit number > 1 needs position gaussian (independent XY samples).");
+  if (has_pos_box && has_surface) {
+    PRINT_INPUT_ERROR("surface local is only for position gaussian beam deposition.");
+  }
+  if (has_pos_box && has_offset) {
+    PRINT_INPUT_ERROR("offset antivel is only for position gaussian beam deposition.");
   }
   if (atoms.number_of_atoms < 1 && has_surface) {
     PRINT_INPUT_ERROR("surface local needs existing atoms.");
@@ -403,6 +424,34 @@ static void deposit_one_atom_keywords(
 
   std::random_device rd;
   std::mt19937 gen(rd());
+  std::optional<std::uniform_real_distribution<double>> dist_x;
+  std::optional<std::uniform_real_distribution<double>> dist_y;
+  std::optional<std::uniform_real_distribution<double>> dist_z;
+  std::optional<std::uniform_real_distribution<double>> dist_vx;
+  std::optional<std::uniform_real_distribution<double>> dist_vy;
+  std::optional<std::uniform_real_distribution<double>> dist_vz;
+  if (has_pos_box) {
+    if (position_ranges[0] < position_ranges[1]) {
+      dist_x.emplace(position_ranges[0], position_ranges[1]);
+    }
+    if (position_ranges[2] < position_ranges[3]) {
+      dist_y.emplace(position_ranges[2], position_ranges[3]);
+    }
+    if (position_ranges[4] < position_ranges[5]) {
+      dist_z.emplace(position_ranges[4], position_ranges[5]);
+    }
+  }
+  if (has_vel_box) {
+    if (velocity_ranges[0] < velocity_ranges[1]) {
+      dist_vx.emplace(velocity_ranges[0], velocity_ranges[1]);
+    }
+    if (velocity_ranges[2] < velocity_ranges[3]) {
+      dist_vy.emplace(velocity_ranges[2], velocity_ranges[3]);
+    }
+    if (velocity_ranges[4] < velocity_ranges[5]) {
+      dist_vz.emplace(velocity_ranges[4], velocity_ranges[5]);
+    }
+  }
 
   LocalSurfaceMap surface_map;
   if (has_surface) {
@@ -410,8 +459,22 @@ static void deposit_one_atom_keywords(
   }
 
   for (int k = 0; k < count; ++k) {
-    double pos[3] = {pos0[0], pos0[1], pos0[2]};
-    double vel[3] = {vel0[0], vel0[1], vel0[2]};
+    double pos[3];
+    double vel[3];
+    if (has_pos_box) {
+      pos[0] = dist_x ? (*dist_x)(gen) : position_ranges[0];
+      pos[1] = dist_y ? (*dist_y)(gen) : position_ranges[2];
+      pos[2] = dist_z ? (*dist_z)(gen) : position_ranges[4];
+    } else {
+      pos[0] = pos[1] = pos[2] = 0.0;
+    }
+    if (has_vel_box) {
+      vel[0] = dist_vx ? (*dist_vx)(gen) : velocity_ranges[0];
+      vel[1] = dist_vy ? (*dist_vy)(gen) : velocity_ranges[2];
+      vel[2] = dist_vz ? (*dist_vz)(gen) : velocity_ranges[4];
+    } else {
+      vel[0] = vel[1] = vel[2] = 0.0;
+    }
     if (has_vel_gaussian) {
       sample_gaussian_beam_velocity(v_mag, theta_sigma_deg, gen, vel);
     }
