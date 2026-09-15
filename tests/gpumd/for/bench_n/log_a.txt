@@ -1,0 +1,5308 @@
+
+***************************************************************
+*                 Welcome to use GPUMD                        *
+*     (Graphics Processing Units Molecular Dynamics)          *
+*                     version 4.5                             *
+*              This is the gpumd executable                   *
+***************************************************************
+
+
+---------------------------------------------------------------
+Compiling options:
+---------------------------------------------------------------
+
+DEBUG is off: Use different PRNG seeds for different runs.
+
+---------------------------------------------------------------
+GPU information:
+---------------------------------------------------------------
+
+number of GPUs = 1
+Device id:                   0
+    Device name:             NVIDIA A100-PCIE-40GB
+    Compute capability:      8.0
+    Amount of global memory: 39.5163 GB
+    Number of SMs:           108
+
+---------------------------------------------------------------
+Started running GPUMD.
+---------------------------------------------------------------
+
+
+---------------------------------------------------------------
+Started initializing positions and related parameters.
+---------------------------------------------------------------
+
+Number of atoms is 8.
+Use periodic boundary conditions along x.
+Use periodic boundary conditions along y.
+Use periodic boundary conditions along z.
+Box matrix h = [a, b, c] is
+    3.5700000000e+00    0.0000000000e+00    0.0000000000e+00
+    0.0000000000e+00    3.5700000000e+00    0.0000000000e+00
+    0.0000000000e+00    0.0000000000e+00    3.5700000000e+00
+Inverse box matrix g = inv(h) is
+    2.8011204482e-01    0.0000000000e+00    0.0000000000e+00
+    0.0000000000e+00    2.8011204482e-01    0.0000000000e+00
+    0.0000000000e+00    0.0000000000e+00    2.8011204482e-01
+Do not specify initial velocities here.
+Have no grouping method.
+There is only one atom type.
+    8 atoms of type 0.
+Initialized velocities with default T = 300 K.
+
+---------------------------------------------------------------
+Finished initializing positions and related parameters.
+---------------------------------------------------------------
+
+
+---------------------------------------------------------------
+Started executing the commands in run.in.
+---------------------------------------------------------------
+
+Time used for CPU sync = 3.1663e-05 second.
+Time used for atom-count rebuild = 0.000130019 second.
+
+---------------------------------------------------------------
+Replicate cell by 5 * 5 * 5.
+Number of atoms is 1000.
+There is only one atom type.
+    1000 atoms of type 0.
+---------------------------------------------------------------
+
+Use the NEP3 potential with 1 atom type.
+    type 0 (C with Z = 6).
+    radial cutoff = 4.2 A.
+    angular cutoff = 3.7 A.
+    MN_radial = 80.
+    enlarged MN_radial = 100.
+    enlarged MN_angular = 59.
+    n_max_radial = 10.
+    n_max_angular = 8.
+    basis_size_radial = 10.
+    basis_size_angular = 8.
+    l_max_3body = 4.
+    l_max_4body = 2.
+    l_max_5body = 1.
+    ANN = 65-100-1.
+    number of neural network parameters = 6701.
+    number of descriptor parameters = 202.
+    total number of parameters = 6903.
+Initialized velocities with input T = 300 K.
+Time step for this run is 1 fs.
+Use NVE ensemble for this run.
+Time used for CPU sync = 3.8596e-05 second.
+Time used for atom-count rebuild = 0.000376004 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.689109, 7.627060, 18.955680) with velocity (-0.00003531, 0.00002392, -0.00099909).
+Total number of atoms: 1001
+---------------------------------------------------------------
+
+Time used for deposit = 0.000478188 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.325236 second.
+Speed of this run = 307777 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00212963 second.
+Time used for atom-count rebuild = 0.000373082 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.153364, 6.641416, 19.842932) with velocity (-0.00000558, 0.00006456, -0.00099790).
+Total number of atoms: 1002
+---------------------------------------------------------------
+
+Time used for deposit = 0.000476575 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.219394 second.
+Speed of this run = 456713 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00216047 second.
+Time used for atom-count rebuild = 0.000175938 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.151110, 9.294768, 19.825200) with velocity (-0.00013664, 0.00000160, -0.00099062).
+Total number of atoms: 1003
+---------------------------------------------------------------
+
+Time used for deposit = 0.000255069 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.220906 second.
+Speed of this run = 454040 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00219252 second.
+Time used for atom-count rebuild = 0.000173658 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.721867, 7.439399, 19.826180) with velocity (0.00005352, -0.00006741, -0.00099629).
+Total number of atoms: 1004
+---------------------------------------------------------------
+
+Time used for deposit = 0.000231291 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.222968 second.
+Speed of this run = 450290 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00221722 second.
+Time used for atom-count rebuild = 0.000171826 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.223037, 8.445050, 19.838900) with velocity (-0.00002993, -0.00000087, -0.00099955).
+Total number of atoms: 1005
+---------------------------------------------------------------
+
+Time used for deposit = 0.000235585 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.225345 second.
+Speed of this run = 445984 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00220827 second.
+Time used for atom-count rebuild = 0.000171707 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (10.450953, 8.014215, 19.821259) with velocity (-0.00002904, -0.00009536, -0.00099502).
+Total number of atoms: 1006
+---------------------------------------------------------------
+
+Time used for deposit = 0.000239258 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.227692 second.
+Speed of this run = 441824 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00223386 second.
+Time used for atom-count rebuild = 0.000170163 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.974592, 8.016380, 19.820788) with velocity (-0.00000334, -0.00000053, -0.00099999).
+Total number of atoms: 1007
+---------------------------------------------------------------
+
+Time used for deposit = 0.000231847 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.228774 second.
+Speed of this run = 440172 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00226597 second.
+Time used for atom-count rebuild = 0.000168287 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (10.273832, 9.508150, 19.835079) with velocity (0.00007759, 0.00002484, -0.00099668).
+Total number of atoms: 1008
+---------------------------------------------------------------
+
+Time used for deposit = 0.000225052 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.228791 second.
+Speed of this run = 440578 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00225763 second.
+Time used for atom-count rebuild = 0.000178514 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (10.433552, 7.771255, 19.811796) with velocity (0.00001262, 0.00006736, -0.00099765).
+Total number of atoms: 1009
+---------------------------------------------------------------
+
+Time used for deposit = 0.000245296 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.23037 second.
+Speed of this run = 437991 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00230724 second.
+Time used for atom-count rebuild = 0.000170946 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (5.555117, 8.235770, 19.835528) with velocity (-0.00000128, 0.00001267, -0.00099992).
+Total number of atoms: 1010
+---------------------------------------------------------------
+
+Time used for deposit = 0.000236629 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.230025 second.
+Speed of this run = 439083 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00227203 second.
+Time used for atom-count rebuild = 0.000168678 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.236704, 9.665394, 19.833323) with velocity (0.00000896, -0.00004926, -0.00099875).
+Total number of atoms: 1011
+---------------------------------------------------------------
+
+Time used for deposit = 0.000227422 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.231083 second.
+Speed of this run = 437504 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00228239 second.
+Time used for atom-count rebuild = 0.000166425 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.502688, 10.133937, 19.843435) with velocity (-0.00001468, -0.00007708, -0.00099692).
+Total number of atoms: 1012
+---------------------------------------------------------------
+
+Time used for deposit = 0.000227741 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.231796 second.
+Speed of this run = 436590 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00226821 second.
+Time used for atom-count rebuild = 0.000167839 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.731602, 8.998366, 19.777852) with velocity (-0.00001688, -0.00000679, -0.00099983).
+Total number of atoms: 1013
+---------------------------------------------------------------
+
+Time used for deposit = 0.000222987 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.234683 second.
+Speed of this run = 431646 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00238946 second.
+Time used for atom-count rebuild = 0.000169059 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (10.416518, 10.318636, 19.839218) with velocity (0.00000426, 0.00000460, -0.00099998).
+Total number of atoms: 1014
+---------------------------------------------------------------
+
+Time used for deposit = 0.000234924 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.237079 second.
+Speed of this run = 427706 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.0023393 second.
+Time used for atom-count rebuild = 0.000166189 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.702118, 9.537680, 19.825565) with velocity (0.00002780, 0.00000681, -0.00099959).
+Total number of atoms: 1015
+---------------------------------------------------------------
+
+Time used for deposit = 0.000223199 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.236339 second.
+Speed of this run = 429468 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.0023543 second.
+Time used for atom-count rebuild = 0.000166407 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.852469, 8.790883, 19.764814) with velocity (-0.00001771, 0.00002531, -0.00099952).
+Total number of atoms: 1016
+---------------------------------------------------------------
+
+Time used for deposit = 0.000222821 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.238632 second.
+Speed of this run = 425760 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00236329 second.
+Time used for atom-count rebuild = 0.000168178 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.118705, 8.217420, 19.788353) with velocity (-0.00002100, 0.00008654, -0.00099603).
+Total number of atoms: 1017
+---------------------------------------------------------------
+
+Time used for deposit = 0.000229286 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.238667 second.
+Speed of this run = 426116 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00236133 second.
+Time used for atom-count rebuild = 0.000200207 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.571387, 10.871197, 19.771300) with velocity (-0.00000047, 0.00000304, -0.00100000).
+Total number of atoms: 1018
+---------------------------------------------------------------
+
+Time used for deposit = 0.000308959 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.241631 second.
+Speed of this run = 421303 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00244098 second.
+Time used for atom-count rebuild = 0.000168094 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.508520, 8.978780, 19.767515) with velocity (0.00020270, -0.00002274, -0.00097898).
+Total number of atoms: 1019
+---------------------------------------------------------------
+
+Time used for deposit = 0.00025129 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.241436 second.
+Speed of this run = 422059 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00239705 second.
+Time used for atom-count rebuild = 0.000173384 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (7.950587, 10.105013, 19.777174) with velocity (-0.00004343, -0.00019093, -0.00098064).
+Total number of atoms: 1020
+---------------------------------------------------------------
+
+Time used for deposit = 0.000238959 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.239779 second.
+Speed of this run = 425392 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00236158 second.
+Time used for atom-count rebuild = 0.000167295 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.013148, 7.871624, 19.824007) with velocity (0.00000058, 0.00000050, -0.00100000).
+Total number of atoms: 1021
+---------------------------------------------------------------
+
+Time used for deposit = 0.000226438 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.240404 second.
+Speed of this run = 424702 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00237267 second.
+Time used for atom-count rebuild = 0.000168118 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.015736, 8.808511, 19.831408) with velocity (0.00004415, 0.00001645, -0.00099889).
+Total number of atoms: 1022
+---------------------------------------------------------------
+
+Time used for deposit = 0.000228881 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.241036 second.
+Speed of this run = 424004 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00238105 second.
+Time used for atom-count rebuild = 0.000171309 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.776945, 8.214857, 19.810590) with velocity (-0.00008349, -0.00005195, -0.00099515).
+Total number of atoms: 1023
+---------------------------------------------------------------
+
+Time used for deposit = 0.000228872 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.242169 second.
+Speed of this run = 422432 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00235698 second.
+Time used for atom-count rebuild = 0.000145059 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (10.086044, 8.067372, 19.733338) with velocity (-0.00001696, 0.00002958, -0.00099942).
+Total number of atoms: 1024
+---------------------------------------------------------------
+
+Time used for deposit = 0.000205075 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.244488 second.
+Speed of this run = 418835 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00242995 second.
+Time used for atom-count rebuild = 0.000166301 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.873707, 8.290354, 19.832772) with velocity (0.00003417, -0.00009531, -0.00099486).
+Total number of atoms: 1025
+---------------------------------------------------------------
+
+Time used for deposit = 0.000225232 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.252236 second.
+Speed of this run = 406366 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00243806 second.
+Time used for atom-count rebuild = 0.00017234 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (7.074100, 10.514844, 19.771647) with velocity (0.00000056, 0.00000177, -0.00100000).
+Total number of atoms: 1026
+---------------------------------------------------------------
+
+Time used for deposit = 0.000235983 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.252082 second.
+Speed of this run = 407010 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00249228 second.
+Time used for atom-count rebuild = 0.000174128 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.409379, 9.467741, 19.798072) with velocity (-0.00000221, -0.00002983, -0.00099955).
+Total number of atoms: 1027
+---------------------------------------------------------------
+
+Time used for deposit = 0.000245595 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.251521 second.
+Speed of this run = 408316 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00248249 second.
+Time used for atom-count rebuild = 0.000174305 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.833255, 9.070569, 19.827893) with velocity (0.00000212, 0.00000995, -0.00099995).
+Total number of atoms: 1028
+---------------------------------------------------------------
+
+Time used for deposit = 0.000238586 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.253467 second.
+Speed of this run = 405576 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00252674 second.
+Time used for atom-count rebuild = 0.000168347 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (7.732367, 9.350077, 19.789108) with velocity (0.00000594, 0.00000099, -0.00099998).
+Total number of atoms: 1029
+---------------------------------------------------------------
+
+Time used for deposit = 0.000228851 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.251546 second.
+Speed of this run = 409071 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00246402 second.
+Time used for atom-count rebuild = 0.000167997 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (10.870901, 7.310775, 19.810249) with velocity (-0.00001121, 0.00000184, -0.00099994).
+Total number of atoms: 1030
+---------------------------------------------------------------
+
+Time used for deposit = 0.000227194 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.253387 second.
+Speed of this run = 406493 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00251943 second.
+Time used for atom-count rebuild = 0.000172462 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.667187, 7.143897, 19.742501) with velocity (-0.00002194, 0.00013846, -0.00099012).
+Total number of atoms: 1031
+---------------------------------------------------------------
+
+Time used for deposit = 0.000230892 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.253336 second.
+Speed of this run = 406970 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00250525 second.
+Time used for atom-count rebuild = 0.000169904 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.330414, 10.094186, 19.779697) with velocity (-0.00004726, -0.00003531, -0.00099826).
+Total number of atoms: 1032
+---------------------------------------------------------------
+
+Time used for deposit = 0.000227286 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.254249 second.
+Speed of this run = 405902 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00250334 second.
+Time used for atom-count rebuild = 0.000172555 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (7.288621, 8.683840, 19.793397) with velocity (0.00001027, 0.00001506, -0.00099983).
+Total number of atoms: 1033
+---------------------------------------------------------------
+
+Time used for deposit = 0.000229084 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.253749 second.
+Speed of this run = 407095 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00251232 second.
+Time used for atom-count rebuild = 0.000328564 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.106566, 7.554683, 19.821175) with velocity (0.00003858, -0.00000222, -0.00099925).
+Total number of atoms: 1034
+---------------------------------------------------------------
+
+Time used for deposit = 0.000387296 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.254019 second.
+Speed of this run = 407056 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00246298 second.
+Time used for atom-count rebuild = 0.000322893 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (11.750219, 9.317173, 19.794043) with velocity (-0.00003639, -0.00001402, -0.00099924).
+Total number of atoms: 1035
+---------------------------------------------------------------
+
+Time used for deposit = 0.000409089 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.25342 second.
+Speed of this run = 408414 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00250065 second.
+Time used for atom-count rebuild = 0.000174033 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.647023, 10.633013, 19.830994) with velocity (0.00000344, 0.00001898, -0.00099981).
+Total number of atoms: 1036
+---------------------------------------------------------------
+
+Time used for deposit = 0.000243203 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.25241 second.
+Speed of this run = 410443 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00246409 second.
+Time used for atom-count rebuild = 0.000172896 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.127112, 7.915126, 19.735803) with velocity (0.00006733, -0.00000335, -0.00099772).
+Total number of atoms: 1037
+---------------------------------------------------------------
+
+Time used for deposit = 0.000237695 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.254083 second.
+Speed of this run = 408134 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00249469 second.
+Time used for atom-count rebuild = 0.000197903 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.890054, 9.625398, 19.769763) with velocity (0.00003289, -0.00004907, -0.00099825).
+Total number of atoms: 1038
+---------------------------------------------------------------
+
+Time used for deposit = 0.000291341 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.256632 second.
+Speed of this run = 404470 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00248826 second.
+Time used for atom-count rebuild = 0.000175834 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.653776, 7.737459, 19.823005) with velocity (-0.00000479, -0.00000535, -0.00099997).
+Total number of atoms: 1039
+---------------------------------------------------------------
+
+Time used for deposit = 0.000244171 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.255125 second.
+Speed of this run = 407251 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00249625 second.
+Time used for atom-count rebuild = 0.000172592 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.468388, 7.932251, 19.765738) with velocity (0.00004177, -0.00005444, -0.00099764).
+Total number of atoms: 1040
+---------------------------------------------------------------
+
+Time used for deposit = 0.000237371 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.25472 second.
+Speed of this run = 408291 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00255191 second.
+Time used for atom-count rebuild = 0.000166692 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (6.789409, 8.329701, 19.753257) with velocity (-0.00002500, -0.00006141, -0.00099780).
+Total number of atoms: 1041
+---------------------------------------------------------------
+
+Time used for deposit = 0.000225184 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.258047 second.
+Speed of this run = 403415 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00250465 second.
+Time used for atom-count rebuild = 0.000173004 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.262839, 8.487711, 19.786712) with velocity (-0.00001350, 0.00023097, -0.00097287).
+Total number of atoms: 1042
+---------------------------------------------------------------
+
+Time used for deposit = 0.000234579 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.257285 second.
+Speed of this run = 404998 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00248455 second.
+Time used for atom-count rebuild = 0.000169214 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.843520, 9.867183, 19.788625) with velocity (0.00015508, 0.00007888, -0.00098475).
+Total number of atoms: 1043
+---------------------------------------------------------------
+
+Time used for deposit = 0.00024557 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.254098 second.
+Speed of this run = 410472 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00250444 second.
+Time used for atom-count rebuild = 0.00017317 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (7.596815, 8.549284, 19.774809) with velocity (-0.00008395, -0.00005217, -0.00099510).
+Total number of atoms: 1044
+---------------------------------------------------------------
+
+Time used for deposit = 0.000239765 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.253507 second.
+Speed of this run = 411824 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00249566 second.
+Time used for atom-count rebuild = 0.00017304 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (10.588202, 9.399147, 19.762971) with velocity (0.00001362, -0.00000379, -0.00099990).
+Total number of atoms: 1045
+---------------------------------------------------------------
+
+Time used for deposit = 0.000235382 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.253311 second.
+Speed of this run = 412536 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00258374 second.
+Time used for atom-count rebuild = 0.000387345 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.289857, 8.667129, 19.785957) with velocity (0.00009405, -0.00005758, -0.00099390).
+Total number of atoms: 1046
+---------------------------------------------------------------
+
+Time used for deposit = 0.000492962 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.255165 second.
+Speed of this run = 409930 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00247931 second.
+Time used for atom-count rebuild = 0.000280112 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (7.341033, 9.266740, 19.772952) with velocity (-0.00000965, -0.00001336, -0.00099986).
+Total number of atoms: 1047
+---------------------------------------------------------------
+
+Time used for deposit = 0.000354007 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.253925 second.
+Speed of this run = 412326 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00250575 second.
+Time used for atom-count rebuild = 0.000178176 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.149932, 8.444003, 19.666274) with velocity (0.00001406, 0.00003969, -0.00099911).
+Total number of atoms: 1048
+---------------------------------------------------------------
+
+Time used for deposit = 0.000241843 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.255851 second.
+Speed of this run = 409613 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00249575 second.
+Time used for atom-count rebuild = 0.000184314 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.478095, 7.982433, 19.661518) with velocity (-0.00001237, -0.00000236, -0.00099992).
+Total number of atoms: 1049
+---------------------------------------------------------------
+
+Time used for deposit = 0.000245482 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.257141 second.
+Speed of this run = 407947 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00252367 second.
+Time used for atom-count rebuild = 0.000173904 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.005781, 9.120748, 19.821916) with velocity (-0.00000807, -0.00000111, -0.00099997).
+Total number of atoms: 1050
+---------------------------------------------------------------
+
+Time used for deposit = 0.00023382 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.258603 second.
+Speed of this run = 406028 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00249796 second.
+Time used for atom-count rebuild = 0.000182008 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.451835, 8.621678, 19.789427) with velocity (0.00010416, -0.00001197, -0.00099449).
+Total number of atoms: 1051
+---------------------------------------------------------------
+
+Time used for deposit = 0.000258005 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.259084 second.
+Speed of this run = 405660 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.0024712 second.
+Time used for atom-count rebuild = 0.000173917 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (7.681691, 9.205688, 19.727581) with velocity (0.00001160, -0.00012158, -0.00099251).
+Total number of atoms: 1052
+---------------------------------------------------------------
+
+Time used for deposit = 0.000241259 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.258625 second.
+Speed of this run = 406767 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00256154 second.
+Time used for atom-count rebuild = 0.000172817 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.531693, 9.352797, 19.834561) with velocity (-0.00001070, 0.00000679, -0.00099992).
+Total number of atoms: 1053
+---------------------------------------------------------------
+
+Time used for deposit = 0.000235316 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.261137 second.
+Speed of this run = 403237 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00261933 second.
+Time used for atom-count rebuild = 0.000173734 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.444754, 9.064414, 19.731715) with velocity (-0.00001275, -0.00000102, -0.00099992).
+Total number of atoms: 1054
+---------------------------------------------------------------
+
+Time used for deposit = 0.000232206 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.260329 second.
+Speed of this run = 404873 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00262719 second.
+Time used for atom-count rebuild = 0.00030854 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.137625, 8.372240, 19.797867) with velocity (-0.00005426, -0.00013358, -0.00098955).
+Total number of atoms: 1055
+---------------------------------------------------------------
+
+Time used for deposit = 0.000370079 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.264027 second.
+Speed of this run = 399581 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00261149 second.
+Time used for atom-count rebuild = 0.000166999 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (10.265653, 8.706338, 19.838766) with velocity (-0.00000526, -0.00000106, -0.00099999).
+Total number of atoms: 1056
+---------------------------------------------------------------
+
+Time used for deposit = 0.000227889 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.257522 second.
+Speed of this run = 410063 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.0025674 second.
+Time used for atom-count rebuild = 0.000382775 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.861436, 10.778160, 19.810844) with velocity (0.00001278, -0.00006910, -0.00099753).
+Total number of atoms: 1057
+---------------------------------------------------------------
+
+Time used for deposit = 0.000468984 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.254339 second.
+Speed of this run = 415587 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00251262 second.
+Time used for atom-count rebuild = 0.00035933 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.074681, 7.797641, 19.841316) with velocity (-0.00000226, 0.00000317, -0.00099999).
+Total number of atoms: 1058
+---------------------------------------------------------------
+
+Time used for deposit = 0.000426007 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.253494 second.
+Speed of this run = 417367 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00249631 second.
+Time used for atom-count rebuild = 0.000180522 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.534822, 7.503114, 19.800508) with velocity (0.00004700, -0.00000376, -0.00099889).
+Total number of atoms: 1059
+---------------------------------------------------------------
+
+Time used for deposit = 0.000266344 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.253099 second.
+Speed of this run = 418414 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00248913 second.
+Time used for atom-count rebuild = 0.000172199 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.436062, 8.662126, 19.843111) with velocity (0.00000338, -0.00002232, -0.00099975).
+Total number of atoms: 1060
+---------------------------------------------------------------
+
+Time used for deposit = 0.000242473 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.254292 second.
+Speed of this run = 416843 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00253586 second.
+Time used for atom-count rebuild = 0.000172759 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.466859, 7.415557, 19.823462) with velocity (0.00001670, 0.00005694, -0.00099824).
+Total number of atoms: 1061
+---------------------------------------------------------------
+
+Time used for deposit = 0.000233665 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.253582 second.
+Speed of this run = 418406 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00247122 second.
+Time used for atom-count rebuild = 0.000193523 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (7.506180, 8.604426, 19.836782) with velocity (-0.00000139, 0.00001968, -0.00099981).
+Total number of atoms: 1062
+---------------------------------------------------------------
+
+Time used for deposit = 0.000254896 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.25247 second.
+Speed of this run = 420644 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.002504 second.
+Time used for atom-count rebuild = 0.000296102 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.786029, 8.988530, 19.827258) with velocity (0.00001239, 0.00004646, -0.00099884).
+Total number of atoms: 1063
+---------------------------------------------------------------
+
+Time used for deposit = 0.000362438 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.252876 second.
+Speed of this run = 420365 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00248786 second.
+Time used for atom-count rebuild = 0.000282032 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.502455, 7.598853, 19.838107) with velocity (0.00003243, 0.00000052, -0.00099947).
+Total number of atoms: 1064
+---------------------------------------------------------------
+
+Time used for deposit = 0.000359132 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.251418 second.
+Speed of this run = 423199 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00251231 second.
+Time used for atom-count rebuild = 0.000169139 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.428923, 9.861989, 19.714843) with velocity (-0.00000128, -0.00000314, -0.00099999).
+Total number of atoms: 1065
+---------------------------------------------------------------
+
+Time used for deposit = 0.000228036 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.252664 second.
+Speed of this run = 421509 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00248831 second.
+Time used for atom-count rebuild = 0.000168421 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.318320, 6.085416, 19.764620) with velocity (0.00000620, -0.00002038, -0.00099977).
+Total number of atoms: 1066
+---------------------------------------------------------------
+
+Time used for deposit = 0.000226416 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.252149 second.
+Speed of this run = 422766 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00248283 second.
+Time used for atom-count rebuild = 0.000173741 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.865654, 8.687102, 19.806654) with velocity (0.00003299, 0.00003982, -0.00099866).
+Total number of atoms: 1067
+---------------------------------------------------------------
+
+Time used for deposit = 0.000254366 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.251643 second.
+Speed of this run = 424014 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00249796 second.
+Time used for atom-count rebuild = 0.000334187 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (10.654351, 7.895395, 19.671824) with velocity (0.00001438, 0.00016755, -0.00098576).
+Total number of atoms: 1068
+---------------------------------------------------------------
+
+Time used for deposit = 0.00041123 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.251279 second.
+Speed of this run = 425026 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00250433 second.
+Time used for atom-count rebuild = 0.000193577 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.124696, 8.484478, 19.736012) with velocity (0.00004560, 0.00000845, -0.00099892).
+Total number of atoms: 1069
+---------------------------------------------------------------
+
+Time used for deposit = 0.000260827 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.2498 second.
+Speed of this run = 427942 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00244062 second.
+Time used for atom-count rebuild = 0.000171393 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.049313, 7.479883, 19.846469) with velocity (-0.00001162, 0.00000969, -0.00099989).
+Total number of atoms: 1070
+---------------------------------------------------------------
+
+Time used for deposit = 0.000234208 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.252731 second.
+Speed of this run = 423375 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00248972 second.
+Time used for atom-count rebuild = 0.000204113 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.000279, 6.791199, 19.820404) with velocity (0.00003462, 0.00001793, -0.00099924).
+Total number of atoms: 1071
+---------------------------------------------------------------
+
+Time used for deposit = 0.000296273 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.252682 second.
+Speed of this run = 423852 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00243075 second.
+Time used for atom-count rebuild = 0.000174413 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (7.549540, 8.553565, 19.735263) with velocity (0.00019393, 0.00003240, -0.00098048).
+Total number of atoms: 1072
+---------------------------------------------------------------
+
+Time used for deposit = 0.000238941 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.251308 second.
+Speed of this run = 426568 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00249535 second.
+Time used for atom-count rebuild = 0.000277926 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.206140, 8.995945, 19.744579) with velocity (0.00003362, -0.00004054, -0.00099861).
+Total number of atoms: 1073
+---------------------------------------------------------------
+
+Time used for deposit = 0.000337448 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.252694 second.
+Speed of this run = 424625 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00247214 second.
+Time used for atom-count rebuild = 0.000173851 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.089102, 9.794240, 19.833373) with velocity (-0.00002492, -0.00001396, -0.00099959).
+Total number of atoms: 1074
+---------------------------------------------------------------
+
+Time used for deposit = 0.000238036 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.252031 second.
+Speed of this run = 426139 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00250681 second.
+Time used for atom-count rebuild = 0.000179827 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (10.024497, 9.704827, 19.810415) with velocity (-0.00004469, 0.00009141, -0.00099481).
+Total number of atoms: 1075
+---------------------------------------------------------------
+
+Time used for deposit = 0.000251124 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.253945 second.
+Speed of this run = 423320 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.0024832 second.
+Time used for atom-count rebuild = 0.000176212 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.106580, 8.952894, 19.702671) with velocity (0.00015841, -0.00000351, -0.00098737).
+Total number of atoms: 1076
+---------------------------------------------------------------
+
+Time used for deposit = 0.000245434 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.252293 second.
+Speed of this run = 426489 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00248842 second.
+Time used for atom-count rebuild = 0.00016987 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.966444, 8.071073, 19.836444) with velocity (-0.00005419, 0.00001772, -0.00099837).
+Total number of atoms: 1077
+---------------------------------------------------------------
+
+Time used for deposit = 0.000234101 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.254349 second.
+Speed of this run = 423434 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00246319 second.
+Time used for atom-count rebuild = 0.000315974 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.352474, 7.533903, 19.840282) with velocity (0.00001581, 0.00008690, -0.00099609).
+Total number of atoms: 1078
+---------------------------------------------------------------
+
+Time used for deposit = 0.000381597 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.251977 second.
+Speed of this run = 427817 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00248825 second.
+Time used for atom-count rebuild = 0.000173642 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (7.886166, 8.217646, 19.829958) with velocity (-0.00000754, -0.00000064, -0.00099997).
+Total number of atoms: 1079
+---------------------------------------------------------------
+
+Time used for deposit = 0.000235253 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.253592 second.
+Speed of this run = 425486 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00248832 second.
+Time used for atom-count rebuild = 0.000262031 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (10.088542, 8.775367, 19.786061) with velocity (-0.00001367, 0.00001603, -0.00099978).
+Total number of atoms: 1080
+---------------------------------------------------------------
+
+Time used for deposit = 0.000321677 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.254018 second.
+Speed of this run = 425167 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00250289 second.
+Time used for atom-count rebuild = 0.00025501 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.262782, 5.768075, 19.691258) with velocity (-0.00009805, 0.00018928, -0.00097701).
+Total number of atoms: 1081
+---------------------------------------------------------------
+
+Time used for deposit = 0.000313917 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.25297 second.
+Speed of this run = 427324 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.002482 second.
+Time used for atom-count rebuild = 0.000173403 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (7.981909, 8.029621, 19.800489) with velocity (0.00005016, -0.00002127, -0.00099851).
+Total number of atoms: 1082
+---------------------------------------------------------------
+
+Time used for deposit = 0.000231471 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.252913 second.
+Speed of this run = 427816 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00248211 second.
+Time used for atom-count rebuild = 0.000174799 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (7.841453, 9.233643, 19.809013) with velocity (-0.00012847, -0.00006201, -0.00098977).
+Total number of atoms: 1083
+---------------------------------------------------------------
+
+Time used for deposit = 0.000233521 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.254516 second.
+Speed of this run = 425514 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00246109 second.
+Time used for atom-count rebuild = 0.000174977 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.959943, 8.786348, 19.841720) with velocity (0.00000341, 0.00004291, -0.00099907).
+Total number of atoms: 1084
+---------------------------------------------------------------
+
+Time used for deposit = 0.000252406 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.254394 second.
+Speed of this run = 426111 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00251193 second.
+Time used for atom-count rebuild = 0.000176514 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.725157, 9.089840, 19.834583) with velocity (-0.00000056, -0.00002944, -0.00099957).
+Total number of atoms: 1085
+---------------------------------------------------------------
+
+Time used for deposit = 0.000242594 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.255771 second.
+Speed of this run = 424208 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00250441 second.
+Time used for atom-count rebuild = 0.000177726 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (10.265757, 8.265945, 19.807740) with velocity (0.00006397, 0.00003276, -0.00099741).
+Total number of atoms: 1086
+---------------------------------------------------------------
+
+Time used for deposit = 0.000241216 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.25436 second.
+Speed of this run = 426953 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00250385 second.
+Time used for atom-count rebuild = 0.000436755 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.264162, 8.320504, 19.704447) with velocity (-0.00002832, -0.00001902, -0.00099942).
+Total number of atoms: 1087
+---------------------------------------------------------------
+
+Time used for deposit = 0.000533346 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.253853 second.
+Speed of this run = 428201 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00250005 second.
+Time used for atom-count rebuild = 0.00025459 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.087504, 9.625141, 19.741172) with velocity (0.00002004, -0.00003571, -0.00099916).
+Total number of atoms: 1088
+---------------------------------------------------------------
+
+Time used for deposit = 0.000332916 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.253328 second.
+Speed of this run = 429483 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.0025223 second.
+Time used for atom-count rebuild = 0.000267025 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.341742, 8.228236, 19.718264) with velocity (-0.00002559, -0.00002512, -0.00099936).
+Total number of atoms: 1089
+---------------------------------------------------------------
+
+Time used for deposit = 0.000331814 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.254907 second.
+Speed of this run = 427214 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00248825 second.
+Time used for atom-count rebuild = 0.00025645 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.951479, 8.913830, 19.571699) with velocity (-0.00001392, -0.00000713, -0.00099988).
+Total number of atoms: 1090
+---------------------------------------------------------------
+
+Time used for deposit = 0.000318603 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.256026 second.
+Speed of this run = 425738 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00255279 second.
+Time used for atom-count rebuild = 0.000172806 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.433543, 8.549986, 19.775192) with velocity (-0.00005483, 0.00006176, -0.00099658).
+Total number of atoms: 1091
+---------------------------------------------------------------
+
+Time used for deposit = 0.000247331 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.255593 second.
+Speed of this run = 426850 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00257018 second.
+Time used for atom-count rebuild = 0.000177526 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (10.239025, 9.442600, 19.723611) with velocity (0.00002890, -0.00000189, -0.00099958).
+Total number of atoms: 1092
+---------------------------------------------------------------
+
+Time used for deposit = 0.000257164 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.255987 second.
+Speed of this run = 426584 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00253793 second.
+Time used for atom-count rebuild = 0.000200212 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (7.800152, 9.537807, 19.747158) with velocity (0.00006114, -0.00000185, -0.00099813).
+Total number of atoms: 1093
+---------------------------------------------------------------
+
+Time used for deposit = 0.000267928 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.256518 second.
+Speed of this run = 426091 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00252152 second.
+Time used for atom-count rebuild = 0.000171296 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.366499, 9.147113, 19.714460) with velocity (-0.00001928, -0.00000651, -0.00099979).
+Total number of atoms: 1094
+---------------------------------------------------------------
+
+Time used for deposit = 0.000237086 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.255227 second.
+Speed of this run = 428638 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00254656 second.
+Time used for atom-count rebuild = 0.000292548 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.519023, 8.919296, 19.820468) with velocity (-0.00004371, 0.00002000, -0.00099884).
+Total number of atoms: 1095
+---------------------------------------------------------------
+
+Time used for deposit = 0.000356507 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.256443 second.
+Speed of this run = 426995 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00256371 second.
+Time used for atom-count rebuild = 0.000173561 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.147402, 8.505297, 19.841433) with velocity (-0.00005831, 0.00002014, -0.00099810).
+Total number of atoms: 1096
+---------------------------------------------------------------
+
+Time used for deposit = 0.000237741 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.256279 second.
+Speed of this run = 427658 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00252931 second.
+Time used for atom-count rebuild = 0.000170473 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (10.014378, 9.765449, 19.840849) with velocity (-0.00000072, -0.00000108, -0.00100000).
+Total number of atoms: 1097
+---------------------------------------------------------------
+
+Time used for deposit = 0.000230706 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.258127 second.
+Speed of this run = 424984 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00252988 second.
+Time used for atom-count rebuild = 0.000336392 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.208350, 9.449222, 19.659229) with velocity (-0.00018354, -0.00004037, -0.00098218).
+Total number of atoms: 1098
+---------------------------------------------------------------
+
+Time used for deposit = 0.000406442 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.258188 second.
+Speed of this run = 425272 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00253822 second.
+Time used for atom-count rebuild = 0.000168105 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (11.305440, 8.934244, 19.727879) with velocity (-0.00000445, -0.00001768, -0.00099983).
+Total number of atoms: 1099
+---------------------------------------------------------------
+
+Time used for deposit = 0.000230242 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.257464 second.
+Speed of this run = 426856 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00258441 second.
+Time used for atom-count rebuild = 0.000398827 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.037064, 10.089409, 19.793747) with velocity (-0.00001425, 0.00002688, -0.00099954).
+Total number of atoms: 1100
+---------------------------------------------------------------
+
+Time used for deposit = 0.00048293 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.257656 second.
+Speed of this run = 426927 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00253646 second.
+Time used for atom-count rebuild = 0.000250128 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.961787, 7.748305, 19.805147) with velocity (0.00013406, 0.00008117, -0.00098764).
+Total number of atoms: 1101
+---------------------------------------------------------------
+
+Time used for deposit = 0.000319704 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.259226 second.
+Speed of this run = 424726 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00259611 second.
+Time used for atom-count rebuild = 0.000259312 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.704669, 9.252137, 19.797867) with velocity (0.00013119, 0.00003659, -0.00099068).
+Total number of atoms: 1102
+---------------------------------------------------------------
+
+Time used for deposit = 0.000326853 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.259168 second.
+Speed of this run = 425207 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00256144 second.
+Time used for atom-count rebuild = 0.000193075 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.064930, 10.494242, 19.831169) with velocity (-0.00006883, 0.00000794, -0.00099760).
+Total number of atoms: 1103
+---------------------------------------------------------------
+
+Time used for deposit = 0.000255345 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.259453 second.
+Speed of this run = 425126 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.0025388 second.
+Time used for atom-count rebuild = 0.000246433 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.906768, 10.762516, 19.790841) with velocity (0.00000274, -0.00000231, -0.00099999).
+Total number of atoms: 1104
+---------------------------------------------------------------
+
+Time used for deposit = 0.00031089 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.258202 second.
+Speed of this run = 427573 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00253756 second.
+Time used for atom-count rebuild = 0.000249097 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.693861, 8.827593, 19.816112) with velocity (-0.00002763, 0.00008970, -0.00099559).
+Total number of atoms: 1105
+---------------------------------------------------------------
+
+Time used for deposit = 0.000313284 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.260112 second.
+Speed of this run = 424817 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00255502 second.
+Time used for atom-count rebuild = 0.000303644 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.015865, 9.964585, 19.791398) with velocity (0.00009035, 0.00002598, -0.00099557).
+Total number of atoms: 1106
+---------------------------------------------------------------
+
+Time used for deposit = 0.000365613 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.261332 second.
+Speed of this run = 423217 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00257131 second.
+Time used for atom-count rebuild = 0.000240345 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.591046, 8.806063, 19.832809) with velocity (0.00004518, 0.00000549, -0.00099896).
+Total number of atoms: 1107
+---------------------------------------------------------------
+
+Time used for deposit = 0.000303016 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.261298 second.
+Speed of this run = 423655 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00258224 second.
+Time used for atom-count rebuild = 0.00020422 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.939018, 9.714357, 19.834890) with velocity (0.00001967, -0.00009006, -0.00099574).
+Total number of atoms: 1108
+---------------------------------------------------------------
+
+Time used for deposit = 0.000325282 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.261375 second.
+Speed of this run = 423912 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00255556 second.
+Time used for atom-count rebuild = 0.000192323 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (6.314599, 8.726313, 19.824513) with velocity (0.00001148, 0.00003298, -0.00099939).
+Total number of atoms: 1109
+---------------------------------------------------------------
+
+Time used for deposit = 0.000269882 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.260846 second.
+Speed of this run = 425154 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.002585 second.
+Time used for atom-count rebuild = 0.000173292 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.951405, 10.222403, 19.794313) with velocity (-0.00000894, 0.00001025, -0.00099991).
+Total number of atoms: 1110
+---------------------------------------------------------------
+
+Time used for deposit = 0.000241424 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.262167 second.
+Speed of this run = 423394 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00259571 second.
+Time used for atom-count rebuild = 0.000173894 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.691263, 9.834142, 19.722560) with velocity (0.00011079, 0.00003178, -0.00099334).
+Total number of atoms: 1111
+---------------------------------------------------------------
+
+Time used for deposit = 0.000244004 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.264224 second.
+Speed of this run = 420476 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00260366 second.
+Time used for atom-count rebuild = 0.000328307 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.116207, 7.811631, 19.590289) with velocity (-0.00014691, -0.00003520, -0.00098852).
+Total number of atoms: 1112
+---------------------------------------------------------------
+
+Time used for deposit = 0.000393448 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.262922 second.
+Speed of this run = 422940 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00257909 second.
+Time used for atom-count rebuild = 0.000178124 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (7.467447, 9.668223, 19.794293) with velocity (0.00014455, 0.00015102, -0.00097790).
+Total number of atoms: 1113
+---------------------------------------------------------------
+
+Time used for deposit = 0.000241167 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.263013 second.
+Speed of this run = 423172 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00257213 second.
+Time used for atom-count rebuild = 0.000329268 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.296330, 8.135618, 19.814720) with velocity (0.00007075, 0.00000121, -0.00099749).
+Total number of atoms: 1114
+---------------------------------------------------------------
+
+Time used for deposit = 0.00039472 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.262816 second.
+Speed of this run = 423871 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00258632 second.
+Time used for atom-count rebuild = 0.000245303 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.306414, 9.470314, 19.727773) with velocity (0.00001540, 0.00000669, -0.00099986).
+Total number of atoms: 1115
+---------------------------------------------------------------
+
+Time used for deposit = 0.000309472 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.26311 second.
+Speed of this run = 423777 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00260194 second.
+Time used for atom-count rebuild = 0.000301337 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.409581, 8.275515, 19.834040) with velocity (0.00007800, 0.00004835, -0.00099578).
+Total number of atoms: 1116
+---------------------------------------------------------------
+
+Time used for deposit = 0.000398948 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.265704 second.
+Speed of this run = 420017 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00261593 second.
+Time used for atom-count rebuild = 0.000179956 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.779130, 6.537906, 19.716828) with velocity (0.00010094, 0.00002523, -0.00099457).
+Total number of atoms: 1117
+---------------------------------------------------------------
+
+Time used for deposit = 0.000256365 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.265499 second.
+Speed of this run = 420717 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00262721 second.
+Time used for atom-count rebuild = 0.000180438 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (10.001591, 8.591013, 19.815740) with velocity (-0.00001511, 0.00002182, -0.00099965).
+Total number of atoms: 1118
+---------------------------------------------------------------
+
+Time used for deposit = 0.000247554 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.265312 second.
+Speed of this run = 421390 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00264604 second.
+Time used for atom-count rebuild = 0.000188633 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.368850, 8.044408, 19.774817) with velocity (-0.00000310, 0.00006443, -0.00099792).
+Total number of atoms: 1119
+---------------------------------------------------------------
+
+Time used for deposit = 0.000256596 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.264984 second.
+Speed of this run = 422290 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00260172 second.
+Time used for atom-count rebuild = 0.00017129 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (7.527472, 7.902241, 19.787270) with velocity (-0.00006918, 0.00010698, -0.00099185).
+Total number of atoms: 1120
+---------------------------------------------------------------
+
+Time used for deposit = 0.000233797 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.264197 second.
+Speed of this run = 423926 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00260379 second.
+Time used for atom-count rebuild = 0.000177298 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.446124, 9.089462, 19.828801) with velocity (0.00001981, 0.00008898, -0.00099584).
+Total number of atoms: 1121
+---------------------------------------------------------------
+
+Time used for deposit = 0.000240694 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.265915 second.
+Speed of this run = 421563 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00262809 second.
+Time used for atom-count rebuild = 0.000269831 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (10.577705, 9.926788, 19.764934) with velocity (-0.00018777, -0.00008942, -0.00097813).
+Total number of atoms: 1122
+---------------------------------------------------------------
+
+Time used for deposit = 0.000334362 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.265436 second.
+Speed of this run = 422701 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00261413 second.
+Time used for atom-count rebuild = 0.000174271 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.658224, 7.015209, 19.698104) with velocity (0.00000604, 0.00000453, -0.00099997).
+Total number of atoms: 1123
+---------------------------------------------------------------
+
+Time used for deposit = 0.000244489 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.266018 second.
+Speed of this run = 422152 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00260618 second.
+Time used for atom-count rebuild = 0.000173861 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.104057, 8.446030, 19.828951) with velocity (0.00001190, -0.00010696, -0.00099419).
+Total number of atoms: 1124
+---------------------------------------------------------------
+
+Time used for deposit = 0.000244653 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.264809 second.
+Speed of this run = 424457 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00259699 second.
+Time used for atom-count rebuild = 0.00017364 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.952579, 9.457679, 19.827118) with velocity (-0.00002386, 0.00008576, -0.00099603).
+Total number of atoms: 1125
+---------------------------------------------------------------
+
+Time used for deposit = 0.000240304 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.266798 second.
+Speed of this run = 421667 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00264412 second.
+Time used for atom-count rebuild = 0.000306894 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.210749, 7.131864, 19.600453) with velocity (0.00000329, -0.00006032, -0.00099817).
+Total number of atoms: 1126
+---------------------------------------------------------------
+
+Time used for deposit = 0.000375934 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.266547 second.
+Speed of this run = 422439 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00264421 second.
+Time used for atom-count rebuild = 0.000176784 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (7.957327, 8.402098, 19.778926) with velocity (0.00000597, -0.00000018, -0.00099998).
+Total number of atoms: 1127
+---------------------------------------------------------------
+
+Time used for deposit = 0.000246667 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.26781 second.
+Speed of this run = 420821 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00263686 second.
+Time used for atom-count rebuild = 0.000175773 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (6.950656, 8.070585, 19.807604) with velocity (0.00009836, -0.00004151, -0.00099428).
+Total number of atoms: 1128
+---------------------------------------------------------------
+
+Time used for deposit = 0.000238704 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.268502 second.
+Speed of this run = 420108 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00261988 second.
+Time used for atom-count rebuild = 0.00027926 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (7.091771, 6.396679, 19.786333) with velocity (0.00002519, 0.00004408, -0.00099871).
+Total number of atoms: 1129
+---------------------------------------------------------------
+
+Time used for deposit = 0.000341784 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.268948 second.
+Speed of this run = 419783 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00265861 second.
+Time used for atom-count rebuild = 0.00017325 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.999773, 9.914262, 19.820571) with velocity (-0.00000652, -0.00001199, -0.00099991).
+Total number of atoms: 1130
+---------------------------------------------------------------
+
+Time used for deposit = 0.000233603 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.267895 second.
+Speed of this run = 421807 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00261787 second.
+Time used for atom-count rebuild = 0.000179964 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (10.803696, 9.836404, 19.835680) with velocity (0.00000938, 0.00004297, -0.00099903).
+Total number of atoms: 1131
+---------------------------------------------------------------
+
+Time used for deposit = 0.000266231 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.267206 second.
+Speed of this run = 423268 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00265402 second.
+Time used for atom-count rebuild = 0.000315775 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.442493, 9.834805, 19.788830) with velocity (0.00008291, -0.00009852, -0.00099168).
+Total number of atoms: 1132
+---------------------------------------------------------------
+
+Time used for deposit = 0.000389193 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.267941 second.
+Speed of this run = 422481 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00266274 second.
+Time used for atom-count rebuild = 0.000259988 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.025332, 8.279505, 19.796757) with velocity (0.00000144, -0.00000245, -0.00100000).
+Total number of atoms: 1133
+---------------------------------------------------------------
+
+Time used for deposit = 0.000331851 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.267439 second.
+Speed of this run = 423648 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00265259 second.
+Time used for atom-count rebuild = 0.000265797 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.410028, 9.581435, 19.813612) with velocity (-0.00000519, -0.00000072, -0.00099999).
+Total number of atoms: 1134
+---------------------------------------------------------------
+
+Time used for deposit = 0.000335295 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.26843 second.
+Speed of this run = 422456 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.0026518 second.
+Time used for atom-count rebuild = 0.000315345 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (11.311585, 8.904689, 19.822324) with velocity (-0.00005698, 0.00006876, -0.00099600).
+Total number of atoms: 1135
+---------------------------------------------------------------
+
+Time used for deposit = 0.000382327 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.269231 second.
+Speed of this run = 421571 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00268543 second.
+Time used for atom-count rebuild = 0.000243137 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.882823, 10.436554, 19.791818) with velocity (-0.00001425, 0.00002393, -0.00099961).
+Total number of atoms: 1136
+---------------------------------------------------------------
+
+Time used for deposit = 0.000308444 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.269778 second.
+Speed of this run = 421087 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00268513 second.
+Time used for atom-count rebuild = 0.000244377 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (10.193663, 8.474335, 19.837045) with velocity (-0.00004431, 0.00001403, -0.00099892).
+Total number of atoms: 1137
+---------------------------------------------------------------
+
+Time used for deposit = 0.000308379 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.268253 second.
+Speed of this run = 423854 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00266962 second.
+Time used for atom-count rebuild = 0.000242227 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.216966, 8.729764, 19.674261) with velocity (-0.00006139, -0.00011796, -0.00099112).
+Total number of atoms: 1138
+---------------------------------------------------------------
+
+Time used for deposit = 0.000305476 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.270004 second.
+Speed of this run = 421475 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00267459 second.
+Time used for atom-count rebuild = 0.000296646 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.838306, 9.189223, 19.826893) with velocity (-0.00009969, -0.00003069, -0.00099454).
+Total number of atoms: 1139
+---------------------------------------------------------------
+
+Time used for deposit = 0.000381564 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.269656 second.
+Speed of this run = 422390 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00265294 second.
+Time used for atom-count rebuild = 0.000177795 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.554686, 8.223259, 19.808815) with velocity (0.00003672, 0.00002714, -0.00099896).
+Total number of atoms: 1140
+---------------------------------------------------------------
+
+Time used for deposit = 0.00025072 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.2722 second.
+Speed of this run = 418809 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00270365 second.
+Time used for atom-count rebuild = 0.000174022 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.806826, 9.005192, 19.779171) with velocity (0.00002359, -0.00006921, -0.00099732).
+Total number of atoms: 1141
+---------------------------------------------------------------
+
+Time used for deposit = 0.000243278 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.270505 second.
+Speed of this run = 421803 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00267634 second.
+Time used for atom-count rebuild = 0.000186548 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.767191, 8.413735, 19.832987) with velocity (0.00000519, -0.00000712, -0.00099996).
+Total number of atoms: 1142
+---------------------------------------------------------------
+
+Time used for deposit = 0.00025613 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.271646 second.
+Speed of this run = 420401 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00271804 second.
+Time used for atom-count rebuild = 0.000262348 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.458502, 8.664428, 19.733541) with velocity (0.00012425, -0.00007801, -0.00098918).
+Total number of atoms: 1143
+---------------------------------------------------------------
+
+Time used for deposit = 0.00032695 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.270484 second.
+Speed of this run = 422576 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00269402 second.
+Time used for atom-count rebuild = 0.000176259 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (10.426090, 8.593670, 19.740340) with velocity (-0.00007099, -0.00003331, -0.00099692).
+Total number of atoms: 1144
+---------------------------------------------------------------
+
+Time used for deposit = 0.000241299 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.271342 second.
+Speed of this run = 421608 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00270079 second.
+Time used for atom-count rebuild = 0.000261534 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.357968, 10.752092, 19.821500) with velocity (0.00001924, 0.00007843, -0.00099673).
+Total number of atoms: 1145
+---------------------------------------------------------------
+
+Time used for deposit = 0.000327545 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.271947 second.
+Speed of this run = 421038 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00268143 second.
+Time used for atom-count rebuild = 0.000175973 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (7.775900, 9.395267, 19.811968) with velocity (-0.00004023, 0.00002448, -0.00099889).
+Total number of atoms: 1146
+---------------------------------------------------------------
+
+Time used for deposit = 0.000252269 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.271262 second.
+Speed of this run = 422470 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00267047 second.
+Time used for atom-count rebuild = 0.000368525 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.644629, 8.307345, 19.818314) with velocity (-0.00010522, -0.00009071, -0.00099030).
+Total number of atoms: 1147
+---------------------------------------------------------------
+
+Time used for deposit = 0.000452669 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.271866 second.
+Speed of this run = 421899 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00267806 second.
+Time used for atom-count rebuild = 0.000249568 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.908613, 8.679089, 19.658720) with velocity (0.00008525, 0.00001449, -0.00099625).
+Total number of atoms: 1148
+---------------------------------------------------------------
+
+Time used for deposit = 0.000322982 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.272583 second.
+Speed of this run = 421156 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00270217 second.
+Time used for atom-count rebuild = 0.000172652 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.563895, 11.083217, 19.835734) with velocity (-0.00003816, -0.00003004, -0.00099882).
+Total number of atoms: 1149
+---------------------------------------------------------------
+
+Time used for deposit = 0.000241006 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.272764 second.
+Speed of this run = 421244 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00267714 second.
+Time used for atom-count rebuild = 0.000171292 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.995104, 9.917608, 19.756390) with velocity (0.00001819, 0.00001748, -0.00099968).
+Total number of atoms: 1150
+---------------------------------------------------------------
+
+Time used for deposit = 0.00023466 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.271886 second.
+Speed of this run = 422971 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00269433 second.
+Time used for atom-count rebuild = 0.000267669 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.130894, 7.069240, 19.791214) with velocity (-0.00001769, -0.00000274, -0.00099984).
+Total number of atoms: 1151
+---------------------------------------------------------------
+
+Time used for deposit = 0.000347732 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.272135 second.
+Speed of this run = 422952 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00269381 second.
+Time used for atom-count rebuild = 0.000147399 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (7.551211, 9.089299, 19.821671) with velocity (0.00007716, -0.00007518, -0.00099418).
+Total number of atoms: 1152
+---------------------------------------------------------------
+
+Time used for deposit = 0.000211256 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.271821 second.
+Speed of this run = 423809 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00270256 second.
+Time used for atom-count rebuild = 0.000168857 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.388768, 9.998170, 19.727736) with velocity (0.00000028, -0.00000023, -0.00100000).
+Total number of atoms: 1153
+---------------------------------------------------------------
+
+Time used for deposit = 0.000231959 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.272825 second.
+Speed of this run = 422616 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00269943 second.
+Time used for atom-count rebuild = 0.000293573 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.553768, 10.094551, 19.741894) with velocity (0.00001932, -0.00000249, -0.00099981).
+Total number of atoms: 1154
+---------------------------------------------------------------
+
+Time used for deposit = 0.000376353 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.27409 second.
+Speed of this run = 421030 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00267847 second.
+Time used for atom-count rebuild = 0.000274796 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (7.749282, 7.681251, 19.729539) with velocity (0.00004965, 0.00004674, -0.00099767).
+Total number of atoms: 1155
+---------------------------------------------------------------
+
+Time used for deposit = 0.000352158 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.273223 second.
+Speed of this run = 422732 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00269489 second.
+Time used for atom-count rebuild = 0.000174125 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.614173, 7.706292, 19.810567) with velocity (-0.00000672, -0.00000988, -0.00099993).
+Total number of atoms: 1156
+---------------------------------------------------------------
+
+Time used for deposit = 0.000242143 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.273859 second.
+Speed of this run = 422115 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00271841 second.
+Time used for atom-count rebuild = 0.00017654 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (7.664207, 8.794613, 19.709182) with velocity (-0.00004916, 0.00003728, -0.00099809).
+Total number of atoms: 1157
+---------------------------------------------------------------
+
+Time used for deposit = 0.00024452 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.272958 second.
+Speed of this run = 423874 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00269193 second.
+Time used for atom-count rebuild = 0.000173609 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (7.371099, 9.827462, 19.787823) with velocity (-0.00001663, -0.00001194, -0.00099979).
+Total number of atoms: 1158
+---------------------------------------------------------------
+
+Time used for deposit = 0.000239247 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.271967 second.
+Speed of this run = 425787 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00271006 second.
+Time used for atom-count rebuild = 0.00025619 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.156243, 9.713202, 19.825927) with velocity (-0.00004093, -0.00000262, -0.00099916).
+Total number of atoms: 1159
+---------------------------------------------------------------
+
+Time used for deposit = 0.000324353 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.273274 second.
+Speed of this run = 424116 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00266761 second.
+Time used for atom-count rebuild = 0.000267249 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.477069, 7.967237, 19.827906) with velocity (-0.00002330, -0.00003325, -0.00099918).
+Total number of atoms: 1160
+---------------------------------------------------------------
+
+Time used for deposit = 0.000331691 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.27396 second.
+Speed of this run = 423420 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00270179 second.
+Time used for atom-count rebuild = 0.000254704 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.126684, 8.433715, 19.752351) with velocity (0.00011348, -0.00008104, -0.00099023).
+Total number of atoms: 1161
+---------------------------------------------------------------
+
+Time used for deposit = 0.000320444 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.274654 second.
+Speed of this run = 422713 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00269907 second.
+Time used for atom-count rebuild = 0.000289391 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.106141, 8.494926, 19.689168) with velocity (0.00002606, 0.00000718, -0.00099963).
+Total number of atoms: 1162
+---------------------------------------------------------------
+
+Time used for deposit = 0.000374346 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.275166 second.
+Speed of this run = 422291 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00276021 second.
+Time used for atom-count rebuild = 0.000171457 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.812148, 8.950861, 19.744554) with velocity (0.00007307, 0.00000995, -0.00099728).
+Total number of atoms: 1163
+---------------------------------------------------------------
+
+Time used for deposit = 0.000244255 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.273516 second.
+Speed of this run = 425204 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00269424 second.
+Time used for atom-count rebuild = 0.000319394 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.678865, 10.860303, 19.803368) with velocity (-0.00002705, -0.00001993, -0.00099944).
+Total number of atoms: 1164
+---------------------------------------------------------------
+
+Time used for deposit = 0.000394475 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.275127 second.
+Speed of this run = 423077 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00272717 second.
+Time used for atom-count rebuild = 0.000248157 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (10.145088, 10.062243, 19.719723) with velocity (-0.00010163, 0.00018669, -0.00097715).
+Total number of atoms: 1165
+---------------------------------------------------------------
+
+Time used for deposit = 0.000317329 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.274272 second.
+Speed of this run = 424761 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00270405 second.
+Time used for atom-count rebuild = 0.000173033 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.793122, 9.164603, 19.436438) with velocity (0.00000150, 0.00000248, -0.00100000).
+Total number of atoms: 1166
+---------------------------------------------------------------
+
+Time used for deposit = 0.00023625 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.276769 second.
+Speed of this run = 421291 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.0027353 second.
+Time used for atom-count rebuild = 0.000171958 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.860716, 8.320651, 19.728365) with velocity (0.00001725, 0.00016761, -0.00098570).
+Total number of atoms: 1167
+---------------------------------------------------------------
+
+Time used for deposit = 0.000233532 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.275723 second.
+Speed of this run = 423251 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00273468 second.
+Time used for atom-count rebuild = 0.000170981 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (7.922999, 8.293344, 19.770100) with velocity (0.00000736, -0.00001659, -0.00099984).
+Total number of atoms: 1168
+---------------------------------------------------------------
+
+Time used for deposit = 0.000235946 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.276862 second.
+Speed of this run = 421871 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00274442 second.
+Time used for atom-count rebuild = 0.000278228 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (10.585004, 6.973762, 19.824065) with velocity (-0.00007928, 0.00005671, -0.00099524).
+Total number of atoms: 1169
+---------------------------------------------------------------
+
+Time used for deposit = 0.000347246 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.276999 second.
+Speed of this run = 422024 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00274938 second.
+Time used for atom-count rebuild = 0.000178827 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (7.702812, 8.404588, 19.822941) with velocity (0.00000135, 0.00001426, -0.00099990).
+Total number of atoms: 1170
+---------------------------------------------------------------
+
+Time used for deposit = 0.000241795 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.276283 second.
+Speed of this run = 423479 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00273573 second.
+Time used for atom-count rebuild = 0.000175317 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.682824, 8.389876, 19.763340) with velocity (-0.00019133, 0.00000544, -0.00098151).
+Total number of atoms: 1171
+---------------------------------------------------------------
+
+Time used for deposit = 0.000240073 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.275953 second.
+Speed of this run = 424348 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00273534 second.
+Time used for atom-count rebuild = 0.000174213 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (7.917491, 10.183682, 19.821457) with velocity (-0.00002569, 0.00003487, -0.00099906).
+Total number of atoms: 1172
+---------------------------------------------------------------
+
+Time used for deposit = 0.000238446 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.276777 second.
+Speed of this run = 423446 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00275821 second.
+Time used for atom-count rebuild = 0.000253037 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (7.879855, 9.415546, 19.819040) with velocity (-0.00000332, 0.00000523, -0.00099998).
+Total number of atoms: 1173
+---------------------------------------------------------------
+
+Time used for deposit = 0.000317627 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.276462 second.
+Speed of this run = 424290 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00272012 second.
+Time used for atom-count rebuild = 0.000254312 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (7.175434, 7.413375, 19.846587) with velocity (-0.00000865, 0.00001547, -0.00099984).
+Total number of atoms: 1174
+---------------------------------------------------------------
+
+Time used for deposit = 0.000320512 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.277713 second.
+Speed of this run = 422738 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.0027512 second.
+Time used for atom-count rebuild = 0.000240983 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.978160, 8.234181, 19.573178) with velocity (-0.00004053, 0.00012282, -0.00099160).
+Total number of atoms: 1175
+---------------------------------------------------------------
+
+Time used for deposit = 0.000306201 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.277401 second.
+Speed of this run = 423574 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00274363 second.
+Time used for atom-count rebuild = 0.000263625 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.249283, 8.414884, 19.782287) with velocity (0.00000425, 0.00000112, -0.00099999).
+Total number of atoms: 1176
+---------------------------------------------------------------
+
+Time used for deposit = 0.000332197 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.277796 second.
+Speed of this run = 423332 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00273984 second.
+Time used for atom-count rebuild = 0.000274857 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.432727, 8.359027, 19.791687) with velocity (0.00003425, 0.00002103, -0.00099919).
+Total number of atoms: 1177
+---------------------------------------------------------------
+
+Time used for deposit = 0.00035791 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.278455 second.
+Speed of this run = 422689 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.0027632 second.
+Time used for atom-count rebuild = 0.000262049 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.816017, 9.781106, 19.843017) with velocity (0.00001939, -0.00000349, -0.00099981).
+Total number of atoms: 1178
+---------------------------------------------------------------
+
+Time used for deposit = 0.000338971 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.27857 second.
+Speed of this run = 422874 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00279306 second.
+Time used for atom-count rebuild = 0.000175162 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.683222, 6.274241, 19.700288) with velocity (-0.00006954, -0.00000836, -0.00099754).
+Total number of atoms: 1179
+---------------------------------------------------------------
+
+Time used for deposit = 0.000245192 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.278144 second.
+Speed of this run = 423881 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00275814 second.
+Time used for atom-count rebuild = 0.000175862 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (7.934729, 8.885942, 19.768796) with velocity (0.00006191, -0.00005862, -0.00099636).
+Total number of atoms: 1180
+---------------------------------------------------------------
+
+Time used for deposit = 0.00024174 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.278401 second.
+Speed of this run = 423849 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00275229 second.
+Time used for atom-count rebuild = 0.000176444 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.612880, 8.107695, 19.739250) with velocity (-0.00005210, 0.00001088, -0.00099858).
+Total number of atoms: 1181
+---------------------------------------------------------------
+
+Time used for deposit = 0.00024183 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.27971 second.
+Speed of this run = 422222 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00276784 second.
+Time used for atom-count rebuild = 0.0001743 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (10.020204, 8.932154, 19.707856) with velocity (-0.00018462, -0.00002395, -0.00098252).
+Total number of atoms: 1182
+---------------------------------------------------------------
+
+Time used for deposit = 0.00023651 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.279711 second.
+Speed of this run = 422578 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00276135 second.
+Time used for atom-count rebuild = 0.000181291 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.240992, 7.872482, 19.821677) with velocity (0.00004459, -0.00003273, -0.00099847).
+Total number of atoms: 1183
+---------------------------------------------------------------
+
+Time used for deposit = 0.000245603 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.279933 second.
+Speed of this run = 422602 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00276406 second.
+Time used for atom-count rebuild = 0.000179823 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (10.496185, 10.268532, 19.768180) with velocity (-0.00004538, 0.00002654, -0.00099862).
+Total number of atoms: 1184
+---------------------------------------------------------------
+
+Time used for deposit = 0.000261466 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.279371 second.
+Speed of this run = 423809 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00276979 second.
+Time used for atom-count rebuild = 0.000376771 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (7.951875, 9.762681, 19.774775) with velocity (-0.00001696, -0.00006912, -0.00099746).
+Total number of atoms: 1185
+---------------------------------------------------------------
+
+Time used for deposit = 0.000453629 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.280245 second.
+Speed of this run = 422845 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00275378 second.
+Time used for atom-count rebuild = 0.000179065 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.173426, 7.943723, 19.840385) with velocity (-0.00002380, -0.00000880, -0.00099968).
+Total number of atoms: 1186
+---------------------------------------------------------------
+
+Time used for deposit = 0.000249305 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.281398 second.
+Speed of this run = 421468 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00279154 second.
+Time used for atom-count rebuild = 0.000178119 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.772939, 8.628292, 19.692068) with velocity (0.00000123, 0.00004896, -0.00099880).
+Total number of atoms: 1187
+---------------------------------------------------------------
+
+Time used for deposit = 0.000245448 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.279937 second.
+Speed of this run = 424024 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00280073 second.
+Time used for atom-count rebuild = 0.000324402 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.603970, 10.082619, 19.779636) with velocity (-0.00001982, 0.00004662, -0.00099872).
+Total number of atoms: 1188
+---------------------------------------------------------------
+
+Time used for deposit = 0.000389817 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.282037 second.
+Speed of this run = 421221 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00278506 second.
+Time used for atom-count rebuild = 0.000176418 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.276004, 10.042668, 19.782617) with velocity (-0.00002461, -0.00001508, -0.00099958).
+Total number of atoms: 1189
+---------------------------------------------------------------
+
+Time used for deposit = 0.000241319 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.280561 second.
+Speed of this run = 423794 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00276755 second.
+Time used for atom-count rebuild = 0.000316641 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.131489, 6.731383, 19.812929) with velocity (0.00007214, -0.00006010, -0.00099558).
+Total number of atoms: 1190
+---------------------------------------------------------------
+
+Time used for deposit = 0.000381636 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.281206 second.
+Speed of this run = 423178 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00277434 second.
+Time used for atom-count rebuild = 0.000288033 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.464157, 10.015769, 19.792569) with velocity (0.00004366, 0.00002084, -0.00099883).
+Total number of atoms: 1191
+---------------------------------------------------------------
+
+Time used for deposit = 0.000375695 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.282294 second.
+Speed of this run = 421900 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00279471 second.
+Time used for atom-count rebuild = 0.000288013 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (10.762283, 10.426554, 19.815296) with velocity (-0.00006103, 0.00006534, -0.00099600).
+Total number of atoms: 1192
+---------------------------------------------------------------
+
+Time used for deposit = 0.000365321 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.28331 second.
+Speed of this run = 420740 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00277773 second.
+Time used for atom-count rebuild = 0.000250098 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.197267, 9.597659, 19.775204) with velocity (-0.00001920, -0.00008921, -0.00099583).
+Total number of atoms: 1193
+---------------------------------------------------------------
+
+Time used for deposit = 0.000319924 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.281166 second.
+Speed of this run = 424304 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00280244 second.
+Time used for atom-count rebuild = 0.00026938 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (7.831417, 8.596644, 19.814444) with velocity (0.00000767, -0.00000396, -0.00099996).
+Total number of atoms: 1194
+---------------------------------------------------------------
+
+Time used for deposit = 0.000338278 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.284167 second.
+Speed of this run = 420176 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00280948 second.
+Time used for atom-count rebuild = 0.000249468 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.636661, 9.903992, 19.781969) with velocity (-0.00001112, -0.00000071, -0.00099994).
+Total number of atoms: 1195
+---------------------------------------------------------------
+
+Time used for deposit = 0.000316475 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.282148 second.
+Speed of this run = 423537 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00276151 second.
+Time used for atom-count rebuild = 0.000258143 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.770495, 6.530413, 19.804787) with velocity (-0.00005095, 0.00004368, -0.00099775).
+Total number of atoms: 1196
+---------------------------------------------------------------
+
+Time used for deposit = 0.000324908 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.283069 second.
+Speed of this run = 422512 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00280904 second.
+Time used for atom-count rebuild = 0.000178612 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.876533, 8.759701, 19.834567) with velocity (-0.00004350, 0.00010340, -0.00099369).
+Total number of atoms: 1197
+---------------------------------------------------------------
+
+Time used for deposit = 0.000243747 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.282103 second.
+Speed of this run = 424313 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00280125 second.
+Time used for atom-count rebuild = 0.000307965 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (9.715379, 9.330441, 19.790056) with velocity (0.00000149, -0.00001764, -0.00099984).
+Total number of atoms: 1198
+---------------------------------------------------------------
+
+Time used for deposit = 0.0003736 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.283477 second.
+Speed of this run = 422610 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.00281684 second.
+Time used for atom-count rebuild = 0.000271701 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (8.271153, 9.048719, 19.746950) with velocity (-0.00000564, -0.00000196, -0.00099998).
+Total number of atoms: 1199
+---------------------------------------------------------------
+
+Time used for deposit = 0.000362916 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.282758 second.
+Speed of this run = 424038 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 0.002784 second.
+Time used for atom-count rebuild = 0.000173542 second.
+
+---------------------------------------------------------------
+Deposited 1 atom of type C at (7.023727, 9.778528, 19.755980) with velocity (-0.00003657, -0.00004284, -0.00099841).
+Total number of atoms: 1200
+---------------------------------------------------------------
+
+Time used for deposit = 0.000241761 second.
+Run 100 steps.
+    10 steps completed.
+    20 steps completed.
+    30 steps completed.
+    40 steps completed.
+    50 steps completed.
+    60 steps completed.
+    70 steps completed.
+    80 steps completed.
+    90 steps completed.
+    100 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.282359 second.
+Speed of this run = 424991 atom*step/second.
+---------------------------------------------------------------
+
+
+---------------------------------------------------------------
+Finished executing the commands in run.in.
+---------------------------------------------------------------
+
+
+---------------------------------------------------------------
+Time used = 52.838263 s.
+---------------------------------------------------------------
+
+
+---------------------------------------------------------------
+Finished running GPUMD.
+---------------------------------------------------------------
+

@@ -1,0 +1,175 @@
+
+***************************************************************
+*                 Welcome to use GPUMD                        *
+*     (Graphics Processing Units Molecular Dynamics)          *
+*                     version 4.5                             *
+*              This is the gpumd executable                   *
+***************************************************************
+
+
+---------------------------------------------------------------
+Compiling options:
+---------------------------------------------------------------
+
+DEBUG is off: Use different PRNG seeds for different runs.
+
+---------------------------------------------------------------
+GPU information:
+---------------------------------------------------------------
+
+number of GPUs = 1
+Device id:                   0
+    Device name:             NVIDIA A100-PCIE-40GB
+    Compute capability:      8.0
+    Amount of global memory: 39.5163 GB
+    Number of SMs:           108
+
+---------------------------------------------------------------
+Started running GPUMD.
+---------------------------------------------------------------
+
+
+---------------------------------------------------------------
+Started initializing positions and related parameters.
+---------------------------------------------------------------
+
+Number of atoms is 8.
+Use periodic boundary conditions along x.
+Use periodic boundary conditions along y.
+Use periodic boundary conditions along z.
+Box matrix h = [a, b, c] is
+    3.5700000000e+00    0.0000000000e+00    0.0000000000e+00
+    0.0000000000e+00    3.5700000000e+00    0.0000000000e+00
+    0.0000000000e+00    0.0000000000e+00    3.5700000000e+00
+Inverse box matrix g = inv(h) is
+    2.8011204482e-01    0.0000000000e+00    0.0000000000e+00
+    0.0000000000e+00    2.8011204482e-01    0.0000000000e+00
+    0.0000000000e+00    0.0000000000e+00    2.8011204482e-01
+Do not specify initial velocities here.
+Have no grouping method.
+There is only one atom type.
+    8 atoms of type 0.
+Initialized velocities with default T = 300 K.
+
+---------------------------------------------------------------
+Finished initializing positions and related parameters.
+---------------------------------------------------------------
+
+
+---------------------------------------------------------------
+Started executing the commands in run.in.
+---------------------------------------------------------------
+
+Time used for CPU sync = 3.5238e-05 second.
+Time used for atom-count rebuild = 0.000131129 second.
+
+---------------------------------------------------------------
+Replicate cell by 5 * 5 * 5.
+Number of atoms is 1000.
+There is only one atom type.
+    1000 atoms of type 0.
+---------------------------------------------------------------
+
+Use the NEP3 potential with 1 atom type.
+    type 0 (C with Z = 6).
+    radial cutoff = 4.2 A.
+    angular cutoff = 3.7 A.
+    MN_radial = 80.
+    enlarged MN_radial = 100.
+    enlarged MN_angular = 59.
+    n_max_radial = 10.
+    n_max_angular = 8.
+    basis_size_radial = 10.
+    basis_size_angular = 8.
+    l_max_3body = 4.
+    l_max_4body = 2.
+    l_max_5body = 1.
+    ANN = 65-100-1.
+    number of neural network parameters = 6701.
+    number of descriptor parameters = 202.
+    total number of parameters = 6903.
+Initialized velocities with input T = 300 K.
+Time step for this run is 1 fs.
+Use NVE ensemble for this run.
+Time used for CPU sync = 3.5295e-05 second.
+
+---------------------------------------------------------------
+deposit gaussian atom C
+Deposition basis:
+  u = 1.00000000 0.00000000 0.00000000
+  v = -0.00000000 1.00000000 0.00000000
+  n = -0.00000000 -0.00000000 1.00000000
+Time used for atom-count rebuild = 0.000398446 second.
+Deposited 1 atoms. Total number of atoms: 1001
+---------------------------------------------------------------
+
+Time used for deposit = 0.000543681 second.
+Dump thermo every 1 steps.
+Run 1 steps.
+NEP large-box cells = 8 x 8 x 8 (512), centers = -1 / 1001
+    1 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.0120865 second.
+Speed of this run = 82819.7 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 3.6369e-05 second.
+
+---------------------------------------------------------------
+deposit gaussian atom C
+Deposition basis:
+  u = 1.00000000 0.00000000 0.00000000
+  v = -0.00000000 1.00000000 0.00000000
+  n = -0.00000000 -0.00000000 1.00000000
+Time used for atom-count rebuild = 0.000904444 second.
+Deposited 1 atoms. Total number of atoms: 1002
+---------------------------------------------------------------
+
+Time used for deposit = 0.00102376 second.
+Dump thermo every 1 steps.
+Run 1 steps.
+    1 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.00785493 second.
+Speed of this run = 127563 atom*step/second.
+---------------------------------------------------------------
+
+Time used for CPU sync = 3.3845e-05 second.
+
+---------------------------------------------------------------
+deposit gaussian atom C
+Deposition basis:
+  u = 1.00000000 0.00000000 0.00000000
+  v = -0.00000000 1.00000000 0.00000000
+  n = -0.00000000 -0.00000000 1.00000000
+Time used for atom-count rebuild = 0.000226718 second.
+Deposited 1 atoms. Total number of atoms: 1003
+---------------------------------------------------------------
+
+Time used for deposit = 0.000321542 second.
+Dump thermo every 1 steps.
+Run 1 steps.
+    1 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.00804691 second.
+Speed of this run = 124644 atom*step/second.
+---------------------------------------------------------------
+
+
+---------------------------------------------------------------
+Finished executing the commands in run.in.
+---------------------------------------------------------------
+
+
+---------------------------------------------------------------
+Time used = 0.034631 s.
+---------------------------------------------------------------
+
+
+---------------------------------------------------------------
+Finished running GPUMD.
+---------------------------------------------------------------
+

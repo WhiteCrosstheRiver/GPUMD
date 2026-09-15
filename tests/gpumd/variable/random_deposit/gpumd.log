@@ -1,0 +1,238 @@
+
+***************************************************************
+*                 Welcome to use GPUMD                        *
+*     (Graphics Processing Units Molecular Dynamics)          *
+*                     version 4.5                             *
+*              This is the gpumd executable                   *
+***************************************************************
+
+
+---------------------------------------------------------------
+Compiling options:
+---------------------------------------------------------------
+
+DEBUG is off: Use different PRNG seeds for different runs.
+
+---------------------------------------------------------------
+GPU information:
+---------------------------------------------------------------
+
+number of GPUs = 1
+Device id:                   0
+    Device name:             NVIDIA A100-PCIE-40GB
+    Compute capability:      8.0
+    Amount of global memory: 39.5163 GB
+    Number of SMs:           108
+
+---------------------------------------------------------------
+Started running GPUMD.
+---------------------------------------------------------------
+
+
+---------------------------------------------------------------
+Started initializing positions and related parameters.
+---------------------------------------------------------------
+
+Number of atoms is 8.
+Use periodic boundary conditions along x.
+Use periodic boundary conditions along y.
+Use periodic boundary conditions along z.
+Box matrix h = [a, b, c] is
+    3.5700000000e+00    0.0000000000e+00    0.0000000000e+00
+    0.0000000000e+00    3.5700000000e+00    0.0000000000e+00
+    0.0000000000e+00    0.0000000000e+00    3.5700000000e+00
+Inverse box matrix g = inv(h) is
+    2.8011204482e-01    0.0000000000e+00    0.0000000000e+00
+    0.0000000000e+00    2.8011204482e-01    0.0000000000e+00
+    0.0000000000e+00    0.0000000000e+00    2.8011204482e-01
+Do not specify initial velocities here.
+Have no grouping method.
+There is only one atom type.
+    8 atoms of type 0.
+Initialized velocities with default T = 300 K.
+
+---------------------------------------------------------------
+Finished initializing positions and related parameters.
+---------------------------------------------------------------
+
+
+---------------------------------------------------------------
+Started executing the commands in run.in.
+---------------------------------------------------------------
+
+Time used for CPU sync = 3.4121e-05 second.
+Time used for atom-count rebuild = 0.000131226 second.
+
+---------------------------------------------------------------
+Replicate cell by 5 * 5 * 5.
+Number of atoms is 1000.
+There is only one atom type.
+    1000 atoms of type 0.
+---------------------------------------------------------------
+
+Use the NEP3 potential with 1 atom type.
+    type 0 (C with Z = 6).
+    radial cutoff = 4.2 A.
+    angular cutoff = 3.7 A.
+    MN_radial = 80.
+    enlarged MN_radial = 100.
+    enlarged MN_angular = 59.
+    n_max_radial = 10.
+    n_max_angular = 8.
+    basis_size_radial = 10.
+    basis_size_angular = 8.
+    l_max_3body = 4.
+    l_max_4body = 2.
+    l_max_5body = 1.
+    ANN = 65-100-1.
+    number of neural network parameters = 6701.
+    number of descriptor parameters = 202.
+    total number of parameters = 6903.
+Initialized velocities with input T = 300 K.
+Time step for this run is 1 fs.
+Use NVE ensemble for this run.
+Equal-style variable rx equal random(0,lx,7)
+Equal-style variable ry equal random(0,ly,7)
+Equal-style variable cx equal 4.05800248812002
+Equal-style variable cy equal 5.69365426642391
+Time used for CPU sync = 3.4838e-05 second.
+
+---------------------------------------------------------------
+deposit gaussian atom C
+Deposition basis:
+  u = 1.00000000 0.00000000 0.00000000
+  v = -0.00000000 1.00000000 0.00000000
+  n = -0.00000000 -0.00000000 1.00000000
+Time used for atom-count rebuild = 0.000401134 second.
+Deposited 1 atoms. Total number of atoms: 1001
+---------------------------------------------------------------
+
+Time used for deposit = 0.000558706 second.
+Run 1 steps.
+NEP large-box cells = 8 x 8 x 8 (512), centers = -1 / 1001
+    1 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.00828864 second.
+Speed of this run = 120768 atom*step/second.
+---------------------------------------------------------------
+
+Equal-style variable cx equal 17.4612786974235
+Equal-style variable cy equal 8.13219060494188
+Time used for CPU sync = 0.00376403 second.
+
+---------------------------------------------------------------
+deposit gaussian atom C
+Deposition basis:
+  u = 1.00000000 0.00000000 0.00000000
+  v = -0.00000000 1.00000000 0.00000000
+  n = -0.00000000 -0.00000000 1.00000000
+Time used for atom-count rebuild = 0.000927254 second.
+Deposited 1 atoms. Total number of atoms: 1002
+---------------------------------------------------------------
+
+Time used for deposit = 0.0010391 second.
+Run 1 steps.
+    1 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.0040606 second.
+Speed of this run = 246762 atom*step/second.
+---------------------------------------------------------------
+
+Equal-style variable cx equal 5.49802789495026
+Equal-style variable cy equal 4.71009450800767
+Time used for CPU sync = 0.0038549 second.
+
+---------------------------------------------------------------
+deposit gaussian atom C
+Deposition basis:
+  u = 1.00000000 0.00000000 0.00000000
+  v = -0.00000000 1.00000000 0.00000000
+  n = -0.00000000 -0.00000000 1.00000000
+Time used for atom-count rebuild = 0.000219631 second.
+Deposited 1 atoms. Total number of atoms: 1003
+---------------------------------------------------------------
+
+Time used for deposit = 0.000313884 second.
+Run 1 steps.
+    1 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.00403423 second.
+Speed of this run = 248623 atom*step/second.
+---------------------------------------------------------------
+
+Equal-style variable cx equal 1.54837031904492
+Equal-style variable cy equal 7.48579396209356
+Time used for CPU sync = 0.0039537 second.
+
+---------------------------------------------------------------
+deposit gaussian atom C
+Deposition basis:
+  u = 1.00000000 0.00000000 0.00000000
+  v = -0.00000000 1.00000000 0.00000000
+  n = -0.00000000 -0.00000000 1.00000000
+Time used for atom-count rebuild = 0.000203163 second.
+Deposited 1 atoms. Total number of atoms: 1004
+---------------------------------------------------------------
+
+Time used for deposit = 0.00027992 second.
+Run 1 steps.
+    1 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.00416098 second.
+Speed of this run = 241289 atom*step/second.
+---------------------------------------------------------------
+
+Equal-style variable cx equal 0.283999911041845
+Equal-style variable cy equal 9.4206015242317
+Time used for CPU sync = 0.00405456 second.
+
+---------------------------------------------------------------
+deposit gaussian atom C
+Deposition basis:
+  u = 1.00000000 0.00000000 0.00000000
+  v = -0.00000000 1.00000000 0.00000000
+  n = -0.00000000 -0.00000000 1.00000000
+Time used for atom-count rebuild = 0.000205898 second.
+Deposited 1 atoms. Total number of atoms: 1005
+---------------------------------------------------------------
+
+Time used for deposit = 0.000279452 second.
+Run 1 steps.
+    1 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.00418663 second.
+Speed of this run = 240050 atom*step/second.
+---------------------------------------------------------------
+
+Dump extended XYZ.
+    for the whole system.
+    every 1 steps.
+    into file after.xyz.
+Run 1 steps.
+    1 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.0134733 second.
+Speed of this run = 74592 atom*step/second.
+---------------------------------------------------------------
+
+
+---------------------------------------------------------------
+Finished executing the commands in run.in.
+---------------------------------------------------------------
+
+
+---------------------------------------------------------------
+Time used = 0.061530 s.
+---------------------------------------------------------------
+
+
+---------------------------------------------------------------
+Finished running GPUMD.
+---------------------------------------------------------------
+

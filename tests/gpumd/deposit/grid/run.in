@@ -1,0 +1,6 @@
+potential       ../../../../potentials/nep/C_2022_NEP3.txt
+time_step       0.0
+ensemble        nve
+deposit grid atom C number all region 0 1.785 0 1.785 spacing 1.785 1.785 direction axis -z surface fixed 20 velocity constant 0.001
+dump_xyz        -1 0 1 after.xyz
+run             1

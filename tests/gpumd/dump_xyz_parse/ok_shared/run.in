@@ -1,0 +1,5 @@
+potential       ../../../../potentials/lj/Ar_10A.txt
+time_step       0.0
+ensemble        nve
+dump_xyz        -1 0 1 out.xyz volume 3.0 128 pressure
+run             1

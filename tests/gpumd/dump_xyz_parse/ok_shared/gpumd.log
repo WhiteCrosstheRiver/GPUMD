@@ -1,0 +1,98 @@
+
+***************************************************************
+*                 Welcome to use GPUMD                        *
+*     (Graphics Processing Units Molecular Dynamics)          *
+*                     version 4.5                             *
+*              This is the gpumd executable                   *
+***************************************************************
+
+
+---------------------------------------------------------------
+Compiling options:
+---------------------------------------------------------------
+
+DEBUG is off: Use different PRNG seeds for different runs.
+
+---------------------------------------------------------------
+GPU information:
+---------------------------------------------------------------
+
+number of GPUs = 1
+Device id:                   0
+    Device name:             NVIDIA A100-PCIE-40GB
+    Compute capability:      8.0
+    Amount of global memory: 39.5163 GB
+    Number of SMs:           108
+
+---------------------------------------------------------------
+Started running GPUMD.
+---------------------------------------------------------------
+
+
+---------------------------------------------------------------
+Started initializing positions and related parameters.
+---------------------------------------------------------------
+
+Number of atoms is 2.
+Use periodic boundary conditions along x.
+Use periodic boundary conditions along y.
+Use periodic boundary conditions along z.
+Box matrix h = [a, b, c] is
+    4.0000000000e+01    0.0000000000e+00    0.0000000000e+00
+    0.0000000000e+00    4.0000000000e+01    0.0000000000e+00
+    0.0000000000e+00    0.0000000000e+00    4.0000000000e+01
+Inverse box matrix g = inv(h) is
+    2.5000000000e-02    0.0000000000e+00    0.0000000000e+00
+    0.0000000000e+00    2.5000000000e-02    0.0000000000e+00
+    0.0000000000e+00    0.0000000000e+00    2.5000000000e-02
+Do not specify initial velocities here.
+Have no grouping method.
+There is only one atom type.
+    2 atoms of type 0.
+Initialized velocities with default T = 300 K.
+
+---------------------------------------------------------------
+Finished initializing positions and related parameters.
+---------------------------------------------------------------
+
+
+---------------------------------------------------------------
+Started executing the commands in run.in.
+---------------------------------------------------------------
+
+Use 1-element LJ potential with elements:
+ Ar
+Time step for this run is 0 fs.
+Use NVE ensemble for this run.
+Dump extended XYZ.
+    for the whole system.
+    every 1 steps.
+    into file out.xyz.
+    has ball-restricted Voronoi volume.
+        R = 3 Angstrom.
+        directions = 128.
+    has per-atom and box pressure.
+Run 1 steps.
+    Voronoi volume: neighbor 0.404 ms, kernel+copy 0.052 ms (N=2, M=128, maxNN=0)
+    1 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.00310026 second.
+Speed of this run = 645.108 atom*step/second.
+---------------------------------------------------------------
+
+
+---------------------------------------------------------------
+Finished executing the commands in run.in.
+---------------------------------------------------------------
+
+
+---------------------------------------------------------------
+Time used = 0.003981 s.
+---------------------------------------------------------------
+
+
+---------------------------------------------------------------
+Finished running GPUMD.
+---------------------------------------------------------------
+

@@ -1,0 +1,98 @@
+
+***************************************************************
+*                 Welcome to use GPUMD                        *
+*     (Graphics Processing Units Molecular Dynamics)          *
+*                     version 4.5                             *
+*              This is the gpumd executable                   *
+***************************************************************
+
+
+---------------------------------------------------------------
+Compiling options:
+---------------------------------------------------------------
+
+DEBUG is off: Use different PRNG seeds for different runs.
+
+---------------------------------------------------------------
+GPU information:
+---------------------------------------------------------------
+
+number of GPUs = 1
+Device id:                   0
+    Device name:             NVIDIA A100-PCIE-40GB
+    Compute capability:      8.0
+    Amount of global memory: 39.5163 GB
+    Number of SMs:           108
+
+---------------------------------------------------------------
+Started running GPUMD.
+---------------------------------------------------------------
+
+
+---------------------------------------------------------------
+Started initializing positions and related parameters.
+---------------------------------------------------------------
+
+Number of atoms is 11.
+Use periodic boundary conditions along x.
+Use periodic boundary conditions along y.
+Use periodic boundary conditions along z.
+Box matrix h = [a, b, c] is
+    3.5700000000e+00    0.0000000000e+00    0.0000000000e+00
+    0.0000000000e+00    3.5700000000e+00    0.0000000000e+00
+    0.0000000000e+00    0.0000000000e+00    4.0000000000e+01
+Inverse box matrix g = inv(h) is
+    2.8011204482e-01    0.0000000000e+00    0.0000000000e+00
+    0.0000000000e+00    2.8011204482e-01    0.0000000000e+00
+    0.0000000000e+00    0.0000000000e+00    2.5000000000e-02
+Do not specify initial velocities here.
+Have no grouping method.
+There is only one atom type.
+    11 atoms of type 0.
+Initialized velocities with default T = 300 K.
+
+---------------------------------------------------------------
+Finished initializing positions and related parameters.
+---------------------------------------------------------------
+
+
+---------------------------------------------------------------
+Started executing the commands in run.in.
+CUDA Error:
+    File:       ./utilities/gpu_vector.cuh
+    Line:       80
+    Error code: 1
+    Error text: invalid argument
+---------------------------------------------------------------
+
+Use the NEP3 potential with 1 atom type.
+    type 0 (C with Z = 6).
+    radial cutoff = 4.2 A.
+    angular cutoff = 3.7 A.
+    MN_radial = 80.
+    enlarged MN_radial = 100.
+    enlarged MN_angular = 59.
+    n_max_radial = 10.
+    n_max_angular = 8.
+    basis_size_radial = 10.
+    basis_size_angular = 8.
+    l_max_3body = 4.
+    l_max_4body = 2.
+    l_max_5body = 1.
+    ANN = 65-100-1.
+    number of neural network parameters = 6701.
+    number of descriptor parameters = 202.
+    total number of parameters = 6903.
+Time step for this run is 0 fs.
+Use NVE ensemble for this run.
+Time used for CPU sync = 5.9e-08 second.
+
+---------------------------------------------------------------
+Deleting isolated atoms.
+Cutoff = 2.900000
+Condition: coord X < 2
+Mode = selected (matching atoms and neighbors of type C).
+Candidate types: C
+Number of atoms to delete: 3
+---------------------------------------------------------------
+
