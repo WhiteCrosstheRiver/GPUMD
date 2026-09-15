@@ -1,6 +1,6 @@
 potential       ../../../../potentials/nep/C_2022_NEP3.txt
 time_step       0.0
 ensemble        nve
-deposit C number 5 velocity -0.001 0.001 -0.001 0.001 -0.002 -0.001 position 0 3.57 0 3.57 20 30
+deposit random atom C number 5 region 0 3.57 0 3.57 direction axis -z surface fixed 25 velocity constant 0.001 seed 1
 dump_xyz        -1 0 1 after.xyz
 run             1

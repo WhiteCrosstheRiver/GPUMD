@@ -8,7 +8,7 @@ variable ry equal random(0,ly,7)
 for p range 1 5
     variable cx equal ${rx}
     variable cy equal ${ry}
-    deposit C number 1 position gaussian ${cx} ${cy} 1.0 velocity gaussian 0.001 5 surface local 5.0 offset antivel 2.0
+    deposit gaussian atom C number 1 origin ${cx} ${cy} sigma 1.0 direction axis -z surface local radius 5.0 gap 2.0 spread gaussian 5 velocity constant 0.001 seed 1
     run 1
 end
 dump_xyz -1 0 1 after.xyz

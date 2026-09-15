@@ -56,9 +56,9 @@ Random species (binomial, not a fixed 50/50 count)::
   for p range 1 100
       variable u equal random(0,1,12345)
       if ${u} < 0.5
-          deposit Si number 1 position gaussian 0 0 6.0 velocity gaussian 0.015 5 surface local 5.0 offset antivel 2.5
+          deposit gaussian atom Si number 1 origin 0 0 sigma 6.0 direction axis -z surface local radius 5.0 gap 2.5 spread gaussian 5 velocity constant 0.015 seed 12345
       else
-          deposit Ge number 1 position gaussian 0 0 6.0 velocity gaussian 0.015 5 surface local 5.0 offset antivel 2.5
+          deposit gaussian atom Ge number 1 origin 0 0 sigma 6.0 direction axis -z surface local radius 5.0 gap 2.5 spread gaussian 5 velocity constant 0.015 seed 12345
       end
       run 100
   end
@@ -67,9 +67,9 @@ String compare with a for-loop value::
 
   for sp values Si Ge
       if ${sp} == Si
-          deposit Si position gaussian 0 0 6.0 velocity gaussian 0.015 5 surface local 5.0 offset antivel 2.5
+          deposit gaussian atom Si number 1 origin 0 0 sigma 6.0 direction axis -z surface local radius 5.0 gap 2.5 spread gaussian 5 velocity constant 0.015 seed 12345
       else
-          deposit Ge position gaussian 0 0 6.0 velocity gaussian 0.015 5 surface local 5.0 offset antivel 2.5
+          deposit gaussian atom Ge number 1 origin 0 0 sigma 6.0 direction axis -z surface local radius 5.0 gap 2.5 spread gaussian 5 velocity constant 0.015 seed 12345
       end
       run 100
   end

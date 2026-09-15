@@ -37,7 +37,7 @@ This is the LAMMPS ``$`` / ``v_`` split.
 * ``${name}`` and ``$(formula)`` are expanded **before** the original command parser runs. The command only sees a number string. For a for-loop name, ``${i}`` is the current string. For an equal-style name, ``${x}`` evaluates the formula **now** and freezes that number.
 * ``v_name`` is **not** expanded by the control layer. Only commands that accept a delayed slot evaluate it, and they do so at use time.
 
-``deposit`` V1 delayed slots are ``position <x> <y> <z>`` and ``velocity <vx> <vy> <vz>``. ``position gaussian`` / ``velocity gaussian`` arguments must still be numbers or ``${}``.
+``deposit`` numeric values accept delayed ``v_name`` tokens (``origin``, ``region``, ``surface``, ``velocity``, and so on). Each token is evaluated once when that ``deposit`` command runs.
 
 Examples
 --------
@@ -48,8 +48,8 @@ Snapshot vs live box length::
   variable L0 equal ${tmp}
   variable L1 equal v_tmp
   change_box 1.0 0 0
-  deposit C ${L0} 0 20 0 0 -0.001
-  deposit C v_L1 0 20 0 0 -0.001
+  deposit point atom C origin ${L0} 0 direction axis -z surface fixed 20 velocity constant 0.001
+  deposit point atom C origin v_L1 0 direction axis -z surface fixed 20 velocity constant 0.001
 
 After ``change_box``, ``${L0}`` is still the original ``lx``; ``v_L1`` follows the new ``lx``.
 
@@ -58,15 +58,15 @@ Random XY in one pulse (one GPU rebuild)::
   variable rx equal random(0,lx,12345)
   variable ry equal random(0,ly,12345)
   for p range 1 500
-      deposit Si number 64 position gaussian v_rx v_ry 0 velocity gaussian 0.015 5 surface local 5.0 offset antivel 2.5
+      deposit gaussian atom Si number 64 origin v_rx v_ry sigma 0 direction axis -z surface local radius 5.0 gap 2.5 spread gaussian 5 velocity constant 0.015 seed 12345
       run 400
   end
 
-Do **not** write ``position gaussian ${rx} ${ry} ...`` with ``number > 1``: ``${rx}`` is one number, so every atom in that pulse sits at the same XY.
+Do **not** write ``origin ${rx} ${ry}`` with ``number > 1``: ``${rx}`` is one number, so every entity in that pulse uses the same center.
 
 Anonymous immediate formula::
 
-  deposit C $(lx/2) $(ly/2) 20 0 0 -0.001
+  deposit point atom C origin $(lx/2) $(ly/2) direction axis -z surface fixed 20 velocity constant 0.001
 
 Caveats
 -------

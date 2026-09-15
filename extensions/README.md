@@ -1,6 +1,6 @@
 # GPUMD extensions
 
-`src/` is the official GPUMD core. `extensions/` holds deposition-specific algorithms. Samplers, surface query, and connectivity BFS are header-only and included from `deposit.cu` / `delete.cu`.
+`src/` is the official GPUMD core. `extensions/` holds deposition-specific algorithms. Connectivity BFS is header-only and included from `delete.cu`. The previous z-only Gaussian/surface headers are unused by the new `deposit` command.
 
 ## Command vs algorithm
 
@@ -18,7 +18,7 @@ Do not port the old Python dump→parse→BFS→write-xyz→restart loop. Use:
 
 ```text
 for i range 1 500
-    deposit Ge position gaussian 0 0 8.33 velocity gaussian 0.007 5 surface local 5.0 offset antivel 2.6
+    deposit gaussian atom Ge number 1 origin 0 0 sigma 8.33 direction axis -z surface local radius 5.0 gap 2.6 spread gaussian 5 velocity constant 0.007 seed 1
     run 100
 end
 ```

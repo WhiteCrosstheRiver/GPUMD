@@ -5,6 +5,6 @@ time_step       1.0
 ensemble        nve
 
 delete disconnected cutoff 2.9
-deposit C 3.57 3.57 50.0 0.0 0.0 0.0
+deposit point atom C origin 3.57 3.57 direction axis -z surface fixed 50.0 velocity constant 0.0
 delete disconnected cutoff 2.9
 run 1

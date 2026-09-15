@@ -5,9 +5,9 @@
 :attr:`deposit`
 ===============
 
-This keyword inserts atom(s) into the current configuration.
+This keyword inserts atom(s) or molecule(s) into the current configuration.
 
-It is meant for special simulations that grow or inject atoms during MD, such as molecular-beam or cluster deposition.
+It is meant for special simulations that grow or inject atoms during MD, such as molecular-beam deposition.
 Ordinary MD simulations do not need this keyword.
 
 GPUMD does not support ``\`` line continuation; write one command on one line.
@@ -15,77 +15,150 @@ GPUMD does not support ``\`` line continuation; write one command on one line.
 Syntax
 ------
 
-There are three forms.
+::
 
-Insert one atom at a given position and velocity::
+  deposit <style> <entity> <source> keyword values ...
 
-  deposit <symbol> <x> <y> <z> <vx> <vy> <vz>
+``style`` is ``grid``, ``random``, ``gaussian``, or ``point``.
+``entity`` is ``atom`` or ``molecule``.
+``source`` is an element symbol or a molecule xyz filename.
 
-Insert atoms using keywords. ``position`` and ``velocity`` are required and may appear in any order.
-For non-gaussian forms, both take six numbers (min/max per component) and sample uniformly in those ranges.
-``number`` may be used with the box ranges. ``surface`` and ``offset`` are only for beam-deposition placement::
+The six layers of the command are independent:
 
-  deposit <symbol> number <N> velocity <vx_min> <vx_max> <vy_min> <vy_max> <vz_min> <vz_max> position <x_min> <x_max> <y_min> <y_max> <z_min> <z_max>
-  deposit <symbol> position gaussian <x0> <y0> <sigma> velocity gaussian <v> <theta_sigma_deg> surface local <radius> offset antivel <sep>
+* ``style``: where candidate sites are generated in the surface plane
+* ``entity``: what is deposited
+* ``direction``: the center flight direction
+* ``surface``: where along the surface normal the particle is created
+* ``velocity``: the speed
+* ``near`` / ``select`` / ``attempt`` / ``seed``: constraints and sampling
 
-Insert molecules from an xyz file (uniform sampling in a box)::
+Direction, surface, and velocity are always required.
 
-  deposit <file.xyz> number <N> velocity <vx_min> <vx_max> <vy_min> <vy_max> <vz_min> <vz_max> position <x_min> <x_max> <y_min> <y_max> <z_min> <z_max>
+Deposition frame
+----------------
 
-Uniform box sampling (atoms or molecules)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+The surface plane is defined by a unit normal :math:`\hat{\mathbf n}`.
+Grid, random, gaussian, and point sites live in the :math:`u`-:math:`v` plane perpendicular to :math:`\hat{\mathbf n}`.
 
-* ``position <x_min> <x_max> <y_min> <y_max> <z_min> <z_max>``: sample the insertion point (atom coordinates, or molecule center of mass) uniformly in the axis-aligned box. If ``min = max`` on an axis, that coordinate is fixed.
-* ``velocity <vx_min> <vx_max> <vy_min> <vy_max> <vz_min> <vz_max>``: sample each velocity component independently and uniformly (Å/fs). If ``min = max``, that component is fixed.
-* ``number <N>``: insert ``N`` independent samples in one command.
+By default :math:`\hat{\mathbf n}=-\hat{\mathbf d}`, so a simple beam still sets the frame::
 
-A single-atom species with these keywords is equivalent to depositing a one-atom molecule file with the same ranges.
+  direction axis -z
 
-Beam-deposition keywords (special-purpose)
-^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+gives :math:`\hat{\mathbf n}=+z`. Override this with an explicit normal when the beam is not anti-parallel to the surface::
 
-These options are for a directed beam onto a surface. They are not needed for ordinary MD or for box sampling.
+  normal axis +z
+  normal axis +x
+  normal vector nx ny nz
 
-* ``position gaussian <x0> <y0> <sigma>``: :math:`x = x_0 + \mathcal{N}(0,\sigma)`, :math:`y = y_0 + \mathcal{N}(0,\sigma)`, then wrap XY with PBC. Requires ``surface local`` to set :math:`z`.
-* ``velocity gaussian <v> <theta_sigma_deg>``: the speed :math:`|v|` is fixed (Å/fs); :math:`\theta \sim |\mathcal{N}(0,\sigma_\theta)|` in degrees; :math:`\phi \sim U(0,2\pi)`; the beam is along :math:`-z`:
+``direction`` only sets particle velocity::
 
-  .. math::
+  direction axis -z
+  direction axis -x
+  direction vector 0.3 0 -1
+  direction target tx ty tz
 
-     v_x = v\sin\theta\cos\phi,\quad
-     v_y = v\sin\theta\sin\phi,\quad
-     v_z = -v\cos\theta
+``direction target`` aims each particle's velocity at ``(tx, ty, tz)`` from its own launch position.
+It does not define the surface frame, so ``normal`` is required with ``target``.
 
-* ``surface local <radius>``: :math:`z` is the highest atom within the XY radius (PBC) of the sampled :math:`(x,y)`; if none, the global :math:`z_{\mathrm{max}}` is used.
-* ``offset antivel <sep>``: ``pos = anchor - sep * v_hat``. Needs a non-zero velocity.
+If ``basis ax ay az`` is given, that vector is projected onto the plane perpendicular to :math:`\hat{\mathbf n}` to make :math:`\hat{\mathbf u}`, then :math:`\hat{\mathbf v}=\hat{\mathbf n}\times\hat{\mathbf u}`.
+Otherwise the Cartesian axis least parallel to :math:`\hat{\mathbf n}` is used.
+The final ``u``, ``v``, and ``n`` vectors are always printed.
 
-This keyword only creates atoms. It does not delete atoms and does not run a connectivity search.
-To drop flying or isolated atoms, issue :ref:`delete <kw_delete>` separately.
+For ``normal axis +z`` (the default of ``direction axis -z``) this reduces to :math:`u=x`, :math:`v=y`, :math:`n=z`.
+A launch coordinate is
+
+.. math::
+
+   \mathbf r = u\hat{\mathbf u} + v\hat{\mathbf v} + H\hat{\mathbf n}
+
+Lateral PBC wrapping of launch positions is applied when :math:`\hat{\mathbf n}` is a Cartesian axis (:math:`\pm x`, :math:`\pm y`, or :math:`\pm z`).
+``normal vector`` does not wrap.
+
+Surface
+-------
+
+``gap`` is always measured along :math:`\hat{\mathbf n}`, never along a sampled instantaneous velocity.
+
+::
+
+  surface fixed H
+  surface global gap D
+  surface local radius R gap D
+
+* ``fixed``: :math:`H` is given, so :math:`\mathbf r\cdot\hat{\mathbf n}=H`.
+* ``global``: :math:`H_{\max}=\max_i(\mathbf r_i\cdot\hat{\mathbf n})`, then :math:`H=H_{\max}+D`.
+* ``local``: among existing atoms whose projection onto the :math:`u`-:math:`v` plane lies within radius ``R`` of the candidate site, take the largest :math:`\mathbf r_i\cdot\hat{\mathbf n}`; if none, use the global maximum. Then add ``D``.
+
+Styles
+------
+
+``grid``
+  ``region u_min u_max v_min v_max`` and ``spacing du dv``.
+  Sites are the inclusive lattice :math:`u=u_{\min}+i\,du` while :math:`u\le u_{\max}` (same for :math:`v`).
+  ``number N`` deposits ``N`` entities; ``number all`` deposits one entity on every valid site.
+  ``select sequential`` or ``select random`` (default) chooses among valid sites when ``number N`` is used.
+  Sites are visited until ``N`` entities are accepted (or until the grid is exhausted).
+  Grid does not retry failed sites; if too few sites pass ``near``, the command errors.
+
+``random``
+  Sample ``(u,v)`` uniformly in ``region``. ``number N`` is required.
+  ``attempt Q`` (default 10) retries a failed ``near`` check.
+
+``gaussian``
+  ``origin u v`` and ``sigma s``. :math:`u=u_0+\mathcal{N}(0,s)`, :math:`v=v_0+\mathcal{N}(0,s)`.
+  ``number N`` is required. ``attempt`` is allowed.
+
+``point``
+  ``origin u v``. One deterministic site; ``number`` defaults to 1.
+
+Velocity and spread
+-------------------
+
+::
+
+  velocity constant V
+  velocity uniform Vmin Vmax
+  spread gaussian sigma_deg
+
+``velocity`` sets only the speed :math:`|\mathbf v|` (Å/fs).
+The flight direction is ``direction``, optionally broadened by ``spread gaussian`` with angular standard deviation in degrees.
+
+Other keywords
+--------------
+
+* ``near R``: every atom of a candidate entity must stay at least ``R`` Å from existing atoms and from already accepted deposited entities (PBC minimum image). Atoms inside the same entity are not checked against each other. Off if omitted.
+* ``seed S``: required whenever the command uses randomness (``random`` / ``gaussian`` styles, ``select random``, ``spread gaussian``, or ``velocity uniform``).
+* ``attempt Q``: only for ``random`` and ``gaussian``.
 
 Examples
 --------
 
-Insert one carbon atom at a fixed point::
+One carbon atom at a fixed point, flying along :math:`-z`::
 
-  deposit C 8.8 8.8 16.0 0.0 0.0 -0.001
+  deposit point atom C origin 8.8 8.8 direction axis -z surface fixed 16.0 velocity constant 0.001
 
-Insert many F atoms uniformly in a box::
+Every site of an XY grid::
 
-  deposit F number 100 velocity -0.001 0.001 -0.001 0.001 -0.002 -0.001 position 0 50 0 50 20 30
+  deposit grid atom Si number all region 0 100 0 100 spacing 10 10 direction axis -z surface fixed 120 velocity constant 0.05
 
-Insert molecules from a file::
+MBE onto a global surface::
 
-  deposit O3.xyz number 10 velocity -0.0002 0.0002 -0.0001 -0.0001 -0.0002 0.0002 position 0 272 210 230 0 27
+  deposit grid atom Si number 100 region 0 100 0 100 spacing 5 5 direction axis -z surface global gap 20 velocity constant 0.05 select random seed 12345
 
-Beam deposition onto a local surface (special-purpose)::
+Oblique MBE onto an XY substrate (grid stays in the XY plane; the beam is tilted)::
 
-  deposit C position gaussian 8.8 8.8 1.0 velocity gaussian 0.001 5 surface local 5.0 offset antivel 2.0
+  deposit grid atom Si number 100 region 0 100 0 100 spacing 5 5 normal axis +z direction vector 0.2 0 -1 surface local radius 5 gap 20 near 2.5 spread gaussian 4 velocity constant 0.05 select random seed 12345
 
-Repeated injection with :ref:`for <kw_for>`::
+Gaussian beam::
 
-  for i range 1 500
-      deposit Ge position gaussian 0 0 8.33 velocity gaussian 0.007 5 surface local 5.0 offset antivel 2.6
-      run 100
-  end
+  deposit gaussian atom C number 5 origin 1.785 1.785 sigma 1.0 direction axis -z surface local radius 5 gap 2.0 spread gaussian 5 velocity constant 0.001 seed 1
+
+Random molecules on a plane::
+
+  deposit random molecule O3.xyz number 10 region 0 272 210 230 direction axis -z surface fixed 20 velocity constant 0.0002 seed 1
+
+This keyword only creates atoms. It does not delete atoms and does not run a connectivity search.
+To drop flying or isolated atoms, issue :ref:`delete <kw_delete>` separately.
 
 Caveats
 -------

@@ -7,7 +7,7 @@ time_step   1
 fix 1
 
 
-deposit O3.xyz  number 10 velocity -0.0002 0.0002  -0.0001 -0.0001 -0.0002 0.0002 position 0 272.185 210 230 0 26.945
+deposit random molecule O3.xyz number 10 region 0 272.185 210 230 direction axis -z surface fixed 20 velocity constant 0.0002 seed 1
 
 dump_thermo 1000
 dump_exyz   1 1 1 1

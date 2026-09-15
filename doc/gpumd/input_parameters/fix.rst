@@ -41,7 +41,7 @@ The local surface is a height map of the substrate in the plane perpendicular to
 Etch loop::
 
   for i range 1 100
-      deposit F position gaussian 32.662 40.828 30 velocity gaussian 0.007 5 surface local 5.0 offset antivel 2.5
+      deposit gaussian atom F number 1 origin 32.662 40.828 sigma 30 direction axis -z surface local radius 5.0 gap 2.5 spread gaussian 5 velocity constant 0.007 seed 1
       ensemble nvt_ber 300 300 100
       fix 1 2
       fix shell substrate z cutoff 2.4 offset 5.0 type Si Ge
