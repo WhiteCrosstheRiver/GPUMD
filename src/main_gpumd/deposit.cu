@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <map>
 #include <memory>
 #include <random>
 #include <string>
@@ -725,6 +726,7 @@ struct SurfaceIndex
   int pbc_v = 0;
   double global_H = 0.0;
   double build_radius = -1.0; // radius the index was built with (batch reuse)
+  std::vector<double> cell_maxH; // per-cell highest H, for query pruning
   std::vector<int> head;
   std::vector<int> next;
   std::vector<double> u;
@@ -747,7 +749,7 @@ struct SurfaceIndex
     }
   }
 
-  void build(const Atom& atom, const Box& box, const DepositFrame& frame, double radius)
+  void build(const Atom& atom, const Box& box, const DepositFrame& frame, double radius, double filter_radius = 0.0)
   {
     const int N = atom.number_of_atoms;
     if (N < 1) {
@@ -855,6 +857,64 @@ struct SurfaceIndex
       next[i] = head[c];
       head[c] = i;
     }
+
+    // per-cell highest H: lets query skip whole (deep) cell chains once a
+    // candidate best is known — columns hold ~2000 atoms but only their top
+    // few can answer a max-H query. Chains are additionally relinked in
+    // descending-H order so the skip test fires after the first few atoms.
+    cell_maxH.assign(head.size(), -1.0e300);
+    for (int i = 0; i < N; ++i) {
+      int iu = (int)floor(u[i] / cell);
+      int iv = (int)floor(v[i] / cell);
+      if (pbc_u) {
+        iu = wrap_cell(iu, nu);
+      } else {
+        iu = std::min(nu - 1, std::max(0, iu));
+      }
+      if (pbc_v) {
+        iv = wrap_cell(iv, nv);
+      } else {
+        iv = std::min(nv - 1, std::max(0, iv));
+      }
+      const int c = iu + nu * iv;
+      if (H[i] > cell_maxH[c]) {
+        cell_maxH[c] = H[i];
+      }
+    }
+    {
+      // relink each cell chain in descending-H order
+      std::vector<std::vector<int>> by_cell(head.size());
+      for (int i = 0; i < N; ++i) {
+        int iu = (int)floor(u[i] / cell);
+        int iv = (int)floor(v[i] / cell);
+        if (pbc_u) {
+          iu = wrap_cell(iu, nu);
+        } else {
+          iu = std::min(nu - 1, std::max(0, iu));
+        }
+        if (pbc_v) {
+          iv = wrap_cell(iv, nv);
+        } else {
+          iv = std::min(nv - 1, std::max(0, iv));
+        }
+        by_cell[iu + nu * iv].push_back(i);
+      }
+      std::fill(head.begin(), head.end(), -1);
+      std::fill(next.begin(), next.end(), -1);
+      for (size_t c = 0; c < by_cell.size(); ++c) {
+        auto& v = by_cell[c];
+        std::sort(v.begin(), v.end(), [&](int a, int b) { return H[a] > H[b]; });
+        for (int k = (int)v.size() - 1; k >= 0; --k) {
+          const int i = v[k];
+          next[i] = head[c];
+          head[c] = i;
+        }
+      }
+    }
+    if (filter_radius > 0.0) {
+      // no-op placeholder retained for interface stability
+      (void)filter_radius;
+    }
   }
 
   double query(double qu, double qv, double radius) const
@@ -873,8 +933,13 @@ struct SurfaceIndex
     const int span = (int)ceil(radius / cell);
     const int iu0 = (int)floor(qu / cell);
     const int iv0 = (int)floor(qv / cell);
-    bool found = false;
-    double best = 0.0;
+    // Collect the candidate cells, then walk them in descending cell_maxH so
+    // an early high `best` prunes every remaining deep chain (exact for a
+    // max-H query: a cell whose highest atom cannot beat `best` is skipped).
+    const int n_cell = (2 * span + 1) * (2 * span + 1);
+    int cells[512];
+    double cellH[512];
+    int n_used = 0;
     for (int du = -span; du <= span; ++du) {
       for (int dv = -span; dv <= span; ++dv) {
         int iu = iu0 + du;
@@ -889,14 +954,42 @@ struct SurfaceIndex
         } else if (iv < 0 || iv >= nv) {
           continue;
         }
-        for (int a = head[iu + nu * iv]; a >= 0; a = next[a]) {
-          const double wu = min_image_1d(u[a] - qu, Lu, pbc_u);
-          const double wv = min_image_1d(v[a] - qv, Lv, pbc_v);
-          if (wu * wu + wv * wv <= r2) {
-            if (!found || H[a] > best) {
-              best = H[a];
-              found = true;
-            }
+        cells[n_used] = iu + nu * iv;
+        cellH[n_used] = cell_maxH.empty() ? 0.0e300 : cell_maxH[cells[n_used]];
+        ++n_used;
+      }
+    }
+    // insertion sort by descending cellH (n_used <= 512, usually ~25)
+    for (int a = 1; a < n_used; ++a) {
+      const int cc = cells[a];
+      const double ch = cellH[a];
+      int b = a - 1;
+      while (b >= 0 && cellH[b] < ch) {
+        cells[b + 1] = cells[b];
+        cellH[b + 1] = cellH[b];
+        --b;
+      }
+      cells[b + 1] = cc;
+      cellH[b + 1] = ch;
+    }
+    bool found = false;
+    double best = 0.0;
+    for (int ci = 0; ci < n_used; ++ci) {
+      if (found && cellH[ci] <= best) {
+        break; // all remaining cells are even lower
+      }
+      const int c = cells[ci];
+      for (int a = head[c]; a >= 0; a = next[a]) {
+        if (found && H[a] <= best) {
+          // chains are H-descending, so the rest of this chain cannot win
+          break;
+        }
+        const double wu = min_image_1d(u[a] - qu, Lu, pbc_u);
+        const double wv = min_image_1d(v[a] - qv, Lv, pbc_v);
+        if (wu * wu + wv * wv <= r2) {
+          if (!found || H[a] > best) {
+            best = H[a];
+            found = true;
           }
         }
       }
@@ -943,6 +1036,9 @@ struct SurfaceIndex
     const int a = (int)u.size() - 1;
     next[a] = head[iu + nu * iv];
     head[iu + nu * iv] = a;
+    if (!cell_maxH.empty() && H[a] > cell_maxH[iu + nu * iv]) {
+      cell_maxH[iu + nu * iv] = H[a];
+    }
   }
 };
 
@@ -1820,11 +1916,25 @@ void DepositSequence(
   bool have_prev_frame = false;
   bool surface_active = false;
 
+  // entity templates resolved once per (entity, source) within the batch
+  std::map<std::string, EntityTemplate> tmpl_cache;
+
   for (int c = 0; c < n_cmd; ++c) {
     const DepositConfig& cfg = cfgs[c];
 
+    // resolve_entity_template scans all atoms (symbols_from_atom) per call;
+    // within a batch the type table does not change, so resolve once per
+    // (entity, source) and reuse.
     EntityTemplate tmpl;
-    resolve_entity_template(cfg, atoms, tmpl);
+    const std::string tmpl_key = cfg.source + "|" +
+      (cfg.entity == DepositConfig::Atom ? "a" : "m");
+    const auto cached = tmpl_cache.find(tmpl_key);
+    if (cached != tmpl_cache.end()) {
+      tmpl = cached->second;
+    } else {
+      resolve_entity_template(cfg, atoms, tmpl);
+      tmpl_cache[tmpl_key] = tmpl;
+    }
 
     DepositFrame frame;
     build_deposit_frame(cfg, frame);
@@ -1838,7 +1948,16 @@ void DepositSequence(
     } else if (cfg.surface_kind == DepositConfig::Local) {
       if (!surface_active || !frame_same ||
           cfg.surface_radius != surface.build_radius) {
-        surface.build(atoms, box, frame, cfg.surface_radius);
+        // min radius in the batch: an atom shadowed within this radius can
+        // never be a query answer for any command's radius (>= min), so the
+        // filter is exact for the whole batch
+        double min_surf_r = cfg.surface_radius;
+        for (const auto& c2 : cfgs) {
+          if (c2.surface_kind == DepositConfig::Local) {
+            min_surf_r = std::min(min_surf_r, c2.surface_radius);
+          }
+        }
+        surface.build(atoms, box, frame, cfg.surface_radius, min_surf_r);
         surface.build_radius = cfg.surface_radius;
         surface_active = true;
       }
@@ -1868,7 +1987,6 @@ void DepositSequence(
     DepositSampler sampler;
     prepare_sampler(cfg, sampler);
     std::vector<double> cand((size_t)tmpl.n_atoms * 3);
-
     print_line_1();
     printf(
       "deposit %s %s %s\n",
@@ -1890,8 +2008,6 @@ void DepositSequence(
       }
     }
 
-    // Make later commands see this command's atoms (sequential semantics):
-    // surface: insert entities so later launch heights clear them;
     // Make later commands see this command's atoms (sequential semantics):
     // surface: insert entities so later launch heights clear them;
     // near: insert unless skip_new_new already covered intra-command spacing.
