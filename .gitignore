@@ -38,3 +38,4 @@ observer.xyz
 observer*.xyz
 active.xyz
 active*.xyz
+tests/gpumd/fix/bench_ratio/model*.xyz

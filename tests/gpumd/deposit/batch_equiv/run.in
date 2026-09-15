@@ -1,0 +1,8 @@
+potential       ../../../../potentials/nep/C_2022_NEP3.txt
+time_step       0.0
+ensemble        nve
+deposit gaussian atom C number 2 origin 1.785 1.785 sigma 1.0 direction axis -z surface local radius 5.0 gap 2.0 spread gaussian 5 velocity constant 0.001 seed 1
+deposit gaussian atom C number 2 origin 5.355 5.355 sigma 1.0 direction axis -z surface local radius 5.0 gap 2.0 spread gaussian 5 velocity constant 0.001 seed 2
+deposit gaussian atom C number 2 origin 1.785 8.925 sigma 1.0 direction axis -z surface local radius 5.0 gap 2.0 spread gaussian 5 velocity constant 0.001 seed 3
+dump_xyz        -1 0 1 after.xyz
+run             1

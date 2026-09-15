@@ -35,3 +35,13 @@ void Deposit(
   GPU_Vector<double>& thermo,
   Force& force,
   VariableScope* variables);
+
+// Consecutive `deposit` commands: one CPU sync, one atom-count rebuild.
+void DepositSequence(
+  const std::vector<std::vector<std::string>>& commands,
+  Box& box,
+  Atom& atoms,
+  std::vector<Group>& groups,
+  GPU_Vector<double>& thermo,
+  Force& force,
+  VariableScope* variables);

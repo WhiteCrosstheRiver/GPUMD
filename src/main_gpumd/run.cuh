@@ -46,6 +46,7 @@ public:
   VariableScope* variables = nullptr;
   Box& current_box() { return box; }
   void delete_isolated_batch(const std::vector<std::vector<std::string>>& commands);
+  void deposit_sequence(const std::vector<std::vector<std::string>>& commands);
 
 private:
   friend struct CommandNode;

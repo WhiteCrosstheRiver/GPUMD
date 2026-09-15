@@ -15,6 +15,7 @@
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <memory>
 #include <random>
 #include <string>
 #include <unordered_map>
@@ -143,6 +144,16 @@ struct DepositFrame
   double d[3] = {0.0, 0.0, -1.0};
   int cartesian_n = -1;
 };
+
+static bool frames_equal(const DepositFrame& a, const DepositFrame& b)
+{
+  for (int k = 0; k < 3; ++k) {
+    if (a.u[k] != b.u[k] || a.v[k] != b.v[k] || a.n[k] != b.n[k]) {
+      return false;
+    }
+  }
+  return true;
+}
 
 struct DepositUV
 {
@@ -713,6 +724,7 @@ struct SurfaceIndex
   int pbc_u = 0;
   int pbc_v = 0;
   double global_H = 0.0;
+  double build_radius = -1.0; // radius the index was built with (batch reuse)
   std::vector<int> head;
   std::vector<int> next;
   std::vector<double> u;
@@ -890,6 +902,47 @@ struct SurfaceIndex
       }
     }
     return found ? best : global_H;
+  }
+
+  // Insert one already-placed atom so later queries in the same batch see it.
+  void insert_one(const DepositFrame& frame, const double r[3])
+  {
+    u.push_back(dot3(r, frame.u));
+    v.push_back(dot3(r, frame.v));
+    H.push_back(dot3(r, frame.n));
+    if (H.back() > global_H) {
+      global_H = H.back();
+    }
+    next.push_back(-1);
+    double qu = u.back();
+    double qv = v.back();
+    if (pbc_u && Lu > 0.0) {
+      qu = wrap01(qu / Lu) * Lu;
+      u.back() = qu;
+    } else {
+      qu -= u0;
+    }
+    if (pbc_v && Lv > 0.0) {
+      qv = wrap01(qv / Lv) * Lv;
+      v.back() = qv;
+    } else {
+      qv -= v0;
+    }
+    int iu = (int)floor(qu / cell);
+    int iv = (int)floor(qv / cell);
+    if (pbc_u) {
+      iu = wrap_cell(iu, nu);
+    } else {
+      iu = std::min(nu - 1, std::max(0, iu));
+    }
+    if (pbc_v) {
+      iv = wrap_cell(iv, nv);
+    } else {
+      iv = std::min(nv - 1, std::max(0, iv));
+    }
+    const int a = (int)u.size() - 1;
+    next[a] = head[iu + nu * iv];
+    head[iu + nu * iv] = a;
   }
 };
 
@@ -1697,4 +1750,238 @@ void Deposit(
   const auto time_finish = std::chrono::high_resolution_clock::now();
   const std::chrono::duration<double> time_used = time_finish - time_begin;
   printf("Time used for deposit = %g second.\n", time_used.count());
+}
+
+// Consecutive `deposit` commands: one CPU sync, one atom-count rebuild.
+// Each command's placed atoms are inserted back into the shared surface and
+// near indices, so command k+1 sees command k exactly as it would with
+// per-command rebuilds.
+void DepositSequence(
+  const std::vector<std::vector<std::string>>& commands,
+  Box& box,
+  Atom& atoms,
+  std::vector<Group>& groups,
+  GPU_Vector<double>& thermo,
+  Force& force,
+  VariableScope* variables)
+{
+  if (commands.empty()) {
+    return;
+  }
+
+  const auto time_begin = std::chrono::high_resolution_clock::now();
+
+  // Parse and validate everything up front: a bad command must fail before
+  // any atoms are appended (same as per-command execution).
+  const int n_cmd = (int)commands.size();
+  std::vector<std::vector<const char*>> cparam(n_cmd);
+  std::vector<DepositConfig> cfgs(n_cmd);
+  for (int c = 0; c < n_cmd; ++c) {
+    const auto& command = commands[c];
+    if (command.size() >= 32) {
+      PRINT_INPUT_ERROR("The number of parameters should be less than 32.");
+    }
+    cparam[c].resize(command.size());
+    for (size_t k = 0; k < command.size(); ++k) {
+      cparam[c][k] = command[k].c_str();
+    }
+    parse_deposit_config(cparam[c].data(), (int)command.size(), box, variables, cfgs[c]);
+    validate_deposit_config(cfgs[c]);
+  }
+
+  // Shared indices, sized for the whole batch. Per-command execution would
+  // rebuild these from scratch before every command; here the atoms placed
+  // by command k are inserted so command k+1 observes them.
+  double max_near_r = 0.0;
+  bool any_near = false;
+  for (const auto& cfg : cfgs) {
+    if (cfg.has_near) {
+      any_near = true;
+      max_near_r = std::max(max_near_r, cfg.near_r);
+    }
+  }
+  NearIndex near;
+  NearIndex* near_ptr = nullptr;
+  if (any_near) {
+    near.build(atoms, box, max_near_r);
+    near_ptr = &near;
+  }
+
+  // Accumulate all placed atoms, one append at the end.
+  NewAtoms all;
+  all.n = 0;
+  int max_type = -1;
+
+  // Persistent surface index: rebuilt only when the deposition frame changes
+  // between commands; otherwise command k's atoms are inserted so command
+  // k+1's launch heights clear them (same as per-command rebuild would see).
+  SurfaceIndex surface;
+  DepositFrame prev_frame;
+  bool have_prev_frame = false;
+  bool surface_active = false;
+
+  for (int c = 0; c < n_cmd; ++c) {
+    const DepositConfig& cfg = cfgs[c];
+
+    EntityTemplate tmpl;
+    resolve_entity_template(cfg, atoms, tmpl);
+
+    DepositFrame frame;
+    build_deposit_frame(cfg, frame);
+
+    const bool frame_same = have_prev_frame && frames_equal(prev_frame, frame);
+    if (cfg.surface_kind == DepositConfig::Global) {
+      if (!surface_active || !frame_same) {
+        surface.reduce_global(atoms, frame);
+        surface_active = true;
+      }
+    } else if (cfg.surface_kind == DepositConfig::Local) {
+      if (!surface_active || !frame_same ||
+          cfg.surface_radius != surface.build_radius) {
+        surface.build(atoms, box, frame, cfg.surface_radius);
+        surface.build_radius = cfg.surface_radius;
+        surface_active = true;
+      }
+    } else {
+      surface_active = false;
+    }
+    prev_frame = frame;
+    have_prev_frame = true;
+
+    NearIndex* cmd_near = nullptr;
+    std::unique_ptr<NearIndex> own_near;
+    if (cfg.has_near && cfg.near_r > max_near_r + 1.0e-12) {
+      // rarer case: this command's near radius exceeds the shared build
+      own_near = std::make_unique<NearIndex>();
+      own_near->build(atoms, box, cfg.near_r);
+      cmd_near = own_near.get();
+    } else {
+      cmd_near = near_ptr;
+    }
+
+    bool skip_new_new = false;
+    if (cfg.style == DepositConfig::Grid && cfg.has_near) {
+      const double dmin = std::min(cfg.spacing[0], cfg.spacing[1]);
+      skip_new_new = dmin >= (2.0 * tmpl.radius + cfg.near_r);
+    }
+
+    DepositSampler sampler;
+    prepare_sampler(cfg, sampler);
+    std::vector<double> cand((size_t)tmpl.n_atoms * 3);
+
+    print_line_1();
+    printf(
+      "deposit %s %s %s\n",
+      style_name(cfg.style),
+      cfg.entity == DepositConfig::Atom ? "atom" : "molecule",
+      cfg.source.c_str());
+    if (n_cmd > 1) {
+      printf("Deposit command %d of %d in batch.\n", c + 1, n_cmd);
+    }
+    print_deposit_frame(frame);
+
+    NewAtoms added = (cfg.style == DepositConfig::Grid)
+                       ? deposit_grid(cfg, tmpl, frame, box, surface, cmd_near, skip_new_new, sampler, cand)
+                       : deposit_sampled(cfg, tmpl, frame, box, surface, cmd_near, sampler, cand);
+
+    for (int t : tmpl.type) {
+      if (t > max_type) {
+        max_type = t;
+      }
+    }
+
+    // Make later commands see this command's atoms (sequential semantics):
+    // surface: insert entities so later launch heights clear them;
+    // Make later commands see this command's atoms (sequential semantics):
+    // surface: insert entities so later launch heights clear them;
+    // near: insert unless skip_new_new already covered intra-command spacing.
+    if (surface_active && (cfg.surface_kind != DepositConfig::Fixed)) {
+      for (int k = 0; k < added.n; ++k) {
+        const double r[3] = {added.position[k],
+                             added.position[k + added.n],
+                             added.position[k + 2 * added.n]};
+        surface.insert_one(frame, r);
+      }
+    }
+    if (cmd_near != nullptr && !skip_new_new) {
+      for (int k = 0; k < added.n; ++k) {
+        const double r[3] = {added.position[k],
+                             added.position[k + added.n],
+                             added.position[k + 2 * added.n]};
+        cmd_near->insert_one(r[0], r[1], r[2]);
+      }
+    }
+
+    // stash into the batch accumulator (SoA with new_n stride)
+    const int old_n = all.n;
+    const int new_n = old_n + added.n;
+    if (old_n > 0) {
+      // re-stride the previous entries from old_n to new_n blocks
+      NewAtoms moved;
+      moved.n = old_n;
+      moved.type = all.type;
+      moved.mass = all.mass;
+      moved.charge = all.charge;
+      moved.symbol = all.symbol;
+      moved.position.resize(old_n * 3);
+      moved.velocity.resize(old_n * 3);
+      for (int k = 0; k < old_n; ++k) {
+        for (int d = 0; d < 3; ++d) {
+          moved.position[k + old_n * d] = all.position[k + old_n * d];
+          moved.velocity[k + old_n * d] = all.velocity[k + old_n * d];
+        }
+      }
+      all.position.resize(new_n * 3);
+      all.velocity.resize(new_n * 3);
+      for (int k = 0; k < old_n; ++k) {
+        for (int d = 0; d < 3; ++d) {
+          all.position[k + new_n * d] = moved.position[k + old_n * d];
+          all.velocity[k + new_n * d] = moved.velocity[k + old_n * d];
+        }
+      }
+    } else {
+      all.position.resize(new_n * 3);
+      all.velocity.resize(new_n * 3);
+    }
+    all.type.resize(new_n);
+    all.mass.resize(new_n);
+    all.charge.resize(new_n);
+    all.symbol.resize(new_n);
+    for (int k = 0; k < added.n; ++k) {
+      all.type[old_n + k] = added.type[k];
+      all.mass[old_n + k] = added.mass[k];
+      all.charge[old_n + k] = added.charge[k];
+      all.symbol[old_n + k] = added.symbol[k];
+      for (int d = 0; d < 3; ++d) {
+        all.position[old_n + k + new_n * d] = added.position[k + added.n * d];
+        all.velocity[old_n + k + new_n * d] = added.velocity[k + added.n * d];
+      }
+    }
+    all.n = new_n;
+    printf("Deposited %d atoms. Batch total so far: %d\n", added.n, new_n);
+    print_line_2();
+  }
+
+  if (all.n == 0) {
+    PRINT_INPUT_ERROR("deposit batch placed no atoms.");
+  }
+  if ((int)atoms.cpu_type_size.size() < max_type + 1) {
+    atoms.cpu_type_size.resize(max_type + 1, 0);
+  }
+
+  if (n_cmd > 1) {
+    print_line_1();
+    printf("Deposited %d atoms in %d commands. Total number of atoms: %d\n", all.n, n_cmd, atoms.number_of_atoms + all.n);
+    print_line_2();
+  }
+
+  AtomMutation::append_atoms(atoms, groups, thermo, force, all);
+
+  if (n_cmd > 1) {
+    printf("Remaining number of atoms: %d\n", atoms.number_of_atoms);
+  }
+
+  const auto time_finish = std::chrono::high_resolution_clock::now();
+  const std::chrono::duration<double> time_used = time_finish - time_begin;
+  printf("Time used for deposit batch (%d commands) = %g second.\n", n_cmd, time_used.count());
 }

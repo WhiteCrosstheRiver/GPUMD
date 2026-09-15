@@ -319,6 +319,15 @@ static bool is_delete_isolated_command(
   return a == "delete" && b == "isolated";
 }
 
+static bool is_deposit_command(const Node& node, VariableScope& scope, const Box& box)
+{
+  const auto* cmd = dynamic_cast<const CommandNode*>(&node);
+  if (cmd == nullptr || cmd->tokens.empty()) {
+    return false;
+  }
+  return scope.expand_text(cmd->tokens[0], box) == "deposit";
+}
+
 static void execute_node_list(
   Run& run, std::vector<std::unique_ptr<Node>>& nodes, VariableScope& scope)
 {
@@ -333,6 +342,15 @@ static void execute_node_list(
       }
       run.variables = &scope;
       run.delete_isolated_batch(batch);
+    } else if (is_deposit_command(*nodes[i], scope, run.current_box())) {
+      std::vector<std::vector<std::string>> batch;
+      while (i < nodes.size() && is_deposit_command(*nodes[i], scope, run.current_box())) {
+        const auto* cmd = static_cast<const CommandNode*>(nodes[i].get());
+        batch.push_back(expand_tokens(cmd->tokens, scope, run.current_box()));
+        ++i;
+      }
+      run.variables = &scope;
+      run.deposit_sequence(batch);
     } else {
       nodes[i]->execute(run, scope);
       ++i;

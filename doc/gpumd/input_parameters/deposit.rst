@@ -166,3 +166,8 @@ Caveats
 * Changing the number of atoms while PIMD beads exist is not supported.
 * :ref:`electron_stop <kw_electron_stop>` and ``add_random_force`` size some buffers when they are parsed.
   Issue those keywords after ``deposit`` in the same run block, or they will not see the new number of atoms.
+* Consecutive ``deposit`` commands with no other keyword between them are executed as one batch:
+  one CPU–GPU sync and one atom-count rebuild for the whole group, instead of one per command.
+  Each command still sees the atoms placed by the previous commands in the batch
+  (surface heights and ``near`` checks include them), so results match per-command execution.
+  Any intervening keyword (``ensemble``, ``run``, ``velocity``, ...) splits the batch.

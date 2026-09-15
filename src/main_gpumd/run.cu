@@ -185,6 +185,12 @@ void Run::delete_isolated_batch(const std::vector<std::vector<std::string>>& com
   DeleteIsolatedSequence(commands, box, atom, group, thermo, force);
 }
 
+void Run::deposit_sequence(const std::vector<std::vector<std::string>>& commands)
+{
+  AtomMutation::sync_cpu_from_gpu(atom);
+  DepositSequence(commands, box, atom, group, thermo, force, variables);
+}
+
 void Run::execute_run_in()
 {
   print_line_1();
