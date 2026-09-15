@@ -10,6 +10,7 @@
 #include "model/box.cuh"
 #include <algorithm>
 #include <cmath>
+#include <thread>
 #include <vector>
 
 // label 0 = unfixed, 1 = fixed.
@@ -17,7 +18,9 @@
 // Unfix the shear of thickness `offset` below the local surface of that component.
 // Atoms not in the substrate stay unfixed. Optional cubic region: substrate
 // outside the box is always fixed.
-inline bool classify_substrate_shell(
+// The height map and labeling passes are threaded (per-thread maps, reduce; the
+// label loop is an embarrassingly parallel read-only map).
+inline __host__ bool classify_substrate_shell(
   const Atom& atom,
   const Box& box,
   int axis,
@@ -54,19 +57,53 @@ inline bool classify_substrate_shell(
   const int nt1 = std::max(1, (int)std::ceil(L[t1] / cell_size));
   auto wrap = [](int i, int n) {
     int rem = i % n;
-    return rem < 0 ? rem + n : rem;
+    if (rem < 0) {
+      rem += n;
+    }
+    return rem;
   };
   const double unset = -1.0e300;
-  std::vector<double> hmap(static_cast<size_t>(nt0) * nt1, unset);
   std::vector<int> b0(N), b1(N);
-  for (int i = 0; i < N; ++i) {
-    b0[i] = wrap((int)std::floor(r[t0][i] / cell_size), nt0);
-    b1[i] = wrap((int)std::floor(r[t1][i] / cell_size), nt1);
-    if (!keep[i]) {
-      continue;
+  const int n_hcell = nt0 * nt1;
+  std::vector<double> hmap(n_hcell, unset);
+  {
+    // bin index threaded; height map via per-thread maps reduced into hmap
+    const int hw = (int)std::thread::hardware_concurrency();
+    const int n_thread = std::max(1, std::min(hw > 0 ? std::max(1, hw / 2) : 1, std::max(1, N / 65536)));
+    std::vector<std::thread> workers;
+    std::vector<std::vector<double>> t_hmap(n_thread, std::vector<double>(n_hcell, unset));
+    const int chunk = (N + n_thread - 1) / n_thread;
+    for (int t = 0; t < n_thread; ++t) {
+      const int lo = t * chunk;
+      const int hi = std::min(N, lo + chunk);
+      if (lo >= hi) {
+        break;
+      }
+      workers.emplace_back([&, lo, hi, t]() {
+        auto& hm = t_hmap[t];
+        for (int i = lo; i < hi; ++i) {
+          b0[i] = wrap((int)std::floor(r[t0][i] / cell_size), nt0);
+          b1[i] = wrap((int)std::floor(r[t1][i] / cell_size), nt1);
+          if (!keep[i]) {
+            continue;
+          }
+          const int id = b0[i] + nt0 * b1[i];
+          if (r[axis][i] > hm[id]) {
+            hm[id] = r[axis][i];
+          }
+        }
+      });
     }
-    const int id = b0[i] + nt0 * b1[i];
-    hmap[id] = std::max(hmap[id], r[axis][i]);
+    for (auto& w : workers) {
+      w.join();
+    }
+    for (int t = 0; t < n_thread; ++t) {
+      for (int c = 0; c < n_hcell; ++c) {
+        if (t_hmap[t][c] > hmap[c]) {
+          hmap[c] = t_hmap[t][c];
+        }
+      }
+    }
   }
 
   auto in_region = [&](int i) {
@@ -80,17 +117,39 @@ inline bool classify_substrate_shell(
            y <= region_cubic[3] && z >= region_cubic[4] && z <= region_cubic[5];
   };
 
-  for (int i = 0; i < N; ++i) {
-    if (!keep[i]) {
-      label[i] = 0;
-      continue;
+  {
+    const int hw = (int)std::thread::hardware_concurrency();
+    const int n_thread = std::max(1, std::min(hw > 0 ? std::max(1, hw / 2) : 1, std::max(1, N / 65536)));
+    std::vector<std::thread> workers;
+    const int chunk = (N + n_thread - 1) / n_thread;
+    for (int t = 0; t < n_thread; ++t) {
+      const int lo = t * chunk;
+      const int hi = std::min(N, lo + chunk);
+      if (lo >= hi) {
+        break;
+      }
+      workers.emplace_back([&, lo, hi]() {
+        for (int i = lo; i < hi; ++i) {
+          if (!keep[i]) {
+            label[i] = 0;
+            continue;
+          }
+          if (!in_region(i)) {
+            label[i] = 1;
+            continue;
+          }
+          const double local = hmap[b0[i] + nt0 * b1[i]];
+          if (r[axis][i] + offset >= local) {
+            label[i] = 0;
+          } else {
+            label[i] = 1;
+          }
+        }
+      });
     }
-    if (!in_region(i)) {
-      label[i] = 1;
-      continue;
+    for (auto& w : workers) {
+      w.join();
     }
-    const double local = hmap[b0[i] + nt0 * b1[i]];
-    label[i] = (r[axis][i] + offset >= local) ? 0 : 1;
   }
   return true;
 }
