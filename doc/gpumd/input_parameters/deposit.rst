@@ -83,7 +83,11 @@ Surface
 
   surface fixed H
   surface global gap D
-  surface local radius R gap D
+  surface local radius R gap D [mobile]
+
+``mobile`` (surface local only): measure the surface over non-fixed atoms only, so a
+fixed wall or cap above the reactive region cannot set the launch height. Without it,
+all atoms define the surface.
 
 * ``fixed``: :math:`H` is given, so :math:`\mathbf r\cdot\hat{\mathbf n}=H`.
 * ``global``: :math:`H_{\max}=\max_i(\mathbf r_i\cdot\hat{\mathbf n})`, then :math:`H=H_{\max}+D`.

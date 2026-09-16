@@ -1,0 +1,140 @@
+
+***************************************************************
+*                 Welcome to use GPUMD                        *
+*     (Graphics Processing Units Molecular Dynamics)          *
+*                     version 4.5                             *
+*              This is the gpumd executable                   *
+***************************************************************
+
+
+---------------------------------------------------------------
+Compiling options:
+---------------------------------------------------------------
+
+DEBUG is off: Use different PRNG seeds for different runs.
+
+---------------------------------------------------------------
+GPU information:
+---------------------------------------------------------------
+
+number of GPUs = 1
+Device id:                   0
+    Device name:             NVIDIA A100-PCIE-40GB
+    Compute capability:      8.0
+    Amount of global memory: 39.5163 GB
+    Number of SMs:           108
+
+---------------------------------------------------------------
+Started running GPUMD.
+---------------------------------------------------------------
+
+
+---------------------------------------------------------------
+Started initializing positions and related parameters.
+---------------------------------------------------------------
+
+Number of atoms is 16.
+Use periodic boundary conditions along x.
+Use periodic boundary conditions along y.
+Use periodic boundary conditions along z.
+Box matrix h = [a, b, c] is
+    1.0000000000e+01    0.0000000000e+00    0.0000000000e+00
+    0.0000000000e+00    1.0000000000e+01    0.0000000000e+00
+    0.0000000000e+00    0.0000000000e+00    3.0000000000e+01
+Inverse box matrix g = inv(h) is
+    1.0000000000e-01    0.0000000000e+00    0.0000000000e+00
+    0.0000000000e+00    1.0000000000e-01    0.0000000000e+00
+    0.0000000000e+00    0.0000000000e+00    3.3333333333e-02
+Do not specify initial velocities here.
+Have 1 grouping method(s).
+There are 2 groups of atoms in grouping method 0.
+    12 atoms in group 0.
+    4 atoms in group 1.
+There is only one atom type.
+    16 atoms of type 0.
+Initialized velocities with default T = 300 K.
+
+---------------------------------------------------------------
+Finished initializing positions and related parameters.
+---------------------------------------------------------------
+
+
+---------------------------------------------------------------
+Started executing the commands in run.in.
+---------------------------------------------------------------
+
+Use the NEP3 potential with 1 atom type.
+    type 0 (C with Z = 6).
+    radial cutoff = 4.2 A.
+    angular cutoff = 3.7 A.
+    MN_radial = 80.
+    enlarged MN_radial = 100.
+    enlarged MN_angular = 59.
+    n_max_radial = 10.
+    n_max_angular = 8.
+    basis_size_radial = 10.
+    basis_size_angular = 8.
+    l_max_3body = 4.
+    l_max_4body = 2.
+    l_max_5body = 1.
+    ANN = 65-100-1.
+    number of neural network parameters = 6701.
+    number of descriptor parameters = 202.
+    total number of parameters = 6903.
+Time step for this run is 0 fs.
+Use NVE ensemble for this run.
+Fix union: groups 1 (+4 atoms).
+There are 2 groups of atoms in grouping method 0.
+    12 atoms in group 0.
+    4 atoms in group 1.
+    unfixed 12 atoms, frozen 4 atoms (union, group 1).
+Fix shell (union): substrate along z, cutoff = 2.8, unfix shear offset = 0.5 A.
+    substrate types: C
+There are 2 groups of atoms in grouping method 0.
+    8 atoms in group 0.
+    8 atoms in group 1.
+    unfixed 8 atoms, frozen 8 atoms (union, group 1).
+Time used for CPU sync = 2.5943e-05 second.
+
+---------------------------------------------------------------
+deposit gaussian atom C
+Deposition basis:
+  u = 1.00000000 0.00000000 0.00000000
+  v = -0.00000000 1.00000000 0.00000000
+  n = -0.00000000 -0.00000000 1.00000000
+Deposited 1 atoms. Batch total so far: 1
+---------------------------------------------------------------
+
+There are 2 groups of atoms in grouping method 0.
+    9 atoms in group 0.
+    8 atoms in group 1.
+Time used for atom-count rebuild = 0.000213683 second.
+Time used for deposit batch (1 commands) = 0.000264884 second.
+Dump extended XYZ.
+    for the whole system.
+    every 1 steps.
+    into file after_mobile.xyz.
+Run 1 steps.
+Fix skip is on: thermo potential/virial omit deep frozen atoms; active forces remain correct.
+    1 steps completed.
+
+---------------------------------------------------------------
+Time used for this run = 0.00712078 second.
+Speed of this run = 2387.38 atom*step/second.
+---------------------------------------------------------------
+
+
+---------------------------------------------------------------
+Finished executing the commands in run.in.
+---------------------------------------------------------------
+
+
+---------------------------------------------------------------
+Time used = 0.012473 s.
+---------------------------------------------------------------
+
+
+---------------------------------------------------------------
+Finished running GPUMD.
+---------------------------------------------------------------
+

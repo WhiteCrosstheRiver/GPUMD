@@ -1,0 +1,8 @@
+potential       ../../../../potentials/nep/C_2022_NEP3.txt
+time_step       0.0
+ensemble        nve
+fix            1
+fix shell substrate z cutoff 2.8 offset 0.5 type C
+deposit gaussian atom C number 1 origin 2.5 2.5 sigma 0.3 direction axis -z surface local radius 5.0 gap 2.0 mobile spread gaussian 5 velocity constant 0.001 seed 1
+dump_xyz        -1 0 1 after_mobile.xyz
+run             1

@@ -102,6 +102,7 @@ struct DepositConfig
   double surface_H = 0.0;
   double surface_gap = 0.0;
   double surface_radius = 0.0;
+  bool surface_mobile = false; // surface local: measure only non-fixed atoms
 
   bool has_region = false;
   double region[4] = {0.0, 0.0, 0.0, 0.0};
@@ -384,7 +385,7 @@ static void parse_deposit_config(
       } else if (strcmp(param[i + 1], "local") == 0) {
         if (i + 4 >= num_param || strcmp(param[i + 2], "radius") != 0 ||
             strcmp(param[i + 4], "gap") != 0) {
-          PRINT_INPUT_ERROR("Usage: surface local radius <R> gap <D>");
+          PRINT_INPUT_ERROR("Usage: surface local radius <R> gap <D> [mobile]");
         }
         cfg.surface_radius = real_at(i + 3, "surface local radius should be a number.");
         cfg.surface_gap = real_at(i + 5, "surface gap should be a number.");
@@ -396,6 +397,10 @@ static void parse_deposit_config(
         }
         cfg.surface_kind = DepositConfig::Local;
         i += 6;
+        if (i < num_param && strcmp(param[i], "mobile") == 0) {
+          cfg.surface_mobile = true;
+          i += 1;
+        }
       } else {
         PRINT_INPUT_ERROR("surface must be fixed, global, or local.");
       }
@@ -749,7 +754,13 @@ struct SurfaceIndex
     }
   }
 
-  void build(const Atom& atom, const Box& box, const DepositFrame& frame, double radius, double filter_radius = 0.0)
+  void build(
+    const Atom& atom,
+    const Box& box,
+    const DepositFrame& frame,
+    double radius,
+    double filter_radius = 0.0,
+    const std::vector<char>* mobile_mask = nullptr)
   {
     const int N = atom.number_of_atoms;
     if (N < 1) {
@@ -759,15 +770,25 @@ struct SurfaceIndex
     u.resize(N);
     v.resize(N);
     H.resize(N);
-    global_H = r0[0] * frame.n[0] + r0[N] * frame.n[1] + r0[2 * N] * frame.n[2];
+    // when a mobile mask is given, fixed atoms are skipped: the surface (and the
+    // global-H fallback) is measured over mobile atoms only, so a fixed wall
+    // above the reactive region cannot hijack the launch height
+    int n_kept = 0;
+    global_H = -1.0e300;
     for (int i = 0; i < N; ++i) {
       const double xyz[3] = {r0[i], r0[N + i], r0[2 * N + i]};
       u[i] = dot3(xyz, frame.u);
       v[i] = dot3(xyz, frame.v);
       H[i] = dot3(xyz, frame.n);
-      if (H[i] > global_H) {
-        global_H = H[i];
+      if (mobile_mask == nullptr || (i < (int)mobile_mask->size() && (*mobile_mask)[i])) {
+        ++n_kept;
+        if (H[i] > global_H) {
+          global_H = H[i];
+        }
       }
+    }
+    if (n_kept == 0) {
+      PRINT_INPUT_ERROR("surface local mobile: no mobile atoms to measure the surface.");
     }
 
     if (frame.cartesian_n == 2) {
@@ -841,6 +862,9 @@ struct SurfaceIndex
     head.assign(static_cast<size_t>(nu) * nv, -1);
     next.assign(N, -1);
     for (int i = 0; i < N; ++i) {
+      if (mobile_mask != nullptr && (i >= (int)mobile_mask->size() || !(*mobile_mask)[i])) {
+        continue;
+      }
       int iu = (int)floor(u[i] / cell);
       int iv = (int)floor(v[i] / cell);
       if (pbc_u) {
@@ -864,6 +888,9 @@ struct SurfaceIndex
     // descending-H order so the skip test fires after the first few atoms.
     cell_maxH.assign(head.size(), -1.0e300);
     for (int i = 0; i < N; ++i) {
+      if (mobile_mask != nullptr && (i >= (int)mobile_mask->size() || !(*mobile_mask)[i])) {
+        continue;
+      }
       int iu = (int)floor(u[i] / cell);
       int iv = (int)floor(v[i] / cell);
       if (pbc_u) {
@@ -885,6 +912,9 @@ struct SurfaceIndex
       // relink each cell chain in descending-H order
       std::vector<std::vector<int>> by_cell(head.size());
       for (int i = 0; i < N; ++i) {
+        if (mobile_mask != nullptr && (i >= (int)mobile_mask->size() || !(*mobile_mask)[i])) {
+          continue;
+        }
         int iu = (int)floor(u[i] / cell);
         int iv = (int)floor(v[i] / cell);
         if (pbc_u) {
@@ -1797,7 +1827,18 @@ void Deposit(
   if (cfg.surface_kind == DepositConfig::Global) {
     surface.reduce_global(atoms, frame);
   } else if (cfg.surface_kind == DepositConfig::Local) {
-    surface.build(atoms, box, frame, cfg.surface_radius);
+    std::vector<char> surface_keep;
+    const std::vector<char>* surface_mask = nullptr;
+    if (cfg.surface_mobile && !atoms.cpu_fixed.empty()) {
+      surface_keep.assign(atoms.number_of_atoms, 1);
+      for (int i = 0; i < atoms.number_of_atoms; ++i) {
+        if (atoms.cpu_fixed[i]) {
+          surface_keep[i] = 0;
+        }
+      }
+      surface_mask = &surface_keep;
+    }
+    surface.build(atoms, box, frame, cfg.surface_radius, 0.0, surface_mask);
   }
 
   NearIndex near;
@@ -1917,7 +1958,14 @@ void DepositSequence(
   bool surface_active = false;
 
   // entity templates resolved once per (entity, source) within the batch
+  bool any_mobile_surface = false;
+  for (const auto& c2 : cfgs) {
+    if (c2.surface_mobile) {
+      any_mobile_surface = true;
+    }
+  }
   std::map<std::string, EntityTemplate> tmpl_cache;
+  std::vector<char> surface_keep; // 1 = mobile (surface local mobile measures these)
 
   for (int c = 0; c < n_cmd; ++c) {
     const DepositConfig& cfg = cfgs[c];
@@ -1957,7 +2005,17 @@ void DepositSequence(
             min_surf_r = std::min(min_surf_r, c2.surface_radius);
           }
         }
-        surface.build(atoms, box, frame, cfg.surface_radius, min_surf_r);
+        if (any_mobile_surface && !atoms.cpu_fixed.empty() && surface_keep.empty()) {
+          surface_keep.assign(atoms.number_of_atoms, 1);
+          for (int i = 0; i < atoms.number_of_atoms; ++i) {
+            if (atoms.cpu_fixed[i]) {
+              surface_keep[i] = 0;
+            }
+          }
+        }
+        const std::vector<char>* surface_mask =
+          (any_mobile_surface && !surface_keep.empty()) ? &surface_keep : nullptr;
+        surface.build(atoms, box, frame, cfg.surface_radius, min_surf_r, surface_mask);
         surface.build_radius = cfg.surface_radius;
         surface_active = true;
       }
