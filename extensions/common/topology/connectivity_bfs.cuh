@@ -10,6 +10,8 @@
 #include <algorithm>
 #include <atomic>
 #include <cmath>
+#include <condition_variable>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -233,16 +235,24 @@ inline __host__ void find_main_component_from_min_axis(
   };
 
   std::vector<std::thread> pool;
+  std::mutex idle_mu;
+  std::condition_variable idle_cv;
+  std::atomic<int> wake_epoch{0};
   for (int t = 1; t <= n_pool; ++t) {
     pool.emplace_back([&, t]() {
       int seen = 0;
       while (true) {
-        while (gen.load(std::memory_order_acquire) == seen) {
-          if (stop_flag.load(std::memory_order_acquire)) {
-            return;
-          }
+        {
+          std::unique_lock<std::mutex> lk(idle_mu);
+          idle_cv.wait(lk, [&]() {
+            return wake_epoch.load(std::memory_order_acquire) != seen ||
+                   stop_flag.load(std::memory_order_acquire);
+          });
         }
-        seen = gen.load(std::memory_order_acquire);
+        if (stop_flag.load(std::memory_order_acquire)) {
+          return;
+        }
+        seen = wake_epoch.load(std::memory_order_acquire);
         if (stop_flag.load(std::memory_order_acquire)) {
           return;
         }
@@ -267,7 +277,11 @@ inline __host__ void find_main_component_from_min_axis(
     shared_size = (int)frontier.size();
     ++my_gen;
     workers_done.store(0, std::memory_order_release);
-    gen.store(my_gen, std::memory_order_release);
+    {
+      std::lock_guard<std::mutex> lk(idle_mu);
+      wake_epoch.store(my_gen, std::memory_order_release);
+    }
+    idle_cv.notify_all();
     const int total = shared_size;
     if (total >= 64) {
       const int active = n_pool + 1;
@@ -339,7 +353,11 @@ inline __host__ void find_main_component_from_min_axis(
   }
   stop_flag.store(1, std::memory_order_release);
   ++my_gen;
-  gen.store(my_gen, std::memory_order_release);
+  {
+    std::lock_guard<std::mutex> lk(idle_mu);
+    wake_epoch.store(my_gen, std::memory_order_release);
+  }
+  idle_cv.notify_all();
   for (auto& w : pool) {
     w.join();
   }

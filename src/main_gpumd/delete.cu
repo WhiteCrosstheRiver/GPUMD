@@ -19,6 +19,7 @@
 #include "../../extensions/common/topology/coord_expr.cuh"
 #include "../../extensions/common/topology/isolated_atoms.cuh"
 #include "utilities/gpu_macro.cuh"
+#include <cmath>
 #include <cstring>
 #include <memory>
 #include <nvtx3/nvToolsExt.h>
@@ -436,6 +437,13 @@ void Delete(
       double x = atoms.cpu_position_per_atom[n + N_old * 0];
       double y = atoms.cpu_position_per_atom[n + N_old * 1];
       double z = atoms.cpu_position_per_atom[n + N_old * 2];
+      // a blown-up force can send a position to Inf/NaN; such atoms escape every
+      // finite bound test, so catch them here before they poison cell grids
+      if (!std::isfinite(x) || !std::isfinite(y) || !std::isfinite(z)) {
+        to_delete[n] = 1;
+        num_to_delete++;
+        continue;
+      }
       if (x >= bounds[0] && x <= bounds[1] && y >= bounds[2] && y <= bounds[3] &&
           z >= bounds[4] && z <= bounds[5]) {
         to_delete[n] = 1;
@@ -448,6 +456,7 @@ void Delete(
     printf("  x: [%.6f, %.6f]\n", bounds[0], bounds[1]);
     printf("  y: [%.6f, %.6f]\n", bounds[2], bounds[3]);
     printf("  z: [%.6f, %.6f]\n", bounds[4], bounds[5]);
+    printf("(non-finite positions are always deleted)\n");
     printf("Number of atoms to delete: %d\n", num_to_delete);
     print_line_2();
   } else if (style == "disconnected") {
