@@ -131,7 +131,7 @@ Other keywords
 --------------
 
 * ``near R``: every atom of a candidate entity must stay at least ``R`` Å from existing atoms and from already accepted deposited entities (PBC minimum image). Atoms inside the same entity are not checked against each other. Off if omitted.
-* ``seed S``: required whenever the command uses randomness (``random`` / ``gaussian`` styles, ``select random``, ``spread gaussian``, or ``velocity uniform``).
+* ``seed S``: optional. When omitted, the command draws a fresh random seed per call (``std::random_device``), so repeated deposits land on different sites. Give an explicit ``seed`` only when you need a reproducible trajectory.
 * ``attempt Q``: only for ``random`` and ``gaussian``.
 
 Examples

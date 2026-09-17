@@ -568,9 +568,9 @@ static void validate_deposit_config(const DepositConfig& cfg)
     }
   }
 
-  if (deposit_needs_rng(cfg) && !cfg.has_seed) {
-    PRINT_INPUT_ERROR("deposit random behavior requires an explicit seed.");
-  }
+  // seed is optional: without it the sampler draws a fresh random seed per
+  // command (std::random_device), so repeated deposits do not land on the
+  // exact same sites and pile up. An explicit seed keeps runs reproducible.
 }
 
 static double norm3(const double v[3])
@@ -1311,7 +1311,12 @@ struct DepositSampler
 static void prepare_sampler(const DepositConfig& cfg, DepositSampler& s)
 {
   if (deposit_needs_rng(cfg)) {
-    s.rng.seed(cfg.seed);
+    if (cfg.has_seed) {
+      s.rng.seed(cfg.seed);
+    } else {
+      std::random_device rd;
+      s.rng.seed(rd());
+    }
   }
   if (cfg.velocity_kind == DepositConfig::Uniform && cfg.speed_min < cfg.speed_max) {
     s.speed = std::uniform_real_distribution<double>(cfg.speed_min, cfg.speed_max);
