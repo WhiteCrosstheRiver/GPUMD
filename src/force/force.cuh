@@ -102,6 +102,7 @@ private:
   int active_cache_N_ = -1;
   int active_cache_fixed_group_ = -1;
   int active_generation_ = 0;
+  int last_skip_state_ = -1; // for logging changes of the min_frozen decision only
   SkipOptions skip_options_;
   std::shared_ptr<gpumd_ext::ThrustCachedAllocator> skip_alloc_;
   void clear_active_pointers();

@@ -465,12 +465,15 @@ void Force::prepare_active_atoms(const int number_of_atoms, std::vector<Group>& 
       potential->skip_options = skip_options_;
     }
   }
-  if (!worth_it && num_frozen > 0 && skip_options_.min_frozen_fraction > 0.0) {
+  if (skip_options_.min_frozen_fraction > 0.0 && num_frozen > 0 &&
+      last_skip_state_ != (worth_it ? 1 : 0)) {
     printf(
-      "Fix skip off for this run: %d of %d atoms frozen, below min_frozen %g.\n",
+      "Fix skip %s: %d of %d atoms frozen (min_frozen %g).\n",
+      worth_it ? "on" : "off",
       num_frozen,
       number_of_atoms,
       skip_options_.min_frozen_fraction);
+    last_skip_state_ = worth_it ? 1 : 0;
   }
   active_cache_valid_ = true;
   active_cache_N_ = number_of_atoms;
