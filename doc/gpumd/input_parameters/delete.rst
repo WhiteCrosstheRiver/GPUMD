@@ -26,7 +26,7 @@ By cubic region::
 
 Drop atoms that are not connected to the substrate (special-purpose; off unless written)::
 
-  delete disconnected cutoff <r>
+  delete disconnected cutoff <r> [seed frozen]
 
 Drop undercoordinated atoms without a full-system BFS (fast; special-purpose)::
 
@@ -56,6 +56,11 @@ Who is deleted after an atom matches ``expr``:
 Use ``selected F`` when a Si still has two Si neighbors but many F: delete the matching Si and the nearby F, not the neighboring crystal Si.
 
 ``disconnected`` builds a graph of atom pairs within distance :math:`r` (XY periodic, :math:`z` not periodic), keeps the component that contains the lowest-:math:`z` atom, and deletes the rest.
+With ``seed frozen`` the flood fill starts from the atoms frozen by :ref:`fix <kw_fix>` that can
+touch an unfrozen atom and walks only unfrozen atoms, so the cost scales with the unfrozen region
+(use with ``fix shell ... mode grow``). This equals the full search when every frozen atom belongs
+to the lowest-:math:`z` component, which holds for a frozen substrate; if no atom is frozen the full
+search runs.
 It is never run from :ref:`deposit <kw_deposit>`; write it explicitly if you need it.
 
 ``isolated`` counts neighbors within :math:`r` and deletes according to ``expr`` and ``only`` / ``full`` / ``selected``.

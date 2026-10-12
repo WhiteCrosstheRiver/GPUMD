@@ -395,6 +395,60 @@ inline void main_component(
   }
 }
 
+// keep[i] = 1 for every anchor atom and for every other atom connected to an
+// anchor through non-anchor atoms (anchors: e.g. atom.cpu_fixed). When all
+// anchors belong to the component of the lowest atom (a frozen substrate whose
+// lowest atom is frozen), this equals main_component() for the non-anchor atoms,
+// at O(N_mobile) cost: only anchors that can touch a mobile atom are seeds.
+// Used by `delete disconnected ... seed frozen`.
+inline void connected_to_anchors(
+  const Atom& atom,
+  const Box& box,
+  int axis,
+  double cutoff,
+  const std::vector<char>& anchor,
+  Workspace& ws,
+  std::vector<char>& keep)
+{
+  const int N = atom.number_of_atoms;
+  keep.assign(N, 0);
+  const double* r0 = atom.cpu_position_per_atom.data();
+  const double* const r[3] = {r0, r0 + N, r0 + 2 * N};
+  ws.cand.clear();
+  double zmin = 0.0;
+  for (int i = 0; i < N; ++i) {
+    if (anchor[i]) {
+      keep[i] = 1;
+      continue;
+    }
+    if (ws.cand.empty() || r[axis][i] < zmin) {
+      zmin = r[axis][i];
+    }
+    ws.cand.push_back(i);
+  }
+  const int nc = (int)ws.cand.size();
+  if (nc == 0) {
+    return;
+  }
+  ws.seeds.clear();
+  for (int j = 0; j < N; ++j) {
+    if (anchor[j] && r[axis][j] >= zmin - cutoff) {
+      ws.seeds.push_back(j);
+    }
+  }
+  std::vector<int> nodes;
+  nodes.reserve(nc + ws.seeds.size());
+  nodes.insert(nodes.end(), ws.cand.begin(), ws.cand.end());
+  nodes.insert(nodes.end(), ws.seeds.begin(), ws.seeds.end());
+  std::vector<char> is_seed(nodes.size(), 0);
+  std::fill(is_seed.begin() + nc, is_seed.end(), 1);
+  std::vector<char> visited;
+  flood_fill(box, r, axis, cutoff, nodes, is_seed, ws, visited);
+  for (int k = 0; k < nc; ++k) {
+    keep[ws.cand[k]] = visited[k];
+  }
+}
+
 // Disc max filter of the height map. radius <= 0 copies (v1 rule).
 inline void smooth_heights(
   const LateralGrid& g,

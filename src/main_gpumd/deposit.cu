@@ -1674,6 +1674,38 @@ struct Launch
   double vel[3];
 };
 
+// The near test can never reject a single-atom entity launched `gap` above a
+// local or global surface when gap >= near_r, the query radius >= near_r, and
+// the atoms of one command are at least near_r apart: every existing atom
+// within the query radius lies at least `gap` below the launch point (the
+// local surface is the highest of them; later commands of a batch see earlier
+// ones through surface.insert_one), and every other atom is farther than the
+// radius laterally. Then the NearIndex over all atoms is not built.
+// Not used with `surface ... mobile`: fixed atoms are then not in the surface
+// index and may lie above the measured surface.
+static bool near_test_is_redundant(const DepositConfig& cfg)
+{
+  if (!cfg.has_near) {
+    return true;
+  }
+  if (cfg.entity != DepositConfig::Atom || cfg.surface_mobile) {
+    return false;
+  }
+  const bool one_atom = !cfg.number_all && cfg.number == 1;
+  const bool spaced_grid =
+    cfg.style == DepositConfig::Grid && std::min(cfg.spacing[0], cfg.spacing[1]) >= cfg.near_r;
+  if (!one_atom && !spaced_grid) {
+    return false;
+  }
+  if (cfg.surface_kind == DepositConfig::Global) {
+    return cfg.surface_gap >= cfg.near_r;
+  }
+  if (cfg.surface_kind == DepositConfig::Local) {
+    return cfg.surface_gap >= cfg.near_r && cfg.surface_radius >= cfg.near_r;
+  }
+  return false;
+}
+
 static bool try_place(
   const DepositConfig& cfg,
   const EntityTemplate& tmpl,
@@ -1692,7 +1724,7 @@ static bool try_place(
   uvH_to_xyz(frame, uv.u, uv.v, H, r);
   wrap_lateral(box, frame, r);
   fill_entity_xyz(tmpl, r, cand.data());
-  if (cfg.has_near && near->overlaps(cand.data(), tmpl.n_atoms, cfg.near_r)) {
+  if (cfg.has_near && near != nullptr && near->overlaps(cand.data(), tmpl.n_atoms, cfg.near_r)) {
       return false;
     }
   Launch L;
@@ -1701,7 +1733,7 @@ static bool try_place(
   L.r[2] = r[2];
   sample_velocity(cfg, frame, r, sampler, L.vel);
   launches.push_back(L);
-  if (cfg.has_near && !skip_new_new) {
+  if (cfg.has_near && near != nullptr && !skip_new_new) {
     near->insert(cand.data(), tmpl.n_atoms);
   }
   return true;
@@ -1848,9 +1880,11 @@ void Deposit(
 
   NearIndex near;
   NearIndex* near_ptr = nullptr;
-  if (cfg.has_near) {
+  if (cfg.has_near && !near_test_is_redundant(cfg)) {
     near.build(atoms, box, cfg.near_r);
     near_ptr = &near;
+  } else if (cfg.has_near) {
+    printf("near %g: always satisfied (gap and radius >= near), index not built.\n", cfg.near_r);
   }
 
   bool skip_new_new = false;
@@ -1937,7 +1971,7 @@ void DepositSequence(
   double max_near_r = 0.0;
   bool any_near = false;
   for (const auto& cfg : cfgs) {
-    if (cfg.has_near) {
+    if (cfg.has_near && !near_test_is_redundant(cfg)) {
       any_near = true;
       max_near_r = std::max(max_near_r, cfg.near_r);
     }
@@ -2032,7 +2066,9 @@ void DepositSequence(
 
     NearIndex* cmd_near = nullptr;
     std::unique_ptr<NearIndex> own_near;
-    if (cfg.has_near && cfg.near_r > max_near_r + 1.0e-12) {
+    if (cfg.has_near && near_test_is_redundant(cfg)) {
+      cmd_near = nullptr; // provably no rejection; see near_test_is_redundant
+    } else if (cfg.has_near && cfg.near_r > max_near_r + 1.0e-12) {
       // rarer case: this command's near radius exceeds the shared build
       own_near = std::make_unique<NearIndex>();
       own_near->build(atoms, box, cfg.near_r);
@@ -2082,12 +2118,16 @@ void DepositSequence(
         surface.insert_one(frame, r);
       }
     }
-    if (cmd_near != nullptr && !skip_new_new) {
+    // a command that skipped its own near test still feeds the shared index,
+    // so a later command of the batch that does test sees its atoms
+    NearIndex* batch_near =
+      (cfg.has_near && near_test_is_redundant(cfg)) ? near_ptr : cmd_near;
+    if (batch_near != nullptr && !skip_new_new) {
       for (int k = 0; k < added.n; ++k) {
         const double r[3] = {added.position[k],
                              added.position[k + added.n],
                              added.position[k + 2 * added.n]};
-        cmd_near->insert_one(r[0], r[1], r[2]);
+        batch_near->insert_one(r[0], r[1], r[2]);
       }
     }
 

@@ -6,6 +6,7 @@
 //   T4  grow mode: incremental result == ratchet of full classifications
 //   T5  timing at production size
 //   T6  deep atoms left unfrozen by the v1 1 A column rule
+//   T7  delete disconnected seed frozen == full BFS for mobile atoms
 //
 // Build and run: bash run.sh
 
@@ -551,6 +552,59 @@ void test_column_artifact()
   }
 }
 
+// ---------------------------------------------------------------- T7
+// delete disconnected ... seed frozen: flood from frozen anchors through mobile
+// atoms must keep exactly the mobile atoms the full BFS keeps.
+void test_seed_frozen_delete()
+{
+  printf("T7: delete disconnected seed frozen == full BFS (mobile atoms)\n");
+  const Box box = make_box(12 * A_SI, 12 * A_SI, 1000.0);
+  int mismatches = 0;
+  double t_full = 0.0;
+  double t_seed = 0.0;
+  int n_atoms = 0;
+  for (unsigned seed = 31; seed <= 36; ++seed) {
+    Builder b = rough_slab(12, 12, 40, seed);
+    // flyers and a detached dimer above the surface
+    double ztop = 0.0;
+    for (double v : b.z) {
+      ztop = std::max(ztop, v);
+    }
+    b.add(10.0, 10.0, ztop + 6.0);
+    b.add(30.0, 30.0, ztop + 5.0);
+    b.add(32.2, 30.0, ztop + 5.0);
+    Atom a = b.atom();
+    n_atoms = a.number_of_atoms;
+    // frozen: shell classification (R = 3, offset 15) as fix shell grow would give
+    shell2::Params p;
+    p.axis = 2;
+    p.cutoff = 2.9;
+    p.offset = 15.0;
+    p.surface_radius = 3.0;
+    shell2::Workspace ws;
+    shell2::Report rep;
+    std::vector<char> frozen;
+    shell2::classify_full(a, box, p, nullptr, ws, frozen, rep);
+    a.cpu_fixed = frozen;
+    auto t0 = std::chrono::steady_clock::now();
+    std::vector<char> keep_full;
+    shell2::main_component(a, box, 2, 2.9, nullptr, ws, keep_full);
+    t_full += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    t0 = std::chrono::steady_clock::now();
+    std::vector<char> keep_seed;
+    shell2::connected_to_anchors(a, box, 2, 2.9, a.cpu_fixed, ws, keep_seed);
+    t_seed += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    for (int i = 0; i < a.number_of_atoms; ++i) {
+      if (!a.cpu_fixed[i] && (keep_full[i] != 0) != (keep_seed[i] != 0)) {
+        ++mismatches;
+      }
+    }
+  }
+  printf("  N = %d: %d mismatching mobile atoms over 6 structures; full %.1f ms, seeded %.1f ms per call\n",
+         n_atoms, mismatches, t_full / 6, t_seed / 6);
+  EXPECT(mismatches == 0, "seeded delete differs from full BFS");
+}
+
 // ---------------------------------------------------------------- T5
 void test_timing()
 {
@@ -626,6 +680,7 @@ int main()
   test_grow(shell2::Connect::Full, 1, 0.0);
   test_grow(shell2::Connect::Frozen, 1, 0.0);
   test_column_artifact();
+  test_seed_frozen_delete();
   test_timing();
   printf(g_fail == 0 ? "ALL TESTS PASSED\n" : "%d CHECKS FAILED\n", g_fail);
   return g_fail == 0 ? 0 : 1;

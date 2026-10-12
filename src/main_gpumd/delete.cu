@@ -18,6 +18,7 @@
 #include "../../extensions/common/topology/connectivity_bfs.cuh"
 #include "../../extensions/common/topology/coord_expr.cuh"
 #include "../../extensions/common/topology/isolated_atoms.cuh"
+#include "../../extensions/common/surface/substrate_shell_v2.cuh"
 #include "utilities/gpu_macro.cuh"
 #include <cmath>
 #include <cstring>
@@ -460,8 +461,15 @@ void Delete(
     printf("Number of atoms to delete: %d\n", num_to_delete);
     print_line_2();
   } else if (style == "disconnected") {
-    if (num_param != 4 || strcmp(param[2], "cutoff") != 0) {
-      PRINT_INPUT_ERROR("Usage: delete disconnected cutoff <r>");
+    // delete disconnected cutoff <r> [seed frozen]
+    bool seed_frozen = false;
+    if (num_param == 6 && strcmp(param[4], "seed") == 0 && strcmp(param[5], "frozen") == 0) {
+      seed_frozen = true;
+    } else if (num_param != 4) {
+      PRINT_INPUT_ERROR("Usage: delete disconnected cutoff <r> [seed frozen]");
+    }
+    if (strcmp(param[2], "cutoff") != 0) {
+      PRINT_INPUT_ERROR("Usage: delete disconnected cutoff <r> [seed frozen]");
     }
     double cutoff = 0.0;
     if (!is_valid_real(param[3], &cutoff)) {
@@ -472,7 +480,25 @@ void Delete(
     }
 
     std::vector<char> keep;
-    find_main_component_from_min_z(atoms, box, cutoff, keep);
+    bool used_seed_frozen = false;
+    if (seed_frozen && atoms.cpu_fixed.size() == static_cast<size_t>(N_old)) {
+      // Frozen atoms (fix) are never deleted and sit in the substrate, so a mobile
+      // atom is connected to the lowest-z component iff it reaches a frozen atom
+      // through mobile atoms. Flood from the frozen atoms that can touch the mobile
+      // region only: O(N_mobile) instead of a full-system BFS.
+      int n_fixed = 0;
+      for (int n = 0; n < N_old; ++n) {
+        n_fixed += atoms.cpu_fixed[n] ? 1 : 0;
+      }
+      if (n_fixed > 0) {
+        static shell2::Workspace ws;
+        shell2::connected_to_anchors(atoms, box, 2, cutoff, atoms.cpu_fixed, ws, keep);
+        used_seed_frozen = true;
+      }
+    }
+    if (!used_seed_frozen) {
+      find_main_component_from_min_z(atoms, box, cutoff, keep);
+    }
     for (int n = 0; n < N_old; n++) {
       if (!keep[n]) {
         to_delete[n] = 1;
@@ -482,7 +508,7 @@ void Delete(
 
     print_line_1();
     printf("Deleting atoms disconnected from the lowest-z component.\n");
-    printf("Cutoff = %.6f\n", cutoff);
+    printf("Cutoff = %.6f%s\n", cutoff, used_seed_frozen ? " (seeded from frozen atoms)" : "");
     printf("Number of atoms to delete: %d\n", num_to_delete);
     print_line_2();
   } else if (style == "isolated") {
