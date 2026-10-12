@@ -14,16 +14,61 @@
 #include <mutex>
 #include <thread>
 #include <vector>
+#if defined(__linux__)
+#include <sched.h>
+#endif
 
 namespace connectivity_bfs_detail {
+
+// CPUs this process may run on. Under `taskset -c k` this is 1, while
+// hardware_concurrency() still reports the whole machine.
+inline int available_cpus()
+{
+#if defined(__linux__)
+  cpu_set_t set;
+  CPU_ZERO(&set);
+  if (sched_getaffinity(0, sizeof(set), &set) == 0) {
+    const int n = CPU_COUNT(&set);
+    if (n > 0) {
+      return n;
+    }
+  }
+#endif
+  const int hw = (int)std::thread::hardware_concurrency();
+  return hw > 0 ? hw : 1;
+}
 
 // Worker threads for the parallel passes. Runs alongside one GPU job; only
 // CPU arrays are touched.
 inline int bfs_thread_count(int N)
 {
-  const int hw = (int)std::thread::hardware_concurrency();
-  const int half = hw > 0 ? std::max(1, hw / 2) : 1;
+  const int half = std::max(1, available_cpus() / 2);
   return std::max(1, std::min(half, std::max(1, N / 65536)));
+}
+
+// Workers of the persistent level-synchronous pool. With a single available
+// CPU the owner would spin while its worker waits for the same core, so the
+// levels are expanded on the calling thread instead.
+inline int bfs_pool_workers(int N) { return available_cpus() >= 2 ? bfs_thread_count(N) : 0; }
+
+// Distinct lateral neighbour cells of c in a periodic row of n cells.
+inline int lateral_neighbours(int c, int n, int out[3])
+{
+  int m = 0;
+  for (int o = -1; o <= 1; ++o) {
+    int x = (c + o) % n;
+    if (x < 0) {
+      x += n;
+    }
+    bool dup = false;
+    for (int q = 0; q < m; ++q) {
+      dup = dup || out[q] == x;
+    }
+    if (!dup) {
+      out[m++] = x;
+    }
+  }
+  return m;
 }
 
 } // namespace connectivity_bfs_detail
@@ -114,8 +159,13 @@ inline __host__ void find_main_component_from_min_axis(
   const double cutoff_sq = cutoff * cutoff;
   const double cell_size = cutoff;
   const double L[3] = {box.cpu_h[0], box.cpu_h[4], box.cpu_h[8]};
-  const int nt0 = std::max(1, (int)std::ceil(L[t0] / cell_size));
-  const int nt1 = std::max(1, (int)std::ceil(L[t1] / cell_size));
+  // Lateral cells at least `cutoff` wide (floor, not ceil): ceil leaves a narrow
+  // last cell at the periodic seam, and pairs straddling it were not stencil
+  // neighbours. The substrate axis is not periodic and keeps cutoff-wide cells.
+  const int nt0 = std::max(1, (int)std::floor(L[t0] / cell_size));
+  const int nt1 = std::max(1, (int)std::floor(L[t1] / cell_size));
+  const double w0 = L[t0] / nt0;
+  const double w1 = L[t1] / nt1;
   const int na = std::max(1, (int)std::ceil((amax - amin + 1.0e-8) / cell_size));
   auto wrap = [](int i, int n) {
     int rem = i % n;
@@ -140,8 +190,8 @@ inline __host__ void find_main_component_from_min_axis(
       }
       workers.emplace_back([&, lo, hi]() {
         for (int i = lo; i < hi; ++i) {
-          c0[i] = wrap((int)std::floor(r[t0][i] / cell_size), nt0);
-          c1[i] = wrap((int)std::floor(r[t1][i] / cell_size), nt1);
+          c0[i] = wrap((int)std::floor(r[t0][i] / w0), nt0);
+          c1[i] = wrap((int)std::floor(r[t1][i] / w1), nt1);
           int ia = (int)std::floor((r[axis][i] - amin) / cell_size);
           if (ia < 0) {
             ia = 0;
@@ -184,7 +234,7 @@ inline __host__ void find_main_component_from_min_axis(
   keep_atomic[seed].store(1);
   std::vector<int> frontier{seed};
 
-  const int n_pool = connectivity_bfs_detail::bfs_thread_count(N);
+  const int n_pool = connectivity_bfs_detail::bfs_pool_workers(N);
   std::atomic<int> gen{0};     // owner bumps per level
   std::atomic<int> workers_done{0};
   std::atomic<int> stop_flag{0};
@@ -197,14 +247,18 @@ inline __host__ void find_main_component_from_min_axis(
     next.clear();
     for (int fi = lo; fi < hi; ++fi) {
       const int i = shared_frontier[fi];
-      for (int o0 = -1; o0 <= 1; ++o0) {
-        for (int o1 = -1; o1 <= 1; ++o1) {
+      int l0[3];
+      int l1[3];
+      const int m0 = connectivity_bfs_detail::lateral_neighbours(c0[i], nt0, l0);
+      const int m1 = connectivity_bfs_detail::lateral_neighbours(c1[i], nt1, l1);
+      for (int q0 = 0; q0 < m0; ++q0) {
+        for (int q1 = 0; q1 < m1; ++q1) {
           for (int oa = -1; oa <= 1; ++oa) {
             const int nia = ca[i] + oa;
             if (nia < 0 || nia >= na) {
               continue;
             }
-            const int nid = cell_id(wrap(c0[i] + o0, nt0), wrap(c1[i] + o1, nt1), nia);
+            const int nid = cell_id(l0[q0], l1[q1], nia);
             for (int k = cell_offset[nid]; k < cell_offset[nid + 1]; ++k) {
               const int j = cell_contents[k];
               if (j == i || keep[j] || !is_ok(j)) {
@@ -288,6 +342,7 @@ inline __host__ void find_main_component_from_min_axis(
       const int chunk = (total + active - 1) / active;
       expand_range(0, std::min(total, chunk), 0);
       while (workers_done.load(std::memory_order_acquire) < n_pool) {
+        std::this_thread::yield();
       }
       std::vector<int> next;
       size_t sum = 0;
@@ -310,14 +365,18 @@ inline __host__ void find_main_component_from_min_axis(
         std::vector<int>& next = next_private[tid];
         for (int fi = saved_lo; fi < saved_hi; ++fi) {
           const int i = shared_frontier[fi];
-          for (int o0 = -1; o0 <= 1; ++o0) {
-            for (int o1 = -1; o1 <= 1; ++o1) {
+          int l0[3];
+          int l1[3];
+          const int m0 = connectivity_bfs_detail::lateral_neighbours(c0[i], nt0, l0);
+          const int m1 = connectivity_bfs_detail::lateral_neighbours(c1[i], nt1, l1);
+          for (int q0 = 0; q0 < m0; ++q0) {
+            for (int q1 = 0; q1 < m1; ++q1) {
               for (int oa = -1; oa <= 1; ++oa) {
                 const int nia = ca[i] + oa;
                 if (nia < 0 || nia >= na) {
                   continue;
                 }
-                const int nid = cell_id(wrap(c0[i] + o0, nt0), wrap(c1[i] + o1, nt1), nia);
+                const int nid = cell_id(l0[q0], l1[q1], nia);
                 for (int k = cell_offset[nid]; k < cell_offset[nid + 1]; ++k) {
                   const int j = cell_contents[k];
                   if (j == i || keep[j] || !is_ok(j)) {
@@ -347,6 +406,7 @@ inline __host__ void find_main_component_from_min_axis(
         }
       }
       while (workers_done.load(std::memory_order_acquire) < n_pool) {
+        std::this_thread::yield();
       }
       frontier.swap(next_private[tid]);
     }

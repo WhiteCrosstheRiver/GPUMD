@@ -5,6 +5,7 @@
 
 #pragma once
 
+#include "connectivity_bfs.cuh" // lateral_neighbours
 #include "coord_expr.cuh"
 #include "model/atom.cuh"
 #include "model/box.cuh"
@@ -23,6 +24,8 @@ struct IsolatedCells
   double zmin = 0.0;
   int nx = 1;
   int ny = 1;
+  double wx = 0.0; // lateral cell widths (>= cell_size)
+  double wy = 0.0;
   int nz = 1;
   std::vector<int> cx, cy, cz;
   std::vector<int> cell_offset;
@@ -56,8 +59,12 @@ struct IsolatedCells
 
     const double Lx = box.cpu_h[0];
     const double Ly = box.cpu_h[4];
-    nx = std::max(1, (int)std::ceil(Lx / cell_size));
-    ny = std::max(1, (int)std::ceil(Ly / cell_size));
+    // lateral cells at least cell_size wide (floor): with ceil the narrow last
+    // cell hid neighbours across the periodic seam from the +-1 stencil
+    nx = std::max(1, (int)std::floor(Lx / cell_size));
+    ny = std::max(1, (int)std::floor(Ly / cell_size));
+    wx = Lx / nx;
+    wy = Ly / ny;
     nz = std::max(1, (int)std::ceil((zmax - zmin + 1.0e-8) / cell_size));
     auto wrap = [](int i, int ncell) {
       int rem = i % ncell;
@@ -72,8 +79,8 @@ struct IsolatedCells
     std::vector<int> cell_of(N);
     std::vector<int> cell_count(ncells, 0);
     for (int i = 0; i < N; ++i) {
-      cx[i] = wrap((int)std::floor(r[0][i] / cell_size), nx);
-      cy[i] = wrap((int)std::floor(r[1][i] / cell_size), ny);
+      cx[i] = wrap((int)std::floor(r[0][i] / wx), nx);
+      cy[i] = wrap((int)std::floor(r[1][i] / wy), ny);
       int iz = (int)std::floor((r[2][i] - zmin) / cell_size);
       if (iz < 0) {
         iz = 0;
@@ -174,10 +181,6 @@ inline void mark_isolated(
   const int nx = use->nx;
   const int ny = use->ny;
   const int nz = use->nz;
-  auto wrap = [](int i, int ncell) {
-    int rem = i % ncell;
-    return rem < 0 ? rem + ncell : rem;
-  };
   auto cell_id = [&](int ix, int iy, int iz) { return ix + nx * (iy + ny * iz); };
 
   std::unordered_map<std::string, int> by_sym;
@@ -197,15 +200,21 @@ inline void mark_isolated(
     touched.clear();
     neigh.clear();
     int total = 0;
-    for (int ox = -1; ox <= 1; ++ox) {
-      for (int oy = -1; oy <= 1; ++oy) {
+    // distinct neighbour cells only: with fewer than 3 cells a duplicated cell
+    // would count its atoms twice
+    int lxs[3];
+    int lys[3];
+    const int mx = connectivity_bfs_detail::lateral_neighbours(use->cx[i], nx, lxs);
+    const int my = connectivity_bfs_detail::lateral_neighbours(use->cy[i], ny, lys);
+    for (int qx = 0; qx < mx; ++qx) {
+      for (int qy = 0; qy < my; ++qy) {
         for (int oz = -1; oz <= 1; ++oz) {
           const int niz = use->cz[i] + oz;
           if (niz < 0 || niz >= nz) {
             continue;
           }
-          const int nix = wrap(use->cx[i] + ox, nx);
-          const int niy = wrap(use->cy[i] + oy, ny);
+          const int nix = lxs[qx];
+          const int niy = lys[qy];
           const int nid = cell_id(nix, niy, niz);
           for (int k = use->cell_offset[nid]; k < use->cell_offset[nid + 1]; ++k) {
             const int j = use->cell_contents[k];

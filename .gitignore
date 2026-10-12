@@ -41,3 +41,4 @@ active*.xyz
 tests/gpumd/fix/bench_ratio/model*.xyz
 tests/gpumd/**/gpumd
 tests/extensions/shell_v2/test_shell_v2
+tests/extensions/shell_v2/test_neighbor_cells
