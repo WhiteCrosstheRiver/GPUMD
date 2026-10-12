@@ -539,6 +539,7 @@ void initialize_position(
 
   find_type_size(atom.number_of_atoms, number_of_types, atom.cpu_type, atom.cpu_type_size);
   atom.cpu_fixed.assign(atom.number_of_atoms, 0);
+  atom.cpu_shell_frozen.assign(atom.number_of_atoms, 0);
 }
 
 void allocate_memory_gpu(std::vector<Group>& group, Atom& atom, GPU_Vector<double>& thermo)

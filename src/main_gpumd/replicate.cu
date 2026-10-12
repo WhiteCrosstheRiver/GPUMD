@@ -55,6 +55,7 @@ void Replicate(
   new_atoms.cpu_charge.resize(N);
   new_atoms.cpu_atom_symbol.resize(N);
   new_atoms.cpu_fixed.assign(N, 0);
+  new_atoms.cpu_shell_frozen.assign(N, 0);
   new_atoms.cpu_position_per_atom.resize(N * 3);
   new_atoms.cpu_velocity_per_atom.resize(N * 3);
   int cur = 0;
@@ -68,6 +69,8 @@ void Replicate(
           new_atoms.cpu_atom_symbol[cur] = atoms.cpu_atom_symbol[nn];
           new_atoms.cpu_fixed[cur] =
             (nn < (int)atoms.cpu_fixed.size()) ? atoms.cpu_fixed[nn] : 0;
+          new_atoms.cpu_shell_frozen[cur] =
+            (nn < (int)atoms.cpu_shell_frozen.size()) ? atoms.cpu_shell_frozen[nn] : 0;
           for (int m = 0; m < groups.size(); m++) {
             new_groups[m].cpu_label[cur] = groups[m].cpu_label[nn];
             new_groups[m].cpu_label_user[cur] =
@@ -98,6 +101,7 @@ void Replicate(
   atoms.cpu_charge.swap(new_atoms.cpu_charge);
   atoms.cpu_atom_symbol.swap(new_atoms.cpu_atom_symbol);
   atoms.cpu_fixed.swap(new_atoms.cpu_fixed);
+  atoms.cpu_shell_frozen.swap(new_atoms.cpu_shell_frozen);
   atoms.cpu_position_per_atom.swap(new_atoms.cpu_position_per_atom);
   atoms.cpu_velocity_per_atom.swap(new_atoms.cpu_velocity_per_atom);
   for (int m = 0; m < groups.size(); m++) {

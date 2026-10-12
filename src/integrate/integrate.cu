@@ -43,6 +43,9 @@ The driver class for the various integrators.
 #include "utilities/gpu_macro.cuh"
 #include "utilities/read_file.cuh"
 #include "../../extensions/common/surface/substrate_shell.cuh"
+#include "../../extensions/common/surface/substrate_shell_v2.cuh"
+#include <algorithm>
+#include <chrono>
 #include <cstring>
 #include <string>
 #include <unordered_set>
@@ -221,6 +224,13 @@ void Integrate::finalize()
   move_group = -1;
   fix_accumulating = false;
   fix_frozen.clear();
+  // The grow ratchet assumes its frozen atoms never move. If this run did not
+  // put them in the fixed group, they may have moved: classify from scratch at
+  // the next grow call.
+  if (shell_grow_state && !shell_grow_committed) {
+    shell_grow_state->valid = false;
+  }
+  shell_grow_committed = false;
   deform_x = 0;
   deform_y = 0;
   deform_z = 0;
@@ -999,7 +1009,10 @@ static bool is_fix_shell_keyword(const char* token)
 {
   return strcmp(token, "substrate") == 0 || strcmp(token, "cutoff") == 0 ||
          strcmp(token, "offset") == 0 || strcmp(token, "type") == 0 ||
-         strcmp(token, "region") == 0;
+         strcmp(token, "region") == 0 || strcmp(token, "surface") == 0 ||
+         strcmp(token, "cell") == 0 || strcmp(token, "mode") == 0 ||
+         strcmp(token, "connect") == 0 || strcmp(token, "every") == 0 ||
+         strcmp(token, "reset") == 0;
 }
 
 static int source_group_label(const Group& group, int n)
@@ -1056,6 +1069,86 @@ static void commit_fix_union(
     group[0].cpu_size[1]);
 }
 
+// fix shell v2 (extensions/common/surface/substrate_shell_v2.cuh).
+// recede: one full classification (v1 rule + disc filter + seam-safe flood fill).
+// grow:   ratchet in atom.cpu_shell_frozen, incremental after the first call.
+// Either way the frozen atoms are OR-ed into the fix union of this run block.
+static void parse_fix_shell_v2(
+  Integrate& integrate,
+  Atom& atom,
+  Box& box,
+  const int axis,
+  const double cutoff,
+  const double offset,
+  const double surface_radius,
+  const double cell_size,
+  const bool grow,
+  const shell2::Connect connect,
+  const bool has_every,
+  const int every,
+  const bool reset,
+  const std::unordered_set<std::string>& types,
+  const std::vector<char>* eligible,
+  const double* region_cubic)
+{
+  if (!grow && (connect == shell2::Connect::Frozen || has_every || reset)) {
+    PRINT_INPUT_ERROR("fix shell: connect frozen, every and reset need mode grow.");
+  }
+  shell2::Params p;
+  p.axis = axis;
+  p.cutoff = cutoff;
+  p.offset = offset;
+  p.surface_radius = surface_radius;
+  p.cell_size = cell_size;
+  p.mode = grow ? shell2::Mode::Grow : shell2::Mode::Recede;
+  p.connect = connect;
+  p.every = every;
+  p.reset = reset;
+  p.has_region = region_cubic != nullptr;
+  if (p.has_region) {
+    std::copy(region_cubic, region_cubic + 6, p.region);
+  }
+  p.types.assign(types.begin(), types.end());
+  std::sort(p.types.begin(), p.types.end());
+
+  const int N = atom.number_of_atoms;
+  shell2::Report rep;
+  nvtxRangePushA("fix_shell_v2");
+  if (grow) {
+    if (!integrate.shell_grow_state) {
+      integrate.shell_grow_state = std::make_shared<shell2::GrowState>();
+    }
+    shell2::update_grow(atom, box, p, eligible, *integrate.shell_grow_state, rep);
+    if (!rep.ok) {
+      nvtxRangePop();
+      PRINT_INPUT_ERROR("fix shell found no substrate connected to the minimum along that axis.");
+    }
+    for (int n = 0; n < N; ++n) {
+      if (atom.cpu_shell_frozen[n]) {
+        integrate.fix_frozen[n] = 1;
+      }
+    }
+    integrate.shell_grow_committed = true;
+  } else {
+    static shell2::Workspace ws;
+    std::vector<char> frozen;
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool ok = shell2::classify_full(atom, box, p, eligible, ws, frozen, rep);
+    rep.ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    if (!ok) {
+      nvtxRangePop();
+      PRINT_INPUT_ERROR("fix shell found no substrate connected to the minimum along that axis.");
+    }
+    for (int n = 0; n < N; ++n) {
+      if (frozen[n]) {
+        integrate.fix_frozen[n] = 1;
+      }
+    }
+  }
+  nvtxRangePop();
+  shell2::print_report(p, rep);
+}
+
 void Integrate::parse_fix(const char** param, int num_param, std::vector<Group>& group, Atom& atom, Box& box)
 {
   if (num_param < 2) {
@@ -1081,10 +1174,77 @@ void Integrate::parse_fix(const char** param, int num_param, std::vector<Group>&
     bool has_region = false;
     std::unordered_set<std::string> types;
     double region_cubic[6];
+    // v2 (substrate_shell_v2.cuh); any of these keywords selects the v2 path
+    bool use_v2 = false;
+    bool has_surface_radius = false;
+    double surface_radius = 0.0;
+    double cell_size = 1.0;
+    bool grow = false;
+    bool has_connect = false;
+    shell2::Connect connect = shell2::Connect::Full;
+    bool has_every = false;
+    int every = 1;
+    bool reset = false;
 
     int i = 2;
     while (i < num_param) {
-      if (strcmp(param[i], "substrate") == 0) {
+      if (strcmp(param[i], "surface") == 0) {
+        if (i + 2 >= num_param || strcmp(param[i + 1], "radius") != 0) {
+          PRINT_INPUT_ERROR("Usage: fix shell ... surface radius <R>");
+        }
+        if (!is_valid_real(param[i + 2], &surface_radius) || surface_radius < 0.0) {
+          PRINT_INPUT_ERROR("fix shell surface radius should be a number >= 0.");
+        }
+        has_surface_radius = true;
+        use_v2 = true;
+        i += 3;
+      } else if (strcmp(param[i], "cell") == 0) {
+        if (i + 1 >= num_param || !is_valid_real(param[i + 1], &cell_size) || cell_size <= 0.0) {
+          PRINT_INPUT_ERROR("Usage: fix shell ... cell <c> with c > 0.");
+        }
+        use_v2 = true;
+        i += 2;
+      } else if (strcmp(param[i], "mode") == 0) {
+        if (i + 1 >= num_param) {
+          PRINT_INPUT_ERROR("Usage: fix shell ... mode recede|grow");
+        }
+        if (strcmp(param[i + 1], "grow") == 0) {
+          grow = true;
+        } else if (strcmp(param[i + 1], "recede") == 0) {
+          grow = false;
+        } else {
+          PRINT_INPUT_ERROR("fix shell mode should be recede or grow.");
+        }
+        use_v2 = true;
+        i += 2;
+      } else if (strcmp(param[i], "connect") == 0) {
+        if (i + 1 >= num_param) {
+          PRINT_INPUT_ERROR("Usage: fix shell ... connect full|frozen|none");
+        }
+        if (strcmp(param[i + 1], "full") == 0) {
+          connect = shell2::Connect::Full;
+        } else if (strcmp(param[i + 1], "frozen") == 0) {
+          connect = shell2::Connect::Frozen;
+        } else if (strcmp(param[i + 1], "none") == 0) {
+          connect = shell2::Connect::None;
+        } else {
+          PRINT_INPUT_ERROR("fix shell connect should be full, frozen, or none.");
+        }
+        has_connect = true;
+        use_v2 = true;
+        i += 2;
+      } else if (strcmp(param[i], "every") == 0) {
+        if (i + 1 >= num_param || !is_valid_int(param[i + 1], &every) || every < 1) {
+          PRINT_INPUT_ERROR("Usage: fix shell ... every <K> with K >= 1.");
+        }
+        has_every = true;
+        use_v2 = true;
+        i += 2;
+      } else if (strcmp(param[i], "reset") == 0) {
+        reset = true;
+        use_v2 = true;
+        i += 1;
+      } else if (strcmp(param[i], "substrate") == 0) {
         if (i + 1 >= num_param) {
           PRINT_INPUT_ERROR("Usage: fix shell substrate <x|y|z> ...");
         }
@@ -1152,7 +1312,8 @@ void Integrate::parse_fix(const char** param, int num_param, std::vector<Group>&
         i += 8;
       } else {
         PRINT_INPUT_ERROR(
-          "Unknown keyword in fix shell. Expected substrate, cutoff, offset, type, or region.");
+          "Unknown keyword in fix shell. Expected substrate, cutoff, offset, type, region, "
+          "surface, cell, mode, connect, every, or reset.");
       }
     }
 
@@ -1177,6 +1338,28 @@ void Integrate::parse_fix(const char** param, int num_param, std::vector<Group>&
         PRINT_INPUT_ERROR("fix shell type matched no atoms.");
       }
       eligible_ptr = &eligible;
+    }
+
+    if (use_v2) {
+      parse_fix_shell_v2(
+        *this,
+        atom,
+        box,
+        axis,
+        cutoff,
+        offset,
+        has_surface_radius ? surface_radius : (grow ? 3.0 : 0.0),
+        cell_size,
+        grow,
+        has_connect ? connect : (grow ? shell2::Connect::Frozen : shell2::Connect::Full),
+        has_every,
+        every,
+        reset,
+        types,
+        eligible_ptr,
+        has_region ? region_cubic : nullptr);
+      commit_fix_union(*this, group, atom, fix_frozen);
+      return;
     }
 
     std::vector<int> label;

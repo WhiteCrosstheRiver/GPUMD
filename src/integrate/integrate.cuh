@@ -22,6 +22,10 @@
 #include <vector>
 
 class Atom;
+namespace shell2
+{
+struct GrowState; // extensions/common/surface/substrate_shell_v2.cuh
+}
 
 class Integrate
 {
@@ -77,6 +81,9 @@ public:
   double move_velocity[3];
   std::vector<char> fix_frozen;
   bool fix_accumulating = false;
+  // fix shell mode grow: survives finalize(); invalidated after a run without a grow commit
+  std::shared_ptr<shell2::GrowState> shell_grow_state;
+  bool shell_grow_committed = false;
 
   double temperature;  // target temperature at a specific time
   double temperature1; // target initial temperature for a run

@@ -147,6 +147,7 @@ void AtomMutation::append_atoms(
   new_atoms.cpu_charge.resize(N_new);
   new_atoms.cpu_atom_symbol.resize(N_new);
   new_atoms.cpu_fixed.assign(N_new, 0);
+  new_atoms.cpu_shell_frozen.assign(N_new, 0); // appended atoms start mobile
   new_atoms.cpu_position_per_atom.resize(N_new * 3);
   new_atoms.cpu_velocity_per_atom.resize(N_new * 3);
 
@@ -156,6 +157,8 @@ void AtomMutation::append_atoms(
     new_atoms.cpu_charge[n] = (n < (int)atom.cpu_charge.size()) ? atom.cpu_charge[n] : 0.0f;
     new_atoms.cpu_atom_symbol[n] = atom.cpu_atom_symbol[n];
     new_atoms.cpu_fixed[n] = (n < (int)atom.cpu_fixed.size()) ? atom.cpu_fixed[n] : 0;
+    new_atoms.cpu_shell_frozen[n] =
+      (n < (int)atom.cpu_shell_frozen.size()) ? atom.cpu_shell_frozen[n] : 0;
     copy_soa3(atom.cpu_position_per_atom, N_old, n, new_atoms.cpu_position_per_atom, N_new, n);
     copy_soa3(atom.cpu_velocity_per_atom, N_old, n, new_atoms.cpu_velocity_per_atom, N_new, n);
   }
@@ -192,6 +195,7 @@ void AtomMutation::append_atoms(
   atom.cpu_charge.swap(new_atoms.cpu_charge);
   atom.cpu_atom_symbol.swap(new_atoms.cpu_atom_symbol);
   atom.cpu_fixed.swap(new_atoms.cpu_fixed);
+  atom.cpu_shell_frozen.swap(new_atoms.cpu_shell_frozen);
   atom.cpu_position_per_atom.swap(new_atoms.cpu_position_per_atom);
   atom.cpu_velocity_per_atom.swap(new_atoms.cpu_velocity_per_atom);
   for (int m = 0; m < n_group; ++m) {
@@ -234,6 +238,7 @@ void AtomMutation::remove_atoms(
   kept.cpu_charge.resize(n_keep);
   kept.cpu_atom_symbol.resize(n_keep);
   kept.cpu_fixed.assign(n_keep, 0);
+  kept.cpu_shell_frozen.assign(n_keep, 0);
   kept.cpu_position_per_atom.resize(n_keep * 3);
   kept.cpu_velocity_per_atom.resize(n_keep * 3);
   std::vector<std::vector<int>> new_labels(n_group);
@@ -275,6 +280,8 @@ void AtomMutation::remove_atoms(
           kept.cpu_charge[dst] = atom.cpu_charge[n];
           kept.cpu_atom_symbol[dst] = atom.cpu_atom_symbol[n];
           kept.cpu_fixed[dst] = (n < (int)atom.cpu_fixed.size()) ? atom.cpu_fixed[n] : 0;
+          kept.cpu_shell_frozen[dst] =
+            (n < (int)atom.cpu_shell_frozen.size()) ? atom.cpu_shell_frozen[n] : 0;
           copy_soa3(atom.cpu_position_per_atom, N_old, n, kept.cpu_position_per_atom, n_keep, dst);
           copy_soa3(atom.cpu_velocity_per_atom, N_old, n, kept.cpu_velocity_per_atom, n_keep, dst);
           for (int m = 0; m < n_group; ++m) {
@@ -296,6 +303,7 @@ void AtomMutation::remove_atoms(
   atom.cpu_charge.swap(kept.cpu_charge);
   atom.cpu_atom_symbol.swap(kept.cpu_atom_symbol);
   atom.cpu_fixed.swap(kept.cpu_fixed);
+  atom.cpu_shell_frozen.swap(kept.cpu_shell_frozen);
   atom.cpu_position_per_atom.swap(kept.cpu_position_per_atom);
   atom.cpu_velocity_per_atom.swap(kept.cpu_velocity_per_atom);
   for (int m = 0; m < n_group; ++m) {

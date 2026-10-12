@@ -563,6 +563,11 @@ void Run::parse_one_keyword(std::vector<std::string>& tokens)
     property.reset(new Compute(param, num_param, group));
     measure.properties.emplace_back(std::move(property));
   } else if (strcmp(param[0], "fix") == 0) {
+    if (num_param >= 2 && strcmp(param[1], "shell") == 0) {
+      // fix shell classifies on CPU positions; after a run they are stale unless
+      // a deposit/delete synced them, so sync here (positions and velocities)
+      AtomMutation::sync_cpu_from_gpu(atom);
+    }
     integrate.parse_fix(param, num_param, group, atom, box);
   } else if (strcmp(param[0], "move") == 0) {
     integrate.parse_move(param, num_param, group);

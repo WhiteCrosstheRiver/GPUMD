@@ -30,6 +30,7 @@ public:
   std::vector<double> cpu_velocity_per_atom;
   std::vector<std::string> cpu_atom_symbol;
   std::vector<char> cpu_fixed; // 1 if last fix froze this atom; delete never removes these
+  std::vector<char> cpu_shell_frozen; // fix shell mode grow ratchet; kept aligned by AtomMutation
   GPU_Vector<int> type;                  // per-atom type (1 component)
   GPU_Vector<double> mass;               // per-atom mass (1 component)
   GPU_Vector<float> charge;              // per-atom charge (1 component)

@@ -38,6 +38,54 @@ It is never run from :ref:`deposit <kw_deposit>` or :ref:`delete <kw_delete>`.
 
 The local surface is a height map of the substrate in the plane perpendicular to the axis, so a groove along the beam direction keeps its floor in the unfixed shell.
 
+Growth mode and other v2 options
+--------------------------------
+These keywords are opt-in. Without them ``fix shell`` runs exactly as above (v1)::
+
+  fix shell substrate <x|y|z> cutoff <r> offset <d> [type ...] [region cubic ...]
+            [surface radius <R>] [cell <c>] [mode recede|grow]
+            [connect full|frozen|none] [every <K>] [reset]
+
+* ``surface radius <R>``: the local surface of an atom is the highest substrate atom whose
+  height-map cell lies within :math:`R` (Å) of the atom's cell. ``R = 0`` is the v1 rule (the
+  atom's own ``cell`` column only). With thermal displacement the v1 column rule leaves
+  isolated atoms unfrozen deep in the bulk (a 1 Å column that happens to hold no higher atom);
+  :math:`R \ge 2` Å removes them. Default: 0 in ``mode recede``, 3 in ``mode grow``.
+* ``cell <c>``: height-map cell size (Å). Default 1.0 (v1).
+* ``mode recede`` (default): classify from scratch at every call; atoms are released when the
+  surface recedes (etching).
+* ``mode grow``: ratchet for deposition. An atom frozen by an earlier grow call stays frozen;
+  only mobile atoms are examined, so the cost scales with the mobile shell, not with N.
+  The state lives in ``atom.cpu_shell_frozen`` (appended as 0 by ``deposit``, compacted by
+  ``delete``). It is dropped automatically after any ``run`` whose fixed group did not include
+  it (for example a final relaxation with only ``fix 1``), because those atoms may then move.
+* ``connect full``: substrate = flood fill from the lowest atom (as v1, with lateral cells at
+  least ``cutoff`` wide so bonds across the periodic seam are found).
+  ``connect frozen`` (grow default): flood fill from the frozen band through mobile atoms only.
+  ``connect none``: every eligible atom is substrate (use right after ``delete disconnected``).
+* ``every <K>`` (grow only): classify on every K-th call; the other calls re-apply the cached
+  frozen set. At 5 atoms per pulse on 42.7 nm\ :sup:`2` the surface rises about 0.02 Å per pulse,
+  so ``every 10`` lags the freeze front by about 0.2 Å.
+* ``reset`` (grow only): drop the ratchet and classify from scratch at this call.
+
+``fix shell`` now syncs CPU positions from the GPU before classifying (v1 and v2). Previously it
+used the positions of the last ``deposit``/``delete``, which are stale after a ``run``.
+
+Deposition loop with a sliding frozen zone::
+
+  for i range 1 2352
+      deposit grid atom Si number 5 ... surface local radius 6.0 gap 3.0 near 2.5 ...
+      ensemble nvt_ber 800 800 40.0
+      fix 1
+      fix shell substrate z cutoff 2.9 offset 20 surface radius 3 mode grow every 10
+      dump_thermo 500
+      run 500
+  end
+
+Choose ``offset`` from the mobility profile of a full-dynamics reference run (atoms deeper
+than ``offset`` should not move beyond thermal vibration during the remaining growth), and
+validate against that reference before production.
+
 Etch loop::
 
   for i range 1 100
@@ -90,6 +138,7 @@ Caveats
 -------
 This keyword is not propagating, which means that it only affects the simulation within the run it belongs to.
 Put ``fix shell`` inside :ref:`for <kw_for>` so the frozen set follows a receding surface.
-Do not call it every MD step: it runs a full-system BFS each time it is issued.
+Do not call it every MD step: ``mode recede`` runs a full-system flood fill each time it is
+issued. ``mode grow`` examines only mobile atoms after its first call.
 
 ``fix shell`` replaces grouping method 0. Extra groups for ``compute`` / heat baths should use grouping method 1 or higher.
