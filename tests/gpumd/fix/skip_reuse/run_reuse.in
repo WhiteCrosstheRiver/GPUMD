@@ -1,0 +1,8 @@
+potential       ../../../../potentials/nep/Si_2022_NEP3_4body.txt
+velocity        1500 seed 7
+time_step       1.0
+fix_skip        min_frozen 0 rebuild 20 skin 1.0 cache_alloc 1
+ensemble        nve
+fix             1
+dump_force      1
+run             40

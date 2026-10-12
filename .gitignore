@@ -42,3 +42,5 @@ tests/gpumd/fix/bench_ratio/model*.xyz
 tests/gpumd/**/gpumd
 tests/extensions/shell_v2/test_shell_v2
 tests/extensions/shell_v2/test_neighbor_cells
+tests/gpumd/fix/shell_grow/model.xyz
+tests/gpumd/fix/skip_reuse/model.xyz

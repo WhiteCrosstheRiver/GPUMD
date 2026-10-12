@@ -42,9 +42,9 @@ Under these invariants an incremental grow call freezes exactly the atoms a
 full classification would newly freeze (tested in tests/extensions/shell_v2).
 
 The flood fill uses lateral cells at least `cutoff` wide (floor(L/cutoff)
-cells). The v1 BFS uses ceil(L/cutoff) cells, which leaves a narrow last cell
-at the periodic seam and misses pairs that straddle it; see
-tests/extensions/shell_v2 (seam test).
+cells). Before the companion fix in connectivity_bfs.cuh the v1 BFS used
+ceil(L/cutoff) cells, which leaves a narrow last cell at the periodic seam and
+misses pairs that straddle it; see tests/extensions/shell_v2 (T2, T3, N1, N2).
 ------------------------------------------------------------------------------*/
 
 #include "model/atom.cuh"
