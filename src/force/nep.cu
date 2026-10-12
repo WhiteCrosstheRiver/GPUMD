@@ -35,6 +35,7 @@ heat transport, Phys. Rev. B. 104, 104309 (2021).
 #include <thrust/copy.h>
 #include <thrust/execution_policy.h>
 #include <thrust/iterator/counting_iterator.h>
+#include "../../extensions/common/gpu/thrust_cached_allocator.cuh"
 #include <vector>
 
 const std::string ELEMENTS[NUM_ELEMENTS] = {
@@ -607,18 +608,33 @@ static int halo_stencil(const double thickness, const int nbin, const double rc)
   return s < 1 ? 1 : s;
 }
 
-static int compact_mask_to_indices(const char* mask, const int N, GPU_Vector<int>& indices)
+static int compact_mask_to_indices(
+  const char* mask,
+  const int N,
+  GPU_Vector<int>& indices,
+  gpumd_ext::ThrustCachedAllocator* alloc = nullptr)
 {
   if (indices.size() != static_cast<size_t>(N)) {
     indices.resize(N);
   }
-  int* compact_end = thrust::copy_if(
-    thrust::device,
-    thrust::counting_iterator<int>(0),
-    thrust::counting_iterator<int>(N),
-    mask,
-    indices.data(),
-    NonzeroChar());
+  int* compact_end = nullptr;
+  if (alloc != nullptr) {
+    compact_end = thrust::copy_if(
+      gpumd_ext::thrust_policy(*alloc),
+      thrust::counting_iterator<int>(0),
+      thrust::counting_iterator<int>(N),
+      mask,
+      indices.data(),
+      NonzeroChar());
+  } else {
+    compact_end = thrust::copy_if(
+      thrust::device,
+      thrust::counting_iterator<int>(0),
+      thrust::counting_iterator<int>(N),
+      mask,
+      indices.data(),
+      NonzeroChar());
+  }
   return static_cast<int>(compact_end - indices.data());
 }
 
@@ -635,7 +651,8 @@ static int build_nep_centers(
   const double rc,
   GPU_Vector<char>& influence_mask,
   GPU_Vector<int>& influence_indices,
-  GPU_Vector<int>& cell_has_active)
+  GPU_Vector<int>& cell_has_active,
+  gpumd_ext::ThrustCachedAllocator* alloc = nullptr)
 {
   if (ptr_active_mask == nullptr) {
     return -1;
@@ -679,7 +696,145 @@ static int build_nep_centers(
     cell_has_active.data(),
     influence_mask.data());
   GPU_CHECK_KERNEL
-  return compact_mask_to_indices(influence_mask.data(), N, influence_indices);
+  return compact_mask_to_indices(influence_mask.data(), N, influence_indices, alloc);
+}
+
+// max |r - r_ref|^2 over active atoms (minimum image), as the bit pattern of a
+// non-negative double so atomicMax on unsigned long long orders it correctly
+static __global__ void gpu_max_active_displacement2(
+  const int num_active,
+  const int* __restrict__ active_indices,
+  const int N,
+  const Box box,
+  const double* __restrict__ g_x,
+  const double* __restrict__ g_y,
+  const double* __restrict__ g_z,
+  const double* __restrict__ g_ref,
+  unsigned long long* g_max_bits)
+{
+  __shared__ double s_max[128];
+  const int t = blockIdx.x * blockDim.x + threadIdx.x;
+  double d2 = 0.0;
+  if (t < num_active) {
+    const int i = active_indices[t];
+    double dx = g_x[i] - g_ref[i];
+    double dy = g_y[i] - g_ref[i + N];
+    double dz = g_z[i] - g_ref[i + 2 * N];
+    apply_mic(box, dx, dy, dz);
+    d2 = dx * dx + dy * dy + dz * dz;
+  }
+  s_max[threadIdx.x] = d2;
+  __syncthreads();
+  for (int offset = blockDim.x >> 1; offset > 0; offset >>= 1) {
+    if (threadIdx.x < offset && s_max[threadIdx.x + offset] > s_max[threadIdx.x]) {
+      s_max[threadIdx.x] = s_max[threadIdx.x + offset];
+    }
+    __syncthreads();
+  }
+  if (threadIdx.x == 0) {
+    atomicMax(g_max_bits, (unsigned long long)__double_as_longlong(s_max[0]));
+  }
+}
+
+/*
+fix_skip influence-set reuse. The centers list is a superset of the atoms whose
+descriptors the active forces need (active atoms plus everything within rc).
+Built with a halo of rc + skin, it stays a superset as long as no active atom has
+moved by skin since the build (frozen atoms do not move). So it is rebuilt when
+  - reuse is off (influence_every <= 1 or skin <= 0: the original per-step path),
+  - N or the active set changed (Force bumps active_generation),
+  - it is influence_every steps old, or
+  - the max active displacement since the build reached skin (checked every step:
+    one small kernel and one 8-byte copy instead of the full mask + compaction).
+*/
+static int build_nep_centers_cached(
+  NEP_Data& d,
+  const GPU_Vector<char>* ptr_active_mask,
+  const GPU_Vector<int>* ptr_active_indices,
+  const int num_active,
+  const int active_generation,
+  const SkipOptions& opt,
+  const int N,
+  const int nx,
+  const int ny,
+  const int nz,
+  const Box& box,
+  const GPU_Vector<double>& position_per_atom,
+  const double rc_inv,
+  const double rc)
+{
+  if (ptr_active_mask == nullptr) {
+    d.influence_num_centers = -1;
+    d.influence_built_N = -1;
+    return -1;
+  }
+  gpumd_ext::ThrustCachedAllocator* alloc = nullptr;
+  if (opt.cached_alloc) {
+    if (!d.thrust_alloc) {
+      d.thrust_alloc = std::make_shared<gpumd_ext::ThrustCachedAllocator>();
+    }
+    alloc = d.thrust_alloc.get();
+  }
+  const bool reuse = opt.influence_every > 1 && opt.influence_skin > 0.0 &&
+                     ptr_active_indices != nullptr && num_active >= 0;
+  bool rebuild = !reuse || d.influence_num_centers < 0 || d.influence_built_N != N ||
+                 d.influence_built_generation != active_generation ||
+                 d.influence_steps_since_build + 1 >= opt.influence_every;
+  if (!rebuild && num_active > 0) {
+    if (d.influence_max_disp2.size() != 1) {
+      d.influence_max_disp2.resize(1);
+    }
+    CHECK(gpuMemset(d.influence_max_disp2.data(), 0, sizeof(unsigned long long)));
+    gpu_max_active_displacement2<<<(num_active - 1) / 128 + 1, 128>>>(
+      num_active,
+      ptr_active_indices->data(),
+      N,
+      box,
+      position_per_atom.data(),
+      position_per_atom.data() + N,
+      position_per_atom.data() + N * 2,
+      d.influence_ref_position.data(),
+      d.influence_max_disp2.data());
+    GPU_CHECK_KERNEL
+    unsigned long long bits = 0;
+    d.influence_max_disp2.copy_to_host(&bits);
+    double max_d2 = 0.0;
+    memcpy(&max_d2, &bits, sizeof(double));
+    rebuild = max_d2 >= opt.influence_skin * opt.influence_skin;
+  }
+  if (!rebuild) {
+    ++d.influence_steps_since_build;
+    return d.influence_num_centers;
+  }
+  const int num_centers = build_nep_centers(
+    ptr_active_mask,
+    N,
+    nx,
+    ny,
+    nz,
+    box,
+    position_per_atom,
+    rc_inv,
+    reuse ? rc + opt.influence_skin : rc,
+    d.influence_mask,
+    d.influence_indices,
+    d.cell_has_active,
+    alloc);
+  d.influence_num_centers = num_centers;
+  d.influence_built_N = N;
+  d.influence_built_generation = active_generation;
+  d.influence_steps_since_build = 0;
+  if (reuse) {
+    if (d.influence_ref_position.size() != static_cast<size_t>(3 * N)) {
+      d.influence_ref_position.resize(3 * N);
+    }
+    CHECK(gpuMemcpy(
+      d.influence_ref_position.data(),
+      position_per_atom.data(),
+      sizeof(double) * 3 * N,
+      gpuMemcpyDeviceToDevice));
+  }
+  return num_centers;
 }
 
 static void fill_large_box_bins(Box& box, const double rc_cell_list, int num_bins[3])
@@ -1489,8 +1644,13 @@ void NEP::compute_large_box(
     nep_data.cell_count_sum,
     nep_data.cell_contents);
 
-  const int num_centers = build_nep_centers(
+  const int num_centers = build_nep_centers_cached(
+    nep_data,
     ptr_active_mask,
+    ptr_active_indices,
+    num_active,
+    active_generation,
+    skip_options,
     N,
     num_bins[0],
     num_bins[1],
@@ -1498,10 +1658,7 @@ void NEP::compute_large_box(
     box,
     position_per_atom,
     2.0 / rc,
-    rc,
-    nep_data.influence_mask,
-    nep_data.influence_indices,
-    nep_data.cell_has_active);
+    rc);
   log_nep_large_box_cells(num_bins[0], num_bins[1], num_bins[2], num_centers, N);
   const int* centers = (num_centers >= 0) ? nep_data.influence_indices.data() : nullptr;
   if (num_centers >= 0) {
@@ -2144,8 +2301,13 @@ void NEP::compute_large_box(
     nep_data.cell_count_sum,
     nep_data.cell_contents);
 
-  const int num_centers = build_nep_centers(
+  const int num_centers = build_nep_centers_cached(
+    nep_data,
     ptr_active_mask,
+    ptr_active_indices,
+    num_active,
+    active_generation,
+    skip_options,
     N,
     num_bins[0],
     num_bins[1],
@@ -2153,10 +2315,7 @@ void NEP::compute_large_box(
     box,
     position_per_atom,
     2.0 / rc,
-    rc,
-    nep_data.influence_mask,
-    nep_data.influence_indices,
-    nep_data.cell_has_active);
+    rc);
   log_nep_large_box_cells(num_bins[0], num_bins[1], num_bins[2], num_centers, N);
   const int* centers = (num_centers >= 0) ? nep_data.influence_indices.data() : nullptr;
   if (num_centers >= 0) {

@@ -45,6 +45,7 @@ The driver class calculating force and related quantities.
 #include <thrust/copy.h>
 #include <thrust/execution_policy.h>
 #include <thrust/iterator/counting_iterator.h>
+#include "../../extensions/common/gpu/thrust_cached_allocator.cuh"
 #include <vector>
 
 #define BLOCK_SIZE 128
@@ -363,7 +364,26 @@ static __global__ void gpu_zero_fixed_force(
   }
 }
 
-void Force::set_fixed_group(const int fixed_group) { fixed_group_ = fixed_group; }
+void Force::set_fixed_group(const int fixed_group)
+{
+  fixed_group_ = fixed_group;
+  active_cache_valid_ = false; // fix may have changed the labels since the last run
+}
+
+void Force::set_skip_options(const SkipOptions& options)
+{
+  skip_options_ = options;
+  active_cache_valid_ = false;
+}
+
+void Force::clear_active_pointers()
+{
+  for (auto& potential : potentials) {
+    potential->ptr_active_mask = nullptr;
+    potential->ptr_active_indices = nullptr;
+    potential->num_active = -1;
+  }
+}
 
 void Force::set_need_full_observables(const bool need_full)
 {
@@ -379,11 +399,15 @@ void Force::prepare_active_atoms(const int number_of_atoms, std::vector<Group>& 
                             (compute_hnemdec_ < 0);
 
   if (!can_optimize) {
-    for (auto& potential : potentials) {
-      potential->ptr_active_mask = nullptr;
-      potential->ptr_active_indices = nullptr;
-      potential->num_active = -1;
-    }
+    clear_active_pointers();
+    active_cache_valid_ = false;
+    return;
+  }
+
+  // Group labels and N are constant inside a run, so the active set built at
+  // the first force call of a run stays exact for the whole run.
+  if (active_cache_valid_ && active_cache_N_ == number_of_atoms &&
+      active_cache_fixed_group_ == fixed_group_) {
     return;
   }
 
@@ -397,18 +421,38 @@ void Force::prepare_active_atoms(const int number_of_atoms, std::vector<Group>& 
     number_of_atoms, fixed_group_, group[0].label.data(), active_mask_.data());
   GPU_CHECK_KERNEL
 
-  int* compact_end = thrust::copy_if(
-    thrust::device,
-    thrust::counting_iterator<int>(0),
-    thrust::counting_iterator<int>(number_of_atoms),
-    active_mask_.data(),
-    active_indices_.data(),
-    NonzeroChar());
+  int* compact_end = nullptr;
+  if (skip_options_.cached_alloc) {
+    if (!skip_alloc_) {
+      skip_alloc_ = std::make_shared<gpumd_ext::ThrustCachedAllocator>();
+    }
+    compact_end = thrust::copy_if(
+      gpumd_ext::thrust_policy(*skip_alloc_),
+      thrust::counting_iterator<int>(0),
+      thrust::counting_iterator<int>(number_of_atoms),
+      active_mask_.data(),
+      active_indices_.data(),
+      NonzeroChar());
+  } else {
+    compact_end = thrust::copy_if(
+      thrust::device,
+      thrust::counting_iterator<int>(0),
+      thrust::counting_iterator<int>(number_of_atoms),
+      active_mask_.data(),
+      active_indices_.data(),
+      NonzeroChar());
+  }
   num_active_ = static_cast<int>(compact_end - active_indices_.data());
 
+  // Skipping only pays when enough atoms are frozen; below the threshold the
+  // full path computes the same active forces with less bookkeeping.
+  const int num_frozen = number_of_atoms - num_active_;
+  const bool worth_it =
+    num_frozen > 0 && num_frozen >= skip_options_.min_frozen_fraction * number_of_atoms;
+  ++active_generation_;
   bool any_skip = false;
   for (auto& potential : potentials) {
-    if (potential->influence_policy() == InfluencePolicy::Full) {
+    if (!worth_it || potential->influence_policy() == InfluencePolicy::Full) {
       potential->ptr_active_mask = nullptr;
       potential->ptr_active_indices = nullptr;
       potential->num_active = -1;
@@ -417,8 +461,20 @@ void Force::prepare_active_atoms(const int number_of_atoms, std::vector<Group>& 
       potential->ptr_active_mask = &active_mask_;
       potential->ptr_active_indices = &active_indices_;
       potential->num_active = num_active_;
+      potential->active_generation = active_generation_;
+      potential->skip_options = skip_options_;
     }
   }
+  if (!worth_it && num_frozen > 0 && skip_options_.min_frozen_fraction > 0.0) {
+    printf(
+      "Fix skip off for this run: %d of %d atoms frozen, below min_frozen %g.\n",
+      num_frozen,
+      number_of_atoms,
+      skip_options_.min_frozen_fraction);
+  }
+  active_cache_valid_ = true;
+  active_cache_N_ = number_of_atoms;
+  active_cache_fixed_group_ = fixed_group_;
 
   if (!logged_fix_skip_ && any_skip && num_active_ >= 0 && num_active_ < number_of_atoms) {
     printf(
@@ -451,16 +507,14 @@ void Force::finalize()
   compute_hnemd_ = false;
   compute_hnemdec_ = -1;
   fixed_group_ = -1;
-  for (auto& potential : potentials) {
-    potential->ptr_active_mask = nullptr;
-    potential->ptr_active_indices = nullptr;
-    potential->num_active = -1;
-  }
+  active_cache_valid_ = false;
+  clear_active_pointers();
 }
 
 void Force::update_number_of_atoms(const int number_of_atoms)
 {
   number_of_atoms_ = number_of_atoms;
+  active_cache_valid_ = false;
   for (auto& potential : potentials) {
     potential->update_number_of_atoms(number_of_atoms);
   }

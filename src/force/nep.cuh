@@ -14,10 +14,16 @@
 */
 
 #pragma once
+#include <memory>
 #include "dftd3.cuh"
 #include "potential.cuh"
 #include "utilities/common.cuh"
 #include "utilities/gpu_vector.cuh"
+
+namespace gpumd_ext
+{
+class ThrustCachedAllocator; // extensions/common/gpu/thrust_cached_allocator.cuh
+}
 
 struct NEP_Data {
   GPU_Vector<float> f12x; // 3-body or manybody partial forces
@@ -36,6 +42,14 @@ struct NEP_Data {
   GPU_Vector<char> influence_mask;
   GPU_Vector<int> influence_indices;
   GPU_Vector<int> cell_has_active;
+  // fix_skip influence-set reuse (build_nep_centers_cached in nep.cu)
+  GPU_Vector<double> influence_ref_position;          // positions at the last build
+  GPU_Vector<unsigned long long> influence_max_disp2; // bits of max |dr|^2 of active atoms
+  int influence_num_centers = -1;
+  int influence_steps_since_build = 0;
+  int influence_built_N = -1;
+  int influence_built_generation = -1;
+  std::shared_ptr<gpumd_ext::ThrustCachedAllocator> thrust_alloc;
   std::vector<int> cpu_NN_radial;
   std::vector<int> cpu_NN_angular;
 #ifdef USE_TABLE

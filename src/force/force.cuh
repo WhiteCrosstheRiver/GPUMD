@@ -23,6 +23,11 @@
 #include <stdio.h>
 #include <vector>
 
+namespace gpumd_ext
+{
+class ThrustCachedAllocator; // extensions/common/gpu/thrust_cached_allocator.cuh
+}
+
 class Force
 {
 public:
@@ -55,6 +60,8 @@ public:
   void update_number_of_atoms(const int number_of_atoms);
   void set_fixed_group(const int fixed_group);
   void set_need_full_observables(const bool need_full);
+  void set_skip_options(const SkipOptions& options);
+  const SkipOptions& skip_options() const { return skip_options_; }
 
   int get_number_of_types(FILE* fid_potential);
   void set_hnemd_parameters(const double, const double, const double);
@@ -89,6 +96,15 @@ private:
   GPU_Vector<char> active_mask_;
   GPU_Vector<int> active_indices_;
   int num_active_ = -1;
+  // The active set only changes between runs (fix) or with N (mutation), so it
+  // is built once per run; set_fixed_group/update_number_of_atoms/finalize reset it.
+  bool active_cache_valid_ = false;
+  int active_cache_N_ = -1;
+  int active_cache_fixed_group_ = -1;
+  int active_generation_ = 0;
+  SkipOptions skip_options_;
+  std::shared_ptr<gpumd_ext::ThrustCachedAllocator> skip_alloc_;
+  void clear_active_pointers();
 
   void check_types(const char* file_potential);
   void prepare_active_atoms(const int number_of_atoms, std::vector<Group>& group);

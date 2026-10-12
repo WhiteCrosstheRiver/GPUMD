@@ -14,6 +14,15 @@ enum class InfluencePolicy {
   Custom
 };
 
+// run.in keyword fix_skip (propagating). The defaults reproduce the skip path
+// as it was before fix_skip existed.
+struct SkipOptions {
+  double min_frozen_fraction = 0.0; // below this frozen fraction compute all atoms
+  int influence_every = 1;          // a potential may reuse its influence set for up to K steps
+  double influence_skin = 0.0;      // halo margin (A); reuse is exact while no active atom moved this far
+  bool cached_alloc = false;        // reuse Thrust scratch storage on the skip path
+};
+
 struct ComputeRequest {
   bool need_active_force = true;
   bool need_full_energy = false;

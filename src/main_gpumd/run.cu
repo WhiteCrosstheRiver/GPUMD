@@ -214,7 +214,8 @@ void Run::perform_a_run()
 
   force.set_fixed_group(integrate.fixed_group);
   const bool need_full_observables =
-    (integrate.type >= 11 && integrate.type <= 20) || (integrate.type >= 21 && integrate.type <= 23);
+    (integrate.type >= 11 && integrate.type <= 20) || (integrate.type >= 21 && integrate.type <= 23) ||
+    full_observables_next_run;
   force.set_need_full_observables(need_full_observables);
 
   const auto time_begin = std::chrono::high_resolution_clock::now();
@@ -342,6 +343,7 @@ void Run::perform_a_run()
   velocity.finalize();
   force.finalize();
   max_distance_per_step = 0.0;
+  full_observables_next_run = false;
 }
 
 void Run::parse_one_keyword(std::vector<std::string>& tokens)
@@ -589,6 +591,14 @@ void Run::parse_one_keyword(std::vector<std::string>& tokens)
     std::unique_ptr<Property> property;
     property.reset(new LSQT(param, num_param));
     measure.properties.emplace_back(std::move(property));
+  } else if (strcmp(param[0], "fix_skip") == 0) {
+    parse_fix_skip(param, num_param);
+  } else if (strcmp(param[0], "full_observables") == 0) {
+    if (num_param != 1) {
+      PRINT_INPUT_ERROR("full_observables has no parameters.");
+    }
+    full_observables_next_run = true;
+    printf("Next run computes full-system energies and virials (fix skip off).\n");
   } else if (strcmp(param[0], "run") == 0) {
     parse_run(param, num_param);
   } else {
@@ -668,6 +678,53 @@ void Run::parse_correct_velocity(const char** param, int num_param, const std::v
   }
 
   velocity.do_velocity_correction = true;
+}
+
+// fix_skip [min_frozen <f>] [rebuild <K> skin <s>] [cache_alloc 0|1]
+// Propagating: the settings stay until the next fix_skip line.
+void Run::parse_fix_skip(const char** param, int num_param)
+{
+  SkipOptions opt = force.skip_options();
+  int i = 1;
+  while (i < num_param) {
+    if (strcmp(param[i], "min_frozen") == 0 && i + 1 < num_param) {
+      if (!is_valid_real(param[i + 1], &opt.min_frozen_fraction) || opt.min_frozen_fraction < 0.0 ||
+          opt.min_frozen_fraction > 1.0) {
+        PRINT_INPUT_ERROR("fix_skip min_frozen should be in [0, 1].");
+      }
+      i += 2;
+    } else if (strcmp(param[i], "rebuild") == 0 && i + 1 < num_param) {
+      if (!is_valid_int(param[i + 1], &opt.influence_every) || opt.influence_every < 1) {
+        PRINT_INPUT_ERROR("fix_skip rebuild should be an integer >= 1.");
+      }
+      i += 2;
+    } else if (strcmp(param[i], "skin") == 0 && i + 1 < num_param) {
+      if (!is_valid_real(param[i + 1], &opt.influence_skin) || opt.influence_skin < 0.0) {
+        PRINT_INPUT_ERROR("fix_skip skin should be >= 0.");
+      }
+      i += 2;
+    } else if (strcmp(param[i], "cache_alloc") == 0 && i + 1 < num_param) {
+      int flag = 0;
+      if (!is_valid_int(param[i + 1], &flag) || (flag != 0 && flag != 1)) {
+        PRINT_INPUT_ERROR("fix_skip cache_alloc should be 0 or 1.");
+      }
+      opt.cached_alloc = flag == 1;
+      i += 2;
+    } else {
+      PRINT_INPUT_ERROR(
+        "Usage: fix_skip [min_frozen <f>] [rebuild <K>] [skin <s>] [cache_alloc 0|1]");
+    }
+  }
+  if (opt.influence_every > 1 && opt.influence_skin <= 0.0) {
+    PRINT_INPUT_ERROR("fix_skip rebuild > 1 needs skin > 0 (otherwise reuse is not exact).");
+  }
+  force.set_skip_options(opt);
+  printf(
+    "fix_skip: min_frozen %g, influence rebuild every %d steps (skin %g A), cache_alloc %d.\n",
+    opt.min_frozen_fraction,
+    opt.influence_every,
+    opt.influence_skin,
+    opt.cached_alloc ? 1 : 0);
 }
 
 void Run::parse_time_step(const char** param, int num_param)

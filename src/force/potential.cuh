@@ -50,6 +50,8 @@ public:
   const GPU_Vector<char>* ptr_active_mask = nullptr;    // 1 = unfixed
   const GPU_Vector<int>* ptr_active_indices = nullptr; // compact unfixed atom ids
   int num_active = -1;                                 // -1 = all atoms
+  int active_generation = -1; // bumped by Force each time the active set is rebuilt
+  SkipOptions skip_options;   // copied from Force (fix_skip)
 
   virtual void compute(
     Box& box,
