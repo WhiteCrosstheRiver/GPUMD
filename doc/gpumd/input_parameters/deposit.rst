@@ -132,10 +132,13 @@ Other keywords
 
 * ``near R``: every atom of a candidate entity must stay at least ``R`` Å from existing atoms and from already accepted deposited entities (PBC minimum image). Atoms inside the same entity are not checked against each other. Off if omitted.
   For a single-atom entity on a ``surface local`` (not ``mobile``) or ``surface global`` launch
-  with ``gap >= R``, ``radius >= R``, and either ``number 1`` or a ``grid`` with spacing ``>= R``,
+  with ``gap >= R``, ``radius >= R`` (local surface only), and either ``number 1`` or
+  grid sites separated by at least ``R`` including the periodic seam,
   the test can never reject a site: every atom within the query radius lies at least ``gap``
   below the launch point and every other atom is farther than ``radius`` laterally. The
-  neighbour index is then not built; placements are unchanged.
+  neighbour index is then not built; placements are unchanged. This shortcut is limited
+  to orthogonal boxes with a Cartesian deposition basis and a nonperiodic normal.
+  Other geometries keep the explicit minimum-image overlap test.
 * ``seed S``: optional. When omitted, the command draws a fresh random seed per call (``std::random_device``), so repeated deposits land on different sites. Give an explicit ``seed`` only when you need a reproducible trajectory.
 * ``attempt Q``: only for ``random`` and ``gaussian``.
 

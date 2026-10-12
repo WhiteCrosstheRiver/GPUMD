@@ -604,7 +604,10 @@ static int halo_stencil(const double thickness, const int nbin, const double rc)
   if (nbin <= 1) {
     return 0;
   }
-  const int s = (int)ceil(rc * nbin / thickness - 1.0e-12);
+  // Larger radii already cover every bin. Bound before converting to int and
+  // before shift_bin, whose periodic wrap assumes at most one box translation.
+  const double extent = ceil(rc * nbin / thickness - 1.0e-12);
+  const int s = extent >= nbin - 1 ? nbin - 1 : static_cast<int>(extent);
   return s < 1 ? 1 : s;
 }
 

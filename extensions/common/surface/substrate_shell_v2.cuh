@@ -173,6 +173,8 @@ struct GrowState {
   bool valid = false;
   Params params;
   LateralGrid grid;
+  double box_h[9] = {0.0};
+  int box_pbc[3] = {0, 0, 0};
   int calls_since_classify = 0;
   std::vector<double> frozen_top; // per lateral cell: highest shell-frozen atom
   Workspace ws;
@@ -656,8 +658,21 @@ inline void update_grow(
 
   LateralGrid g;
   g.init(box, p.axis, p.cell_size);
-  bool need_full = p.reset || !st.valid || !p.same_classifier(st.params) ||
-                   (int)sf.size() != N || !g.same(st.grid);
+  const int pbc[3] = {box.pbc_x, box.pbc_y, box.pbc_z};
+  bool box_changed = false;
+  if (st.valid) {
+    for (int k = 0; k < 9; ++k) {
+      box_changed = box_changed || box.cpu_h[k] != st.box_h[k];
+    }
+    for (int k = 0; k < 3; ++k) {
+      box_changed = box_changed || pbc[k] != st.box_pbc[k];
+    }
+  }
+  const bool same_classifier = st.valid && p.same_classifier(st.params);
+  const bool preserve_box_ratchet =
+    box_changed && !p.reset && same_classifier && (int)sf.size() == N;
+  bool need_full = p.reset || !st.valid || !same_classifier ||
+                   (int)sf.size() != N || !g.same(st.grid) || box_changed;
   int n_frozen = 0;
   if (!need_full) {
     for (int i = 0; i < N; ++i) {
@@ -692,6 +707,13 @@ inline void update_grow(
     }
     std::vector<char> frozen;
     rep.ok = classify_full(atom, box, pf, eligible, ws, frozen, rep);
+    int n_old_frozen = 0;
+    if (rep.ok && preserve_box_ratchet) {
+      for (int i = 0; i < N; ++i) {
+        n_old_frozen += sf[i] ? 1 : 0;
+        frozen[i] = frozen[i] || sf[i];
+      }
+    }
     sf.assign(N, 0);
     if (rep.ok) {
       sf.swap(frozen);
@@ -701,13 +723,15 @@ inline void update_grow(
     st.params = p;
     st.params.reset = false;
     st.grid = g;
+    std::copy(box.cpu_h, box.cpu_h + 9, st.box_h);
+    std::copy(pbc, pbc + 3, st.box_pbc);
     st.calls_since_classify = 0;
     rebuild_frozen_top(atom, g, p.axis, st.frozen_top);
     rep.n_frozen = 0;
     for (int i = 0; i < N; ++i) {
       rep.n_frozen += sf[i] ? 1 : 0;
     }
-    rep.n_new_frozen = rep.n_frozen;
+    rep.n_new_frozen = rep.n_frozen - n_old_frozen;
     ++st.n_full;
     finish();
     return;

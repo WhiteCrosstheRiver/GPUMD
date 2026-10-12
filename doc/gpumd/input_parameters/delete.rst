@@ -56,11 +56,12 @@ Who is deleted after an atom matches ``expr``:
 Use ``selected F`` when a Si still has two Si neighbors but many F: delete the matching Si and the nearby F, not the neighboring crystal Si.
 
 ``disconnected`` builds a graph of atom pairs within distance :math:`r` (XY periodic, :math:`z` not periodic), keeps the component that contains the lowest-:math:`z` atom, and deletes the rest.
-With ``seed frozen`` the flood fill starts from the atoms frozen by :ref:`fix <kw_fix>` that can
-touch an unfrozen atom and walks only unfrozen atoms, so the cost scales with the unfrozen region
-(use with ``fix shell ... mode grow``). This equals the full search when every frozen atom belongs
-to the lowest-:math:`z` component, which holds for a frozen substrate; if no atom is frozen the full
-search runs.
+With ``seed frozen`` a frozen-only connectivity check first verifies that all atoms frozen by
+:ref:`fix <kw_fix>` are connected to each other and include the global lowest-:math:`z` atom.
+When this conservative condition holds, the subsequent flood fill starts from frozen atoms
+that can touch an unfrozen atom and walks only unfrozen atoms. Otherwise the full search runs.
+The preliminary check runs on each call, so speedup depends on the frozen geometry and is
+not guaranteed to scale only with the unfrozen region.
 It is never run from :ref:`deposit <kw_deposit>`; write it explicitly if you need it.
 
 ``isolated`` counts neighbors within :math:`r` and deletes according to ``expr`` and ``only`` / ``full`` / ``selected``.

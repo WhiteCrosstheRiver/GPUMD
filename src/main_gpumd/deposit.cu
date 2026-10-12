@@ -731,6 +731,7 @@ struct SurfaceIndex
   int pbc_v = 0;
   double global_H = 0.0;
   double build_radius = -1.0; // radius the index was built with (batch reuse)
+  bool has_local_index = false;
   std::vector<double> cell_maxH; // per-cell highest H, for query pruning
   std::vector<int> head;
   std::vector<int> next;
@@ -740,6 +741,14 @@ struct SurfaceIndex
 
   void reduce_global(const Atom& atom, const DepositFrame& frame)
   {
+    has_local_index = false;
+    build_radius = -1.0;
+    head.clear();
+    next.clear();
+    cell_maxH.clear();
+    u.clear();
+    v.clear();
+    H.clear();
     const int N = atom.number_of_atoms;
     if (N < 1) {
       PRINT_INPUT_ERROR("surface global/local needs existing atoms.");
@@ -762,6 +771,7 @@ struct SurfaceIndex
     double filter_radius = 0.0,
     const std::vector<char>* mobile_mask = nullptr)
   {
+    has_local_index = false;
     const int N = atom.number_of_atoms;
     if (N < 1) {
       PRINT_INPUT_ERROR("surface global/local needs existing atoms.");
@@ -945,6 +955,7 @@ struct SurfaceIndex
       // no-op placeholder retained for interface stability
       (void)filter_radius;
     }
+    has_local_index = true;
   }
 
   double query(double qu, double qv, double radius) const
@@ -1030,12 +1041,16 @@ struct SurfaceIndex
   // Insert one already-placed atom so later queries in the same batch see it.
   void insert_one(const DepositFrame& frame, const double r[3])
   {
+    const double height = dot3(r, frame.n);
+    if (height > global_H) {
+      global_H = height;
+    }
+    if (!has_local_index) {
+      return;
+    }
     u.push_back(dot3(r, frame.u));
     v.push_back(dot3(r, frame.v));
-    H.push_back(dot3(r, frame.n));
-    if (H.back() > global_H) {
-      global_H = H.back();
-    }
+    H.push_back(height);
     next.push_back(-1);
     double qu = u.back();
     double qv = v.back();
@@ -1064,8 +1079,12 @@ struct SurfaceIndex
       iv = std::min(nv - 1, std::max(0, iv));
     }
     const int a = (int)u.size() - 1;
-    next[a] = head[iu + nu * iv];
-    head[iu + nu * iv] = a;
+    int* link = &head[iu + nu * iv];
+    while (*link >= 0 && H[*link] >= height) {
+      link = &next[*link];
+    }
+    next[a] = *link;
+    *link = a;
     if (!cell_maxH.empty() && H[a] > cell_maxH[iu + nu * iv]) {
       cell_maxH[iu + nu * iv] = H[a];
     }
@@ -1288,6 +1307,77 @@ static GridView make_grid_view(const DepositConfig& cfg)
     PRINT_INPUT_ERROR("grid region/spacing produced no sites.");
   }
   return g;
+}
+
+// Only Cartesian slab geometry has a simple lower bound on the distance
+// between wrapped grid sites. Reject tilted cells/bases and a periodic normal.
+static bool safe_cartesian_lateral_axes(
+  const DepositFrame& frame, const Box& box, int axes[2])
+{
+  if (frame.cartesian_n < 0) {
+    return false;
+  }
+  const int pbc[3] = {box.pbc_x, box.pbc_y, box.pbc_z};
+  if (pbc[frame.cartesian_n]) {
+    return false;
+  }
+  const double eps = 1.0e-10;
+  for (int row = 0; row < 3; ++row) {
+    if (!(box.cpu_h[row * 3 + row] > 0.0)) {
+      return false;
+    }
+    for (int col = 0; col < 3; ++col) {
+      if (row != col && fabs(box.cpu_h[row * 3 + col]) > eps) {
+        return false;
+      }
+    }
+  }
+  const double* basis[2] = {frame.u, frame.v};
+  for (int k = 0; k < 2; ++k) {
+    axes[k] = -1;
+    for (int axis = 0; axis < 3; ++axis) {
+      if (axis != frame.cartesian_n && fabs(fabs(basis[k][axis]) - 1.0) < eps) {
+        axes[k] = axis;
+      } else if (fabs(basis[k][axis]) > eps) {
+        return false;
+      }
+    }
+  }
+  return axes[0] >= 0 && axes[1] >= 0 && axes[0] != axes[1];
+}
+
+static bool grid_sites_separated(
+  const DepositConfig& cfg, const DepositFrame& frame, const Box& box, double min_distance)
+{
+  if (cfg.style != DepositConfig::Grid) {
+    return false;
+  }
+  int axes[2];
+  if (!safe_cartesian_lateral_axes(frame, box, axes)) {
+    return false;
+  }
+  const GridView grid = make_grid_view(cfg);
+  const int counts[2] = {grid.nu, grid.nv};
+  for (int k = 0; k < 2; ++k) {
+    if (counts[k] < 2) {
+      continue;
+    }
+    const double spacing = cfg.spacing[k];
+    if (spacing < min_distance) {
+      return false;
+    }
+    const int pbc[3] = {box.pbc_x, box.pbc_y, box.pbc_z};
+    if (pbc[axes[k]]) {
+      const double length = box.cpu_h[axes[k] * 3 + axes[k]];
+      const double span = (counts[k] - 1) * spacing;
+      // A span >= L can wrap onto any earlier site; the seam is the
+      // additional nearest-neighbor gap when the span is inside one cell.
+      if (span >= length || length - span < min_distance) {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 static int map_perm(std::unordered_map<int, int>& swapped, int i)
@@ -1683,7 +1773,8 @@ struct Launch
 // radius laterally. Then the NearIndex over all atoms is not built.
 // Not used with `surface ... mobile`: fixed atoms are then not in the surface
 // index and may lie above the measured surface.
-static bool near_test_is_redundant(const DepositConfig& cfg)
+static bool near_test_is_redundant(
+  const DepositConfig& cfg, const DepositFrame& frame, const Box& box)
 {
   if (!cfg.has_near) {
     return true;
@@ -1691,9 +1782,12 @@ static bool near_test_is_redundant(const DepositConfig& cfg)
   if (cfg.entity != DepositConfig::Atom || cfg.surface_mobile) {
     return false;
   }
+  int axes[2];
+  if (!safe_cartesian_lateral_axes(frame, box, axes)) {
+    return false;
+  }
   const bool one_atom = !cfg.number_all && cfg.number == 1;
-  const bool spaced_grid =
-    cfg.style == DepositConfig::Grid && std::min(cfg.spacing[0], cfg.spacing[1]) >= cfg.near_r;
+  const bool spaced_grid = grid_sites_separated(cfg, frame, box, cfg.near_r);
   if (!one_atom && !spaced_grid) {
     return false;
   }
@@ -1880,7 +1974,7 @@ void Deposit(
 
   NearIndex near;
   NearIndex* near_ptr = nullptr;
-  if (cfg.has_near && !near_test_is_redundant(cfg)) {
+  if (cfg.has_near && !near_test_is_redundant(cfg, frame, box)) {
     near.build(atoms, box, cfg.near_r);
     near_ptr = &near;
   } else if (cfg.has_near) {
@@ -1889,8 +1983,7 @@ void Deposit(
 
   bool skip_new_new = false;
   if (cfg.style == DepositConfig::Grid && cfg.has_near) {
-    const double dmin = std::min(cfg.spacing[0], cfg.spacing[1]);
-    skip_new_new = dmin >= (2.0 * tmpl.radius + cfg.near_r);
+    skip_new_new = grid_sites_separated(cfg, frame, box, 2.0 * tmpl.radius + cfg.near_r);
   }
 
   DepositSampler sampler;
@@ -1971,7 +2064,9 @@ void DepositSequence(
   double max_near_r = 0.0;
   bool any_near = false;
   for (const auto& cfg : cfgs) {
-    if (cfg.has_near && !near_test_is_redundant(cfg)) {
+    DepositFrame near_frame;
+    build_deposit_frame(cfg, near_frame);
+    if (cfg.has_near && !near_test_is_redundant(cfg, near_frame, box)) {
       any_near = true;
       max_near_r = std::max(max_near_r, cfg.near_r);
     }
@@ -1995,6 +2090,7 @@ void DepositSequence(
   DepositFrame prev_frame;
   bool have_prev_frame = false;
   bool surface_active = false;
+  DepositConfig::Surface active_surface_kind = DepositConfig::Fixed;
 
   // entity templates resolved once per (entity, source) within the batch
   bool any_mobile_surface = false;
@@ -2027,13 +2123,15 @@ void DepositSequence(
     build_deposit_frame(cfg, frame);
 
     const bool frame_same = have_prev_frame && frames_equal(prev_frame, frame);
+    bool rebuilt_surface = false;
     if (cfg.surface_kind == DepositConfig::Global) {
-      if (!surface_active || !frame_same) {
+      if (!surface_active || !frame_same || active_surface_kind != DepositConfig::Global) {
         surface.reduce_global(atoms, frame);
         surface_active = true;
+        rebuilt_surface = true;
       }
     } else if (cfg.surface_kind == DepositConfig::Local) {
-      if (!surface_active || !frame_same ||
+      if (!surface_active || !frame_same || active_surface_kind != DepositConfig::Local ||
           cfg.surface_radius != surface.build_radius) {
         // min radius in the batch: an atom shadowed within this radius can
         // never be a query answer for any command's radius (>= min), so the
@@ -2057,16 +2155,25 @@ void DepositSequence(
         surface.build(atoms, box, frame, cfg.surface_radius, min_surf_r, surface_mask);
         surface.build_radius = cfg.surface_radius;
         surface_active = true;
+        rebuilt_surface = true;
       }
     } else {
       surface_active = false;
     }
+    if (rebuilt_surface) {
+      for (int k = 0; k < all.n; ++k) {
+        const double r[3] = {all.position[k], all.position[k + all.n],
+                             all.position[k + 2 * all.n]};
+        surface.insert_one(frame, r);
+      }
+    }
+    active_surface_kind = cfg.surface_kind;
     prev_frame = frame;
     have_prev_frame = true;
 
     NearIndex* cmd_near = nullptr;
     std::unique_ptr<NearIndex> own_near;
-    if (cfg.has_near && near_test_is_redundant(cfg)) {
+    if (cfg.has_near && near_test_is_redundant(cfg, frame, box)) {
       cmd_near = nullptr; // provably no rejection; see near_test_is_redundant
     } else if (cfg.has_near && cfg.near_r > max_near_r + 1.0e-12) {
       // rarer case: this command's near radius exceeds the shared build
@@ -2079,8 +2186,7 @@ void DepositSequence(
 
     bool skip_new_new = false;
     if (cfg.style == DepositConfig::Grid && cfg.has_near) {
-      const double dmin = std::min(cfg.spacing[0], cfg.spacing[1]);
-      skip_new_new = dmin >= (2.0 * tmpl.radius + cfg.near_r);
+      skip_new_new = grid_sites_separated(cfg, frame, box, 2.0 * tmpl.radius + cfg.near_r);
     }
 
     DepositSampler sampler;
@@ -2109,7 +2215,8 @@ void DepositSequence(
 
     // Make later commands see this command's atoms (sequential semantics):
     // surface: insert entities so later launch heights clear them;
-    // near: insert unless skip_new_new already covered intra-command spacing.
+    // near: the shared index must see every command, including a command
+    // whose intra-command spacing let it defer insertion until now.
     if (surface_active && (cfg.surface_kind != DepositConfig::Fixed)) {
       for (int k = 0; k < added.n; ++k) {
         const double r[3] = {added.position[k],
@@ -2120,14 +2227,12 @@ void DepositSequence(
     }
     // a command that skipped its own near test still feeds the shared index,
     // so a later command of the batch that does test sees its atoms
-    NearIndex* batch_near =
-      (cfg.has_near && near_test_is_redundant(cfg)) ? near_ptr : cmd_near;
-    if (batch_near != nullptr && !skip_new_new) {
+    if (near_ptr != nullptr && (!cfg.has_near || cmd_near != near_ptr || skip_new_new)) {
       for (int k = 0; k < added.n; ++k) {
         const double r[3] = {added.position[k],
                              added.position[k + added.n],
                              added.position[k + 2 * added.n]};
-        batch_near->insert_one(r[0], r[1], r[2]);
+        near_ptr->insert_one(r[0], r[1], r[2]);
       }
     }
 

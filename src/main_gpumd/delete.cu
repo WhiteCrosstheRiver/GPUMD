@@ -482,18 +482,33 @@ void Delete(
     std::vector<char> keep;
     bool used_seed_frozen = false;
     if (seed_frozen && atoms.cpu_fixed.size() == static_cast<size_t>(N_old)) {
-      // Frozen atoms (fix) are never deleted and sit in the substrate, so a mobile
-      // atom is connected to the lowest-z component iff it reaches a frozen atom
-      // through mobile atoms. Flood from the frozen atoms that can touch the mobile
-      // region only: O(N_mobile) instead of a full-system BFS.
+      // An arbitrary fix group can include detached fragments. Only seed from
+      // frozen atoms when their own graph is connected and contains the global
+      // lowest-z atom; otherwise retain the exact full-component semantics.
       int n_fixed = 0;
+      int lowest = -1;
       for (int n = 0; n < N_old; ++n) {
         n_fixed += atoms.cpu_fixed[n] ? 1 : 0;
+        if (lowest < 0 || atoms.cpu_position_per_atom[n + 2 * N_old] <
+                            atoms.cpu_position_per_atom[lowest + 2 * N_old]) {
+          lowest = n;
+        }
       }
-      if (n_fixed > 0) {
-        static shell2::Workspace ws;
-        shell2::connected_to_anchors(atoms, box, 2, cutoff, atoms.cpu_fixed, ws, keep);
-        used_seed_frozen = true;
+      if (n_fixed > 0 && lowest >= 0 && atoms.cpu_fixed[lowest]) {
+        std::vector<char> frozen_component;
+        find_main_component_from_min_axis(atoms, box, cutoff, 2, &atoms.cpu_fixed, frozen_component);
+        bool anchors_connected = true;
+        for (int n = 0; n < N_old; ++n) {
+          if (atoms.cpu_fixed[n] && !frozen_component[n]) {
+            anchors_connected = false;
+            break;
+          }
+        }
+        if (anchors_connected) {
+          static shell2::Workspace ws;
+          shell2::connected_to_anchors(atoms, box, 2, cutoff, atoms.cpu_fixed, ws, keep);
+          used_seed_frozen = true;
+        }
       }
     }
     if (!used_seed_frozen) {
