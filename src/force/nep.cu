@@ -27,6 +27,7 @@ heat transport, Phys. Rev. B. 104, 104309 (2021).
 #include "utilities/error.cuh"
 #include "utilities/gpu_macro.cuh"
 #include "utilities/nep_utilities.cuh"
+#include <algorithm>
 #include <cmath>
 #include <cstring>
 #include <fstream>
@@ -45,6 +46,23 @@ const std::string ELEMENTS[NUM_ELEMENTS] = {
   "In", "Sn", "Sb", "Te", "I",  "Xe", "Cs", "Ba", "La", "Ce", "Pr", "Nd", "Pm", "Sm", "Eu", "Gd",
   "Tb", "Dy", "Ho", "Er", "Tm", "Yb", "Lu", "Hf", "Ta", "W",  "Re", "Os", "Ir", "Pt", "Au", "Hg",
   "Tl", "Pb", "Bi", "Po", "At", "Rn", "Fr", "Ra", "Ac", "Th", "Pa", "U",  "Np", "Pu"};
+
+double NEP::deposition_clearance() const
+{
+  if (paramb.model_type != 0 || has_dftd3 || zbl.flexibled) {
+    return 0.0;
+  }
+  if (!std::isfinite(paramb.rc_radial) || paramb.rc_radial <= 0.0f ||
+      !std::isfinite(paramb.rc_angular) || paramb.rc_angular <= 0.0f) {
+    return 0.0;
+  }
+  const double reach = std::max<double>(paramb.rc_radial, paramb.rc_angular);
+  if (zbl.enabled && (!std::isfinite(zbl.rc_outer) || zbl.rc_outer > reach)) {
+    return 0.0;
+  }
+  // A descriptor centered on a third atom can couple two atoms each within reach.
+  return 2.0 * reach;
+}
 
 void NEP::initialize_dftd3()
 {

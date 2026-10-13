@@ -1,6 +1,10 @@
 potential       ../../../../potentials/nep/C_2022_NEP3.txt
 time_step       0.0
 ensemble        nve
-deposit grid atom C number all region 0 1.785 0 1.785 spacing 1.785 1.785 direction axis -z surface fixed 20 velocity constant 0.001
+deposit grid particle atom C
+deposit grid placement grid spacing 1.785 1.785 select sequential
+deposit grid region plane normal 0 0 1 bounds 0 1.785 0 1.785 height 20
+deposit grid velocity beam speed 9.82269061176699e-5 units angstrom/fs direction 0 0 -1
+deposit grid emit number all
 dump_xyz        -1 0 1 after.xyz
 run             1

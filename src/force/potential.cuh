@@ -47,6 +47,9 @@ public:
   // Default: no active-region optimization. Force sets these only when fix is on
   // and this potential opts in via influence_policy().
   virtual InfluencePolicy influence_policy() const { return InfluencePolicy::Full; }
+  // Minimum separation between disjoint atom sets that guarantees zero mutual force.
+  // Zero means this potential has not established a safe deposition-flight bound.
+  virtual double deposition_clearance() const { return 0.0; }
   const GPU_Vector<char>* ptr_active_mask = nullptr;    // 1 = unfixed
   const GPU_Vector<int>* ptr_active_indices = nullptr; // compact unfixed atom ids
   int num_active = -1;                                 // -1 = all atoms

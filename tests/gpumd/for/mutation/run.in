@@ -5,7 +5,11 @@ time_step       1.0
 ensemble        nve
 
 for i range 1 3
-    deposit point molecule C.xyz origin 8.8 8.8 direction axis -z surface fixed 16 velocity constant 0.001
+    deposit carbon particle molecule C.xyz
+    deposit carbon placement point at 8.8 8.8
+    deposit carbon region plane normal 0 0 1 bounds 0 1000 0 1000 height 16
+    deposit carbon velocity beam speed 9.82269061176699e-5 units angstrom/fs direction 0 0 -1
+    deposit carbon emit number 1
     dump_thermo 1
     run 1
 end

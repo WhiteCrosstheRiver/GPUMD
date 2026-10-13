@@ -40,6 +40,8 @@ The driver class calculating force and related quantities.
 #include "utilities/error.cuh"
 #include "utilities/gpu_macro.cuh"
 #include "utilities/read_file.cuh"
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 #include <iostream>
 #include <thrust/copy.h>
@@ -54,6 +56,25 @@ Force::Force(void)
 {
   is_fcp = false;
   has_non_nep = false;
+}
+
+double Force::deposition_clearance() const
+{
+  if (compute_hnemd_ || compute_hnemdec_ >= 0) {
+    PRINT_INPUT_ERROR("deposition flight skip does not support HNEMD driving forces.");
+  }
+  if (potentials.empty()) {
+    PRINT_INPUT_ERROR("deposition flight skip requires a potential.");
+  }
+  double clearance = 0.0;
+  for (const auto& potential : potentials) {
+    const double bound = potential->deposition_clearance();
+    if (!std::isfinite(bound) || bound <= 0.0) {
+      PRINT_INPUT_ERROR("deposition flight skip does not support one of the active potentials.");
+    }
+    clearance = std::max(clearance, bound);
+  }
+  return clearance;
 }
 
 void Force::check_types(const char* file_potential)

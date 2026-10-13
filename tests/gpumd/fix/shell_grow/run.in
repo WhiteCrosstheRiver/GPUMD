@@ -6,7 +6,13 @@ time_step       1.0
 fix_skip        min_frozen 0.2 rebuild 10 skin 1.0 cache_alloc 1
 
 for i range 1 60
-    deposit grid atom Si number 5 region 0 32.58 0 32.58 spacing 4.0 4.0 direction axis -z surface local radius 6.0 gap 3.0 near 2.5 velocity constant 0.08 seed ${i}
+    deposit silicon particle atom Si
+    deposit silicon placement grid spacing 4.0 4.0 select random
+    deposit silicon region surface normal 0 0 1 bounds 0 32.58 0 32.58 height local radius 6.0 gap 3.0 scope all
+    deposit silicon velocity beam speed 0.00785815248941359 units angstrom/fs direction 0 0 -1
+    deposit silicon exclusion distance 2.5
+    deposit silicon seed ${i}
+    deposit silicon emit number 5
     ensemble nvt_ber 800 800 40.0
     fix 1
     fix shell substrate z cutoff 2.9 offset 8.0 surface radius 3.0 mode grow every 2

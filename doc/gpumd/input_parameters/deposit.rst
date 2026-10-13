@@ -5,210 +5,177 @@
 :attr:`deposit`
 ===============
 
-This keyword inserts atom(s) or molecule(s) into the current configuration.
+Define a named source, then explicitly insert particles or execute a pulse.
+This replaces ``deposit grid/random/...``. Ordinary MD commands are unchanged.
 
-Insertion is instantaneous in simulation time. The command does not integrate
-motion, advance the MD clock, or certify that an inserted particle has arrived
-at or remained on a substrate. The ``Deposited`` count in the log is the number
-of inserted atoms, not a measured retained-film count.
-
-It is meant for special simulations that grow or inject atoms during MD, such as molecular-beam deposition.
-Ordinary MD simulations do not need this keyword.
-
-GPUMD does not support ``\`` line continuation; write one command on one line.
-
-Syntax
-------
-
-::
-
-  deposit <style> <entity> <source> keyword values ...
-
-``style`` is ``grid``, ``random``, ``gaussian``, or ``point``.
-``entity`` is ``atom`` or ``molecule``.
-``source`` is an element symbol or a molecule xyz filename.
-
-The six layers of the command are independent:
-
-* ``style``: where candidate sites are generated in the surface plane
-* ``entity``: what is deposited
-* ``direction``: the center flight direction
-* ``surface``: where along the surface normal the particle is created
-* ``velocity``: the speed
-* ``near`` / ``select`` / ``attempt`` / ``seed``: constraints and sampling
-
-Direction, surface, and velocity are always required.
-
-Deposition frame
-----------------
-
-The surface plane is defined by a unit normal :math:`\hat{\mathbf n}`.
-Grid, random, gaussian, and point sites live in the :math:`u`-:math:`v` plane perpendicular to :math:`\hat{\mathbf n}`.
-
-By default :math:`\hat{\mathbf n}=-\hat{\mathbf d}`, so a simple beam still sets the frame::
-
-  direction axis -z
-
-gives :math:`\hat{\mathbf n}=+z`. Override this with an explicit normal when the beam is not anti-parallel to the surface::
-
-  normal axis +z
-  normal axis +x
-  normal vector nx ny nz
-
-``direction`` only sets particle velocity::
-
-  direction axis -z
-  direction axis -x
-  direction vector 0.3 0 -1
-  direction target tx ty tz
-
-``direction target`` aims each particle's velocity at ``(tx, ty, tz)`` from its own launch position.
-It does not define the surface frame, so ``normal`` is required with ``target``.
-
-If ``basis ax ay az`` is given, that vector is projected onto the plane perpendicular to :math:`\hat{\mathbf n}` to make :math:`\hat{\mathbf u}`, then :math:`\hat{\mathbf v}=\hat{\mathbf n}\times\hat{\mathbf u}`.
-Otherwise the Cartesian axis least parallel to :math:`\hat{\mathbf n}` is used.
-The final ``u``, ``v``, and ``n`` vectors are always printed.
-
-For ``normal axis +z`` (the default of ``direction axis -z``) this reduces to :math:`u=x`, :math:`v=y`, :math:`n=z`.
-A launch coordinate is
-
-.. math::
-
-   \mathbf r = u\hat{\mathbf u} + v\hat{\mathbf v} + H\hat{\mathbf n}
-
-Lateral PBC wrapping of launch positions is applied when :math:`\hat{\mathbf n}` is a Cartesian axis (:math:`\pm x`, :math:`\pm y`, or :math:`\pm z`).
-``normal vector`` does not wrap.
-
-Surface
--------
-
-``gap`` is always measured along :math:`\hat{\mathbf n}`, never along a sampled instantaneous velocity.
-
-::
-
-  surface fixed H
-  surface global gap D
-  surface local radius R gap D [mobile]
-
-``mobile`` (surface local only): measure the surface over non-fixed atoms only, so a
-fixed wall or cap above the reactive region cannot set the launch height. Without it,
-all atoms define the surface.
-
-* ``fixed``: :math:`H` is given, so :math:`\mathbf r\cdot\hat{\mathbf n}=H`.
-* ``global``: :math:`H_{\max}=\max_i(\mathbf r_i\cdot\hat{\mathbf n})`, then :math:`H=H_{\max}+D`.
-* ``local``: among existing atoms whose projection onto the :math:`u`-:math:`v` plane lies within radius ``R`` of the candidate site, take the largest :math:`\mathbf r_i\cdot\hat{\mathbf n}`; if none, use the global maximum. Then add ``D``.
-
-Styles
-------
-
-``grid``
-  ``region u_min u_max v_min v_max`` and ``spacing du dv``.
-  Sites are the inclusive lattice :math:`u=u_{\min}+i\,du` while :math:`u\le u_{\max}` (same for :math:`v`).
-  ``number N`` deposits ``N`` entities; ``number all`` deposits one entity on every valid site.
-  ``select sequential`` or ``select random`` (default) chooses among valid sites when ``number N`` is used.
-  Sites are visited until ``N`` entities are accepted (or until the grid is exhausted).
-  Grid does not retry failed sites; if too few sites pass ``near``, the command errors.
-
-``random``
-  Sample ``(u,v)`` uniformly in ``region``. ``number N`` is required.
-  ``attempt Q`` (default 10) retries a failed ``near`` check.
-
-``gaussian``
-  ``origin u v`` and ``sigma s``. :math:`u=u_0+\mathcal{N}(0,s)`, :math:`v=v_0+\mathcal{N}(0,s)`.
-  ``number N`` is required. ``attempt`` is allowed.
-
-``point``
-  ``origin u v``. One deterministic site; ``number`` defaults to 1.
-
-Velocity and spread
+Syntax and lifecycle
 -------------------
 
 ::
 
-  velocity constant V
-  velocity uniform Vmin Vmax
-  spread gaussian sigma_deg
+  deposit <name> <style> <arguments...>
 
-``velocity`` sets only the speed :math:`|\mathbf v|` in GPUMD's internal units
-(angstrom per natural time unit). The legacy command copies this value directly
-into the internal velocity array; it does not perform the conversion used when
-reading velocities from an extended XYZ file.
+Each configuration line replaces only that facet of its source; it never emits
+or advances time. Required facets: particle, placement, region, velocity.
+Sources persist across loops/runs in this process. Commands execute in script
+order, without implicit cross-command batching. Write one command per line.
 
-With ``TIME_UNIT_CONVERSION = 10.18051``, the speed in angstrom/fs is
-``V / 10.18051``. For example, ``velocity constant 0.08`` gives approximately
-``0.00785815`` angstrom/fs, not ``0.08`` angstrom/fs. To express a requested
-physical speed using the existing syntax, multiply the angstrom/fs value by
-``10.18051``. This documentation correction does not change old input values or
-the physical results of existing runs.
+Particle and placement
+----------------------
 
-The flight direction is ``direction``, optionally broadened by ``spread gaussian`` with angular standard deviation in degrees.
-An explicit ``normal`` defines the launch plane independently of that direction;
-the command does not require every sampled velocity to point into the surface.
+::
 
-Placing a particle at ``surface local/global ... gap D`` reduces the initial
-distance to the surface. It is not a ballistic flight-time shortcut: the
-remaining trajectory is evolved only by subsequent ``run`` commands. A small
-gap can already lie inside the potential's interaction range.
+  deposit beam particle atom Si
+  deposit beam particle mixture Si 0.8 Ge 0.2
+  deposit beam particle molecule molecule.xyz
+  deposit beam placement point at 10 10
+  deposit beam placement grid spacing 4 4 select random
+  deposit beam placement random attempt 100
+  deposit beam placement gaussian center 10 10 sigma 2 attempt 100
 
-Other keywords
---------------
+Mixture probabilities describe emitted atoms, not retained-film composition.
+They must be nonnegative and sum to one. Molecules retain template geometry and
+share translational velocity, without rotational/vibrational thermalization.
+Grid selection is random (default) or sequential. Random/Gaussian retries default
+to 10; samples outside region bounds consume attempts. Grid visits each site
+once. Only grid accepts ``number all``.
 
-* ``near R``: every atom of a candidate entity must stay at least ``R`` Å from existing atoms and from already accepted deposited entities (PBC minimum image). Atoms inside the same entity are not checked against each other. Off if omitted.
-  For a single-atom entity on a ``surface local`` (not ``mobile``) or ``surface global`` launch
-  with ``gap >= R``, ``radius >= R`` (local surface only), and either ``number 1`` or
-  grid sites separated by at least ``R`` including the periodic seam,
-  the test can never reject a site: every atom within the query radius lies at least ``gap``
-  below the launch point and every other atom is farther than ``radius`` laterally. The
-  neighbour index is then not built; placements are unchanged. This shortcut is limited
-  to orthogonal boxes with a Cartesian deposition basis and a nonperiodic normal.
-  Other geometries keep the explicit minimum-image overlap test.
-* ``seed S``: optional. When omitted, the command draws a fresh random seed per call (``std::random_device``), so repeated deposits land on different sites. Give an explicit ``seed`` only when you need a reproducible trajectory.
-* ``attempt Q``: only for ``random`` and ``gaussian``.
+Region
+------
 
-Examples
+::
+
+  deposit beam region plane normal 0 0 1 bounds 0 40 0 40 height 100
+  deposit beam region surface normal 0 0 1 bounds 0 40 0 40 height global gap 20 scope all
+  deposit beam region surface normal 0 0 1 bounds 0 40 0 40 height local radius 6 gap 3 scope all
+  deposit beam region surface normal 0 0 1 bounds 0 40 0 40 height local radius 6 gap 3 scope mobile
+  deposit beam region box bounds 0 40 0 40 80 100
+
+Distances are angstrom. Plane/surface bounds are umin umax vmin vmax. The explicit
+normal n defines the frame, independently of velocity. For a plane region,
+optional ``basis bx by bz`` sets u by projection; otherwise use the
+least-parallel Cartesian axis. Then
+v = n cross u. Normal (0,0,1) defaults to u=x,v=y. Fixed height is r dot n; surface
+gap is measured along n. Local height takes the maximum within the lateral
+radius, falling back to the global maximum if empty. Scope mobile excludes fixed
+atoms from surface-height estimation only (global or local), never from
+collision/flight clearance.
+There is no shared mobile/all cache between sources.
+
+Box regions are Cartesian and support random placement only. Surface height uses
+the pre-emit configuration. Exclusion also sees earlier accepted entities in the
+same emit. Molecule bounds apply to its template center.
+Periodic local-surface queries currently require an orthogonal box and Cartesian
+normal; other periodic local-surface geometries produce an explicit error.
+Exclusion itself uses an exact minimum-image scan for skewed or very small boxes,
+and the existing spatial index for supported ordinary boxes.
+
+Velocity
 --------
 
-One carbon atom at a fixed point, flying along :math:`-z`::
+::
 
-  deposit point atom C origin 8.8 8.8 direction axis -z surface fixed 16.0 velocity constant 0.001
+  deposit beam velocity vector 0 0 -0.0078581525 units angstrom/fs
+  deposit beam velocity beam speed 0.0078581525 units angstrom/fs direction 0 0 -1 spread 0
+  deposit beam velocity thermal temperature 300 drift 0 0 -0.01 units angstrom/fs
 
-Every site of an XY grid::
+Units are mandatory. Beam normalizes direction; spread is Gaussian angular
+width in degrees. Thermal adds Maxwell-Boltzmann Cartesian components to drift,
+using total molecular mass for molecular translation. This is not a flux-weighted
+effusive distribution. Away-pointing thermal samples can fail skip validation.
+Old internal speed 0.08 becomes 0.08/10.18051 angstrom/fs, about 0.0078581525.
+Do not reuse old velocity numbers unchanged.
 
-  deposit grid atom Si number all region 0 100 0 100 spacing 10 10 direction axis -z surface fixed 120 velocity constant 0.05
+Flight policy
+-------------
 
-MBE onto a global surface::
+::
 
-  deposit grid atom Si number 100 region 0 100 0 100 spacing 5 5 direction axis -z surface global gap 20 velocity constant 0.05 select random seed 12345
+  deposit beam flight skip off
+  deposit beam flight skip on clearance auto
 
-Oblique MBE onto an XY substrate (grid stays in the XY plane; the beam is tilted)::
+The default is skip OFF: insert at source; subsequent MD computes flight.
+Skip ON explicitly approximates ballistic time compression: advance the sampled
+entity along its sampled velocity to just outside a conservative envelope,
+without changing velocity. Omitted time is logged in fs, NOT added to the MD
+clock. Substrate evolution and thermostat action during omitted time are not
+simulated; relative arrivals can change. Internal molecular evolution and
+interactions between particles in the omitted incident beam are also not
+integrated. This is not exact full-flight MD or a proof of force-free trajectories.
+Validate high-flux/molecular cases against explicit flight before using skipping.
 
-  deposit grid atom Si number 100 region 0 100 0 100 spacing 5 5 normal axis +z direction vector 0.2 0 -1 surface local radius 5 gap 20 near 2.5 spread gaussian 4 velocity constant 0.05 select random seed 12345
+The envelope considers ALL preexisting atoms, including fixed/previously emitted
+atoms. Its skipping bound also includes earlier accepted entities in the same
+emit, so dense pulses may gain less. Ordinary NEP uses twice the maximum
+radial/angular cutoff; LJ uses its
+largest pair cutoff. Other potentials require explicit finite-range capability.
+DFTD3, non-energy NEP and flexible ZBL are unsupported. Geometry must be orthogonal
+with Cartesian normal and nonperiodic injection axis. No interactions are
+truncated to force acceleration. Already inside the envelope means zero skip.
 
-Gaussian beam::
+Skip/pulse require explicit NVE or constant-T NVT, positive timestep, and no
+external fields/forces, electron stopping, MC, velocity correction, moving
+groups, deformation or HNEMD. NPT, temperature ramps, PIMD and wall ensembles
+are unsupported in these modes. Ordinary skip-OFF emit retains broader insertion.
 
-  deposit gaussian atom C number 5 origin 1.785 1.785 sigma 1.0 direction axis -z surface local radius 5 gap 2.0 spread gaussian 5 velocity constant 0.001 seed 1
+Exclusion and random state
+--------------------------
 
-Random molecules on a plane::
+::
 
-  deposit random molecule O3.xyz number 10 region 0 272 210 230 direction axis -z surface fixed 20 velocity constant 0.0002 seed 1
+  deposit beam exclusion distance 2.5
+  deposit beam seed 440001
 
-This keyword only creates atoms. It does not delete atoms and does not run a connectivity search.
-To drop flying or isolated atoms, issue :ref:`delete <kw_delete>` separately.
+Exclusion checks existing atoms and earlier accepted entities with minimum-image
+geometry, not intramolecular pairs; default is disabled. Each source owns a
+persistent RNG. Repeated emits advance it; reissuing seed resets it. Replacing
+another facet does not reset it. Omitted seed initializes randomly. Expressions
+are resolved when configuration executes, not at a later emit.
 
-Caveats
+Source definitions and RNG state are NOT stored in restart.xyz. An XYZ restart
+is not a bitwise random-stream continuation; redefine sources and record seeds.
+
+Execution
+---------
+
+::
+
+  deposit beam emit number 5
+  run 500
+  deposit beam pulse number 5 wait entry relax 200 max_wait 5000
+
+Emit inserts only; inserted count is not retained count. A fixed run 500 still
+executes 500 MD steps with skipping ON. Pulse instead waits for every new atom
+to cross a fixed reference plane (pre-emit maximum projection plus clearance),
+then runs relax additional steps. Entry is latched per atom; rebound does not
+undo entry. This plane is a conservative reference, not actual rough-surface
+contact or proof of adsorption. Max_wait counts waiting steps; expiry is a
+nonzero-exit error, not success. Pulse needs no following run command.
+
+One continuously initialized MD run uses GPU entry checks. Logs report actual
+wait, relaxation, total steps and elapsed MD time. Event-dependent pulse length
+supports only dump_xyz, dump_thermo and dump_restart; use emit plus run for other
+measurements. Normal per-run finalization applies: reissue fix/measurements for
+each pulse. With relax 0 and all atoms already entered, zero MD steps are taken
+and there is no step-based dump frame. Skipping remains an approximation that
+requires independent physical validation.
+
+Example
 -------
-* The species must be allowed by the :ref:`potential <kw_potential>`.
-* Changing the number of atoms while PIMD beads exist is not supported.
-* :ref:`electron_stop <kw_electron_stop>` and ``add_random_force`` size some buffers when they are parsed.
-  Issue those keywords after ``deposit`` in the same run block, or they will not see the new number of atoms.
-* Consecutive ``deposit`` commands with no other keyword between them are executed as one batch:
-  one CPU–GPU sync and one atom-count rebuild for the whole group, instead of one per command.
-  Each command sees the atoms placed by the previous commands in the batch
-  (surface heights and ``near`` checks include them). No MD time passes between
-  these commands; they are not temporally separated deposition pulses.
-  Any intervening keyword (``ensemble``, ``run``, ``velocity``, ...) splits the batch.
-  There is a known mixed-selection limitation: a batch containing both
-  ``surface local ... mobile`` and ordinary ``surface local`` commands shares
-  the mobile-only surface filter. Separate such commands with a non-deposit
-  keyword (for example, repeat the intended ``time_step``) until this limitation
-  is fixed. Ordinary batches without ``mobile`` are not affected by this issue.
+
+After loading a Si/Ge potential and selecting an ensemble::
+
+  deposit alloy particle mixture Si 0.8 Ge 0.2
+  deposit alloy placement grid spacing 4 4 select random
+  deposit alloy region surface normal 0 0 1 bounds 0 65.3244 0 65.3244 height local radius 6 gap 3 scope all
+  deposit alloy velocity beam speed 0.0078581525 units angstrom/fs direction 0 0 -1 spread 0
+  deposit alloy flight skip off
+  deposit alloy exclusion distance 2.5
+  deposit alloy seed 440001
+  deposit alloy emit number 5
+  run 500
+
+A 3-angstrom gap can already be inside the interaction envelope, so skipping
+alone may save no time. Validate event-based relaxation before replacing a
+production fixed-duration protocol. Deletion/connectivity cleanup is explicit
+via :ref:`delete <kw_delete>`.

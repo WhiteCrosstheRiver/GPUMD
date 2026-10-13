@@ -137,6 +137,7 @@ public:
   virtual ~NEP(void);
   virtual void update_number_of_atoms(const int number_of_atoms);
   virtual InfluencePolicy influence_policy() const { return InfluencePolicy::LocalRadius; }
+  double deposition_clearance() const override;
   virtual void compute(
     Box& box,
     const GPU_Vector<int>& type,

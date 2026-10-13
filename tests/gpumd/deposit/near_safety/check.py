@@ -26,16 +26,29 @@ def xyz(cell, pbc, positions):
     return '\n'.join(lines) + '\n'
 
 
-def command(region, count, surface, near=2.5, spacing='4 4', direction='direction axis -z'):
-    return (f'deposit grid atom Si number {count} region {region} spacing {spacing} '
-            f'{direction} surface {surface} near {near} velocity constant 0.08 seed 19')
+def command(region, count, surface, near=2.5, spacing='4 4', normal='0 0 1', name='d'):
+    limits = region
+    if surface.startswith('fixed '):
+        height = f'plane normal {normal} bounds {limits} height {surface.split()[1]}'
+    else:
+        height = f'surface normal {normal} bounds {limits} height {surface} scope all'
+    parts = [f'deposit {name} particle atom Si',
+             f'deposit {name} placement grid spacing {spacing} select random',
+             f'deposit {name} region {height}',
+             f'deposit {name} velocity beam speed 0.00785815248941359 units angstrom/fs direction 0 0 -1']
+    if near is not None:
+        parts.append(f'deposit {name} exclusion distance {near}')
+    parts += [f'deposit {name} seed 19', f'deposit {name} emit number {count}']
+    return '\n'.join(parts)
 
 
 def cases():
     slab10 = (10, 0, 0, 0, 10, 0, 0, 0, 20)
     normal10 = (10, 0, 0, 0, 10, 0, 0, 0, 10)
     slab20 = (20, 0, 0, 0, 20, 0, 0, 0, 20)
-    tilted = ('direction axis -z normal vector 1 0 1')
+    narrow_x = (1, 0, 0, 0, 10, 0, 0, 0, 20)
+    tilted_xy = (10, 0, 0, 5, 10, 0, 0, 0, 20)
+    tilted = '1 0 1'
     return [
         dict(name='periodic_normal_image', cell=normal10, pbc='T T T',
              atoms=[(5, 5, 2), (5, 5, 9)],
@@ -44,51 +57,60 @@ def cases():
         dict(name='tilted_normal_image', cell=slab10, pbc='T T F',
              atoms=[(0, 0, 10), (2.1213203436, 0, 2.1213203436)],
              commands=[command('0 0 -7.0710678119 -7.0710678119', 1,
-                               'global gap 3', direction=tilted).replace(' seed 19', '')],
+                               'global gap 3', normal=tilted)],
              reject=True),
         dict(name='periodic_grid_seam', cell=slab10, pbc='T T F',
              atoms=[(5, 5, 0), (5, 5, -2)],
              commands=[command('0 8 0 0', 3, 'global gap 3')],
              reject=True),
+        dict(name='narrow_periodic_axis', cell=narrow_x, pbc='T F F',
+             atoms=[(0.5, 2, 0), (0.5, 2, -2)],
+             commands=[command('0.5 0.5 4.2 4.2', 1, 'fixed 0')],
+             reject=True),
+        dict(name='triclinic_periodic_image', cell=tilted_xy, pbc='T T F',
+             atoms=[(5.1, 9.8, 0), (2, 2, -2)],
+             commands=[command('0.1 0.1 0.2 0.2', 1, 'fixed 0')],
+             reject=True),
         dict(name='batch_deferred_near', cell=slab20, pbc='T T F',
              atoms=[(10, 10, 0), (10, 10, -2)],
-             commands=[command('0 4 0 0', 2, 'fixed 3'),
-                       command('0 0 0 0', 1, 'fixed 3')],
-             reject=True),
+             commands=[command('0 4 0 0', 2, 'fixed 3', name='first'),
+                       command('0 0 0 0', 1, 'fixed 3', name='second')],
+             reject=True, prior_atoms=2),
         dict(name='normal_slab_control', cell=slab10, pbc='T T F',
              atoms=[(5, 5, 0), (5, 5, -2)],
              commands=[command('0 4 0 0', 2, 'global gap 3')],
              reject=False, deposited=2, expected_z=[3, 3]),
         dict(name='global_then_global', cell=slab10, pbc='T T F',
              atoms=[(5, 5, 0), (5, 5, -2)],
-             commands=[command('0 0 0 0', 1, 'global gap 3'),
-                       command('0 0 0 0', 1, 'global gap 3')],
+             commands=[command('0 0 0 0', 1, 'global gap 3', name='first'),
+                       command('0 0 0 0', 1, 'global gap 3', name='second')],
              reject=False, deposited=2, expected_z=[3, 6]),
         dict(name='global_then_local', cell=slab10, pbc='T T F',
              atoms=[(5, 5, 0), (5, 5, -2)],
-             commands=[command('0 0 0 0', 1, 'global gap 3'),
-                       command('0 0 0 0', 1, 'local radius 6 gap 3')],
+             commands=[command('0 0 0 0', 1, 'global gap 3', name='first'),
+                       command('0 0 0 0', 1, 'local radius 6 gap 3', name='second')],
              reject=False, deposited=2, expected_z=[3, 6]),
         dict(name='local_then_global', cell=slab10, pbc='T T F',
              atoms=[(5, 5, 0), (5, 5, -2)],
-             commands=[command('0 0 0 0', 1, 'local radius 6 gap 3'),
-                       command('0 0 0 0', 1, 'global gap 3')],
+             commands=[command('0 0 0 0', 1, 'local radius 6 gap 3', name='first'),
+                       command('0 0 0 0', 1, 'global gap 3', name='second')],
              reject=False, deposited=2, expected_z=[3, 6]),
         dict(name='batch_prior_without_near', cell=slab20, pbc='T T F',
              atoms=[(10, 10, 0), (10, 10, -2)],
-             commands=[command('0 0 0 0', 1, 'fixed 3').replace(' near 2.5', ''),
-                       command('0 0 0 0', 1, 'fixed 3')],
-             reject=True),
+             commands=[command('0 0 0 0', 1, 'fixed 3', near=None, name='first'),
+                       command('0 0 0 0', 1, 'fixed 3', name='second')],
+             reject=True, prior_atoms=1),
     ]
 
 
 def evaluate(case, code, log, final_path=None):
-    rejected = code != 0 and bool(re.search(r'Requested entities:\s*\d+\.\s*Valid grid sites:\s*\d+', log))
-    deposited = sum(int(n) for n in re.findall(r'Deposited\s+(\d+)\s+atoms?\.', log))
-    # Batched commands print both per-command and batch totals; the control is
-    # a single command, so its deposition count is unambiguous.
+    rejected = (code not in (None, 0) and 'Input Error' in log and
+                'Deposit failed: no valid insertion after placement attempts.' in log)
+    deposited = sum(int(n) for n in re.findall(
+        r'Deposit recipe \S+: emitted \d+ entities \((\d+) atoms\)', log))
     if case['reject']:
-        return rejected, {'expected': 'near_rejection', 'rejected': rejected,
+        passed = rejected and deposited == case.get('prior_atoms', 0)
+        return passed, {'expected': 'near_rejection', 'rejected': rejected,
                           'exit_code': code, 'deposited_before_rejection': deposited}
     final_atoms, final_z = None, None
     if final_path is not None and final_path.is_file():
@@ -99,7 +121,8 @@ def evaluate(case, code, log, final_path=None):
     count_ok = final_atoms == len(case['atoms']) + case['deposited']
     height_ok = count_ok and all(abs(a - b) < 0.01 for a, b in
                                   zip(final_z[-case['deposited']:], case['expected_z']))
-    passed = code == 0 and count_ok and height_ok and 'Finished running GPUMD' in log
+    passed = (code == 0 and count_ok and height_ok and deposited == case['deposited'] and
+              'Finished running GPUMD' in log)
     return passed, {'expected': 'successful_deposition', 'exit_code': code,
                     'reported_deposits': deposited, 'final_atoms': final_atoms,
                     'new_atom_z': final_z[-case['deposited']:] if final_z else None,

@@ -5,6 +5,11 @@ time_step       1.0
 ensemble        nve
 
 for i range 1 100
-    deposit gaussian atom C number 1 origin 19.635 19.635 sigma 1.0 direction axis -z surface local radius 5.0 gap 2.0 spread gaussian 5 velocity constant 0.001 seed 1
+    deposit carbon particle atom C
+    deposit carbon placement gaussian center 19.635 19.635 sigma 1.0
+    deposit carbon region surface normal 0 0 1 bounds -1000000 1000000 -1000000 1000000 height local radius 5.0 gap 2.0 scope all
+    deposit carbon velocity beam speed 9.82269061176699e-5 units angstrom/fs direction 0 0 -1 spread 5
+    deposit carbon seed 1
+    deposit carbon emit number 1
     run 100
 end

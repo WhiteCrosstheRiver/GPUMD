@@ -21,6 +21,7 @@ The class dealing with the Lennard-Jones (LJ) pairwise potentials.
 #include "neighbor.cuh"
 #include "utilities/error.cuh"
 #include "utilities/gpu_macro.cuh"
+#include <cmath>
 #include <cstring>
 
 // best block size here: 128
@@ -46,6 +47,8 @@ LJ::LJ(FILE* fid, int num_types, int num_atoms)
     for (int m = 0; m < num_types; m++) {
       int count = fscanf(fid, "%lf%lf%lf", &epsilon, &sigma, &cutoff);
       PRINT_SCANF_ERROR(count, 3, "Reading error for LJ potential.");
+      deposition_cutoffs_valid =
+        deposition_cutoffs_valid && std::isfinite(cutoff) && cutoff > 0.0;
 
       lj_para.s6e4[n][m] = pow(sigma, 6.0) * epsilon * 4.0;
       lj_para.s12e4[n][m] = pow(sigma, 12.0) * epsilon * 4.0;
@@ -65,6 +68,12 @@ LJ::LJ(FILE* fid, int num_types, int num_atoms)
 LJ::~LJ(void)
 {
   // nothing
+}
+
+double LJ::deposition_clearance() const
+{
+  // LJ forces are pairwise and vanish beyond the largest pair cutoff.
+  return deposition_cutoffs_valid ? rc : 0.0;
 }
 
 // get U_ij and (d U_ij / d r_ij) / r_ij (the LJ potential)

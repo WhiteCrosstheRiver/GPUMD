@@ -1,6 +1,11 @@
 potential       ../../../../potentials/nep/C_2022_NEP3.txt
 time_step       0.0
 ensemble        nve
-deposit random atom C number 5 region 0 3.57 0 3.57 direction axis -z surface fixed 25 velocity constant 0.001 seed 1
+deposit carbon particle atom C
+deposit carbon placement random
+deposit carbon region plane normal 0 0 1 bounds 0 3.57 0 3.57 height 25
+deposit carbon velocity beam speed 9.82269061176699e-5 units angstrom/fs direction 0 0 -1
+deposit carbon seed 1
+deposit carbon emit number 5
 dump_xyz        -1 0 1 after.xyz
 run             1

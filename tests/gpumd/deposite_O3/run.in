@@ -7,7 +7,12 @@ time_step   1
 fix 1
 
 
-deposit random molecule O3.xyz number 10 region 0 272.185 210 230 direction axis -z surface fixed 20 velocity constant 0.0002 seed 1
+deposit ozone particle molecule O3.xyz
+deposit ozone placement random
+deposit ozone region plane normal 0 0 1 bounds 0 272.185 210 230 height 20
+deposit ozone velocity beam speed 1.9645381223534e-5 units angstrom/fs direction 0 0 -1
+deposit ozone seed 1
+deposit ozone emit number 10
 
 dump_thermo 1000
 dump_exyz   1 1 1 1

@@ -74,7 +74,9 @@ Run simulation according to the inputs in the run.in file.
 #include "utilities/read_file.cuh"
 #include "velocity.cuh"
 #include <chrono>
+#include <cmath>
 #include <cstring>
+#include <limits>
 
 static __global__ void gpu_find_largest_v2(
   int N, int number_of_rounds, double* g_vx, double* g_vy, double* g_vz, double* g_v2_max)
@@ -185,10 +187,93 @@ void Run::delete_isolated_batch(const std::vector<std::vector<std::string>>& com
   DeleteIsolatedSequence(commands, box, atom, group, thermo, force);
 }
 
-void Run::deposit_sequence(const std::vector<std::vector<std::string>>& commands)
+static __global__ void gpu_deposit_entry(
+  int N, int first, int count, double nx, double ny, double nz, double height,
+  const double* position, int* entered, int* status)
 {
-  AtomMutation::sync_cpu_from_gpu(atom);
-  DepositSequence(commands, box, atom, group, thermo, force, variables);
+  const int j = blockIdx.x * blockDim.x + threadIdx.x;
+  if (j >= count) return;
+  const int i = first + j;
+  const double x = position[i], y = position[i + N], z = position[i + 2 * N];
+  if (!isfinite(x) || !isfinite(y) || !isfinite(z)) {
+    atomicExch(status + 1, 1);
+    return;
+  }
+  if (x * nx + y * ny + z * nz <= height + 1.0e-10) entered[j] = 1;
+  if (!entered[j]) atomicAdd(status, 1);
+}
+
+bool Run::update_deposit_entry()
+{
+  int status[2] = {0, 0};
+  deposit_entry_status.copy_from_host(status);
+  gpu_deposit_entry<<<(deposit_event.count + 127) / 128, 128>>>(
+    atom.number_of_atoms, deposit_event.first_atom, deposit_event.count,
+    deposit_event.normal[0], deposit_event.normal[1], deposit_event.normal[2],
+    deposit_event.entry_height, atom.position_per_atom.data(),
+    deposit_entered.data(), deposit_entry_status.data());
+  GPU_CHECK_KERNEL
+  deposit_entry_status.copy_to_host(status);
+  if (status[1]) PRINT_INPUT_ERROR("Non-finite coordinate during deposit pulse entry check.");
+  return status[0] == 0;
+}
+
+void Run::validate_deposit_dynamics(bool pulse) const
+{
+  if (!ensemble_configured || integrate.type < 0 || integrate.type > 5) {
+    PRINT_INPUT_ERROR("deposit flight skip/pulse requires an explicit NVE or constant-temperature NVT ensemble.");
+  }
+  if (integrate.type != 0 && integrate.temperature1 != integrate.temperature2) {
+    PRINT_INPUT_ERROR("deposit flight skip/pulse does not support a temperature ramp.");
+  }
+  if (deposition_external_dynamics || electron_stop.do_electron_stop ||
+      velocity.do_velocity_correction || integrate.move_group >= 0 ||
+      integrate.deform_x || integrate.deform_y || integrate.deform_z ||
+      force.compute_hnemd_ || force.compute_hnemdec_ != -1) {
+    PRINT_INPUT_ERROR("deposit flight skip/pulse does not support external forces, fields, MC, velocity correction, moving groups or deformation.");
+  }
+  if (!std::isfinite(time_step) || time_step <= 0.0) {
+    PRINT_INPUT_ERROR("deposit flight skip/pulse requires a positive finite MD time step.");
+  }
+  if (pulse) {
+    for (const auto& property : measure.properties) {
+      const auto& name = property->property_name;
+      if (name != "dump_xyz" && name != "dump_thermo" && name != "dump_restart") {
+        PRINT_INPUT_ERROR("deposit pulse supports only dump_xyz, dump_thermo and dump_restart; use emit plus run for other measurements.");
+      }
+    }
+  }
+}
+
+void Run::parse_deposit(const std::vector<std::string>& tokens)
+{
+  const bool execution = tokens.size() >= 3 && (tokens[2] == "emit" || tokens[2] == "pulse");
+  const bool pulse = execution && tokens[2] == "pulse";
+  const std::string name = execution && variables ? variables->expand_text(tokens[1], box) :
+                           (execution ? tokens[1] : std::string{});
+  const bool skip = execution && deposit_registry.skips_flight(name);
+  if (pulse || skip) validate_deposit_dynamics(pulse);
+  if (skip) {
+    printf("Flight skipping is ballistic time compression: substrate evolution and thermostat action during omitted time are not integrated.\n");
+  }
+  DepositEvent event = deposit_registry.execute(tokens, box, atom, group, thermo, force, variables);
+  if (!event.active) return;
+  pending_skipped_flight = pending_skipped_flight || skip;
+  if (!event.pulse) return;
+  if (event.count <= 0 || event.max_wait <= 0 || event.relax_steps < 0 ||
+      event.max_wait > std::numeric_limits<int>::max() - event.relax_steps) {
+    PRINT_INPUT_ERROR("Invalid deposit pulse step budget or particle count.");
+  }
+  deposit_event = event;
+  deposit_entered.resize(event.count);
+  std::vector<int> not_entered(event.count, 0);
+  deposit_entered.copy_from_host(not_entered.data());
+  deposit_entry_status.resize(2);
+  number_of_steps = event.max_wait + event.relax_steps;
+  force.temperature = integrate.type == 0 ? 0.0 : integrate.temperature1;
+  force.delta_T = 0.0;
+  perform_a_run();
+  deposit_event = DepositEvent{};
 }
 
 void Run::execute_run_in()
@@ -208,6 +293,7 @@ void Run::execute_run_in()
 
 void Run::perform_a_run()
 {
+  if (pending_skipped_flight) validate_deposit_dynamics(deposit_event.pulse);
   integrate.initialize(time_step, atom, box, group, thermo, number_of_steps);
   mc.initialize();
   measure.initialize(number_of_steps, time_step, integrate, group, atom, box, force);
@@ -248,8 +334,15 @@ void Run::perform_a_run()
   }
 
   double initial_time_step = time_step;
+  const int scheduled_steps = number_of_steps;
+  int completed_steps = 0;
+  int entry_step = deposit_event.pulse && update_deposit_entry() ? 0 : -1;
+  bool pulse_timeout = false;
+  const double run_start_time = global_time;
 
   for (int step = 0; step < number_of_steps; ++step) {
+    if (deposit_event.pulse && entry_step >= 0 &&
+        completed_steps >= entry_step + deposit_event.relax_steps) break;
 
     velocity.correct_velocity(
       step,
@@ -302,6 +395,12 @@ void Run::perform_a_run()
 
     mc.compute(step, number_of_steps, atom, box, group);
 
+    completed_steps = step + 1;
+    if (deposit_event.pulse && entry_step < 0) {
+      if (update_deposit_entry()) entry_step = completed_steps;
+      else if (completed_steps >= deposit_event.max_wait) pulse_timeout = true;
+    }
+
     measure.process(
       number_of_steps,
       step,
@@ -321,6 +420,7 @@ void Run::perform_a_run()
       printf("    %d steps completed.\n", step + 1);
       fflush(stdout);
     }
+    if (pulse_timeout) break;
   }
 
   print_line_1();
@@ -328,11 +428,16 @@ void Run::perform_a_run()
   const std::chrono::duration<double> time_used = time_finish - time_begin;
 
   printf("Time used for this run = %g second.\n", time_used.count());
-  double run_speed = atom.number_of_atoms * (number_of_steps * 1.0 / time_used.count());
+  double run_speed = atom.number_of_atoms * (completed_steps * 1.0 / time_used.count());
   printf("Speed of this run = %g atom*step/second.\n", run_speed);
   print_line_2();
 
-  measure.finalize(atom, box, integrate, number_of_steps, time_step, integrate.temperature2);
+  measure.finalize(atom, box, integrate, completed_steps, time_step, integrate.temperature2);
+  if (deposit_event.pulse && !pulse_timeout) {
+    printf("Deposit pulse completed: wait_steps=%d relax_steps=%d md_steps=%d md_time_fs=%.17g\n",
+      entry_step, deposit_event.relax_steps, completed_steps,
+      (global_time - run_start_time) * TIME_UNIT_CONVERSION);
+  }
 
   electron_stop.finalize();
   add_force.finalize();
@@ -344,10 +449,21 @@ void Run::perform_a_run()
   force.finalize();
   max_distance_per_step = 0.0;
   full_observables_next_run = false;
+  deposition_external_dynamics = false;
+  pending_skipped_flight = false;
+  if (pulse_timeout) {
+    printf("Deposit pulse timed out after %d MD steps (budget %d); no successful arrival claimed.\n",
+      completed_steps, scheduled_steps);
+    PRINT_INPUT_ERROR("deposit pulse reached max_wait before all particles entered.");
+  }
 }
 
 void Run::parse_one_keyword(std::vector<std::string>& tokens)
 {
+  if (!tokens.empty() && tokens[0] == "deposit") {
+    parse_deposit(tokens);
+    return;
+  }
   int num_param = tokens.size();
   const int max_num_param = 32;
   if (num_param > max_num_param)
@@ -362,9 +478,6 @@ void Run::parse_one_keyword(std::vector<std::string>& tokens)
   } else if (strcmp(param[0], "replicate") == 0) {
     AtomMutation::sync_cpu_from_gpu(atom);
     Replicate(param, num_param, box, atom, group, thermo, force);
-  } else if (strcmp(param[0], "deposit") == 0) {
-    AtomMutation::sync_cpu_from_gpu(atom);
-    Deposit(param, num_param, box, atom, group, thermo, force, variables);
   } else if (strcmp(param[0], "delete") == 0) {
     AtomMutation::sync_cpu_from_gpu(atom);
     Delete(param, num_param, box, atom, group, thermo, force);
@@ -423,6 +536,7 @@ void Run::parse_one_keyword(std::vector<std::string>& tokens)
   } else if (strcmp(param[0], "velocity") == 0) {
     parse_velocity(param, num_param);
   } else if (strcmp(param[0], "ensemble") == 0) {
+    ensemble_configured = true;
     integrate.parse_ensemble(param, num_param, time_step, atom, box, group, thermo);
   } else if (strcmp(param[0], "time_step") == 0) {
     parse_time_step(param, num_param);
@@ -577,12 +691,16 @@ void Run::parse_one_keyword(std::vector<std::string>& tokens)
     electron_stop.parse(param, num_param, atom.number_of_atoms, number_of_types);
   } else if (strcmp(param[0], "add_random_force") == 0) {
     add_random_force.parse(param, num_param, atom.number_of_atoms);
+    deposition_external_dynamics = true;
   } else if (strcmp(param[0], "add_force") == 0) {
     add_force.parse(param, num_param, group);
+    deposition_external_dynamics = true;
   } else if (strcmp(param[0], "add_efield") == 0) {
     add_efield.parse(param, num_param, group);
+    deposition_external_dynamics = true;
   } else if (strcmp(param[0], "mc") == 0) {
     mc.parse_mc(param, num_param, group, atom);
+    deposition_external_dynamics = true;
   } else if (strcmp(param[0], "kspace") == 0) {
     // nothing here; will be handled elsewhere
   } else if (strcmp(param[0], "dftd3") == 0) {

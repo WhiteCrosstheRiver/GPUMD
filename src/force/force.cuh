@@ -62,6 +62,7 @@ public:
   void set_need_full_observables(const bool need_full);
   void set_skip_options(const SkipOptions& options);
   const SkipOptions& skip_options() const { return skip_options_; }
+  double deposition_clearance() const;
 
   int get_number_of_types(FILE* fid_potential);
   void set_hnemd_parameters(const double, const double, const double);

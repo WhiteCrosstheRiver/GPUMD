@@ -18,30 +18,53 @@
 #include "model/atom.cuh"
 #include "model/box.cuh"
 #include "model/group.cuh"
-#include "utilities/error.cuh"
-#include "utilities/read_file.cuh"
-#include <stdio.h>
+#include <map>
+#include <random>
+#include <string>
 #include <vector>
 
 class Force;
 class VariableScope;
 
-void Deposit(
-  const char** param,
-  int num_param,
-  Box& box,
-  Atom& atoms,
-  std::vector<Group>& groups,
-  GPU_Vector<double>& thermo,
-  Force& force,
-  VariableScope* variables);
+struct DepositEvent
+{
+  bool active = false;
+  bool pulse = false;
+  int first_atom = 0;
+  int count = 0;
+  double normal[3] = {0.0, 0.0, 1.0};
+  double entry_height = 0.0;
+  int relax_steps = 0;
+  int max_wait = 0;
+  double omitted_time_min_fs = 0.0;
+  double omitted_time_max_fs = 0.0;
+};
 
-// Consecutive `deposit` commands: one CPU sync, one atom-count rebuild.
-void DepositSequence(
-  const std::vector<std::vector<std::string>>& commands,
-  Box& box,
-  Atom& atoms,
-  std::vector<Group>& groups,
-  GPU_Vector<double>& thermo,
-  Force& force,
-  VariableScope* variables);
+class DepositRegistry
+{
+public:
+  DepositEvent execute(
+    const std::vector<std::string>& tokens,
+    Box& box,
+    Atom& atoms,
+    std::vector<Group>& groups,
+    GPU_Vector<double>& thermo,
+    Force& force,
+    VariableScope* variables);
+
+  bool skips_flight(const std::string& name) const;
+
+private:
+  struct Recipe
+  {
+    std::vector<std::string> particle;
+    std::vector<std::string> placement;
+    std::vector<std::string> region;
+    std::vector<std::string> velocity;
+    std::vector<std::string> flight;
+    std::vector<std::string> exclusion;
+    std::mt19937 rng;
+    bool rng_initialized = false;
+  };
+  std::map<std::string, Recipe> recipes_;
+};

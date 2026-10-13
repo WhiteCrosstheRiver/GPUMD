@@ -48,9 +48,11 @@ public:
     GPU_Vector<double>& force,
     GPU_Vector<double>& virial);
   virtual InfluencePolicy influence_policy() const { return InfluencePolicy::ActiveOnly; }
+  double deposition_clearance() const override;
   void initialize_lj(FILE* fid, int, const std::vector<int>, int);
 
 protected:
+  bool deposition_cutoffs_valid = true;
   LJ_Para lj_para;
   LJ_Data lj_data;
 };

@@ -23,6 +23,7 @@ class Measure;
 #include "add_force.cuh"
 #include "add_random_force.cuh"
 #include "electron_stop.cuh"
+#include "deposit.cuh"
 #include "force/force.cuh"
 #include "integrate/integrate.cuh"
 #include "mc/mc.cuh"
@@ -46,7 +47,6 @@ public:
   VariableScope* variables = nullptr;
   Box& current_box() { return box; }
   void delete_isolated_batch(const std::vector<std::vector<std::string>>& commands);
-  void deposit_sequence(const std::vector<std::vector<std::string>>& commands);
 
 private:
   friend struct CommandNode;
@@ -64,6 +64,9 @@ private:
   void parse_time_step(const char** param, int num_param);
   void parse_run(const char** param, int num_param);
   void parse_fix_skip(const char** param, int num_param);
+  void parse_deposit(const std::vector<std::string>& tokens);
+  void validate_deposit_dynamics(bool pulse) const;
+  bool update_deposit_entry();
 
   int number_of_types; // number of atom types
   int has_velocity_in_xyz = 0;
@@ -73,6 +76,13 @@ private:
   double time_step = 1.0 / TIME_UNIT_CONVERSION;
   double max_distance_per_step = -1.0;
   bool full_observables_next_run = false; // keyword full_observables (not propagating)
+  DepositRegistry deposit_registry;
+  DepositEvent deposit_event;
+  GPU_Vector<int> deposit_entered;
+  GPU_Vector<int> deposit_entry_status;
+  bool ensemble_configured = false;
+  bool deposition_external_dynamics = false;
+  bool pending_skipped_flight = false;
   Atom atom;
   GPU_Vector<double> thermo; // some thermodynamic quantities
   Velocity velocity;

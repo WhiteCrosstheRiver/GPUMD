@@ -6,6 +6,8 @@
 #include "deposit.cuh"
 #include "atom_mutation.cuh"
 #include "variable.cuh"
+#include "force/force.cuh"
+#include "utilities/common.cuh"
 #include "model/group.cuh"
 #include "utilities/error.cuh"
 #include "utilities/read_file.cuh"
@@ -16,7 +18,9 @@
 #include <cstring>
 #include <fstream>
 #include <map>
+#include <limits>
 #include <memory>
+#include <numeric>
 #include <random>
 #include <string>
 #include <unordered_map>
@@ -70,7 +74,10 @@ struct DepositConfig
   enum Velocity
   {
     Constant,
-    Uniform
+    Uniform,
+    VectorVelocity,
+    BeamVelocity,
+    ThermalVelocity
   };
   enum Select
   {
@@ -124,6 +131,17 @@ struct DepositConfig
   double speed = 0.0;
   double speed_min = 0.0;
   double speed_max = 0.0;
+  double vector_velocity[3] = {0.0, 0.0, 0.0};
+  double drift[3] = {0.0, 0.0, 0.0};
+  double temperature = 0.0;
+  double entity_mass = 0.0;
+
+  bool mixture = false;
+  std::vector<std::string> mixture_symbols;
+  std::vector<double> mixture_weights;
+  bool box_region = false;
+  double xyz_bounds[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+  bool skip_flight = false;
 
   bool has_near = false;
   double near_r = 0.0;
@@ -147,16 +165,6 @@ struct DepositFrame
   int cartesian_n = -1;
 };
 
-static bool frames_equal(const DepositFrame& a, const DepositFrame& b)
-{
-  for (int k = 0; k < 3; ++k) {
-    if (a.u[k] != b.u[k] || a.v[k] != b.v[k] || a.n[k] != b.n[k]) {
-      return false;
-    }
-  }
-  return true;
-}
-
 struct DepositUV
 {
   double u = 0.0;
@@ -173,404 +181,16 @@ struct EntityTemplate
   double radius = 0.0;
 };
 
-static int require_index(int i, int num_param, const char* what)
-{
-  if (i >= num_param) {
-    PRINT_INPUT_ERROR(what);
-  }
-  return i;
-}
-
-static double require_real(
-  const char** param,
-  int num_param,
-  int i,
-  const Box& box,
-  VariableScope* variables,
-  const char* what)
-{
-  require_index(i, num_param, what);
-  if (variables != nullptr) {
-    return variables->resolve_real(param[i], box, what);
-  }
-  double value = 0.0;
-  if (!is_valid_real(param[i], &value)) {
-    PRINT_INPUT_ERROR(what);
-  }
-  return value;
-}
-
-static int require_int(const char** param, int num_param, int i, const char* what)
-{
-  require_index(i, num_param, what);
-  int value = 0;
-  if (!is_valid_int(param[i], &value)) {
-    PRINT_INPUT_ERROR(what);
-  }
-  return value;
-}
-
-static bool parse_axis(const char* token, double d[3])
-{
-  int sign = 1;
-  const char* p = token;
-  if (p[0] == '+') {
-    p += 1;
-  } else if (p[0] == '-') {
-    sign = -1;
-    p += 1;
-  }
-  d[0] = d[1] = d[2] = 0.0;
-  if (strcmp(p, "x") == 0) {
-    d[0] = static_cast<double>(sign);
-    return true;
-  }
-  if (strcmp(p, "y") == 0) {
-    d[1] = static_cast<double>(sign);
-    return true;
-  }
-  if (strcmp(p, "z") == 0) {
-    d[2] = static_cast<double>(sign);
-    return true;
-  }
-  return false;
-}
-
 static void normalize3(double v[3], const char* what)
 {
   const double n2 = v[0] * v[0] + v[1] * v[1] + v[2] * v[2];
-  if (n2 <= 1.0e-30) {
+  if (!std::isfinite(n2) || n2 <= 1.0e-30) {
     PRINT_INPUT_ERROR(what);
   }
   const double inv = 1.0 / sqrt(n2);
   v[0] *= inv;
   v[1] *= inv;
   v[2] *= inv;
-}
-
-static bool deposit_needs_rng(const DepositConfig& cfg)
-{
-  if (cfg.style == DepositConfig::Random || cfg.style == DepositConfig::Gaussian) {
-    return true;
-  }
-  if (cfg.style == DepositConfig::Grid && !cfg.number_all && cfg.select == DepositConfig::RandomSelect) {
-    return true;
-  }
-  if (cfg.has_spread) {
-    return true;
-  }
-  if (cfg.velocity_kind == DepositConfig::Uniform) {
-    return true;
-  }
-  return false;
-}
-
-static void parse_deposit_config(
-  const char** param,
-  int num_param,
-  const Box& box,
-  VariableScope* variables,
-  DepositConfig& cfg)
-{
-  if (num_param < 4) {
-    PRINT_INPUT_ERROR("Usage: deposit <style> <entity> <source> keyword values ...");
-  }
-
-  if (strcmp(param[1], "grid") == 0) {
-    cfg.style = DepositConfig::Grid;
-  } else if (strcmp(param[1], "random") == 0) {
-    cfg.style = DepositConfig::Random;
-  } else if (strcmp(param[1], "gaussian") == 0) {
-    cfg.style = DepositConfig::Gaussian;
-  } else if (strcmp(param[1], "point") == 0) {
-    cfg.style = DepositConfig::Point;
-  } else {
-    PRINT_INPUT_ERROR("deposit style must be grid, random, gaussian, or point.");
-  }
-
-  if (strcmp(param[2], "atom") == 0) {
-    cfg.entity = DepositConfig::Atom;
-  } else if (strcmp(param[2], "molecule") == 0) {
-    cfg.entity = DepositConfig::Molecule;
-  } else {
-    PRINT_INPUT_ERROR("deposit entity must be atom or molecule.");
-  }
-  cfg.source = param[3];
-
-  auto real_at = [&](int index, const char* what) {
-    return require_real(param, num_param, index, box, variables, what);
-  };
-
-  int i = 4;
-  while (i < num_param) {
-    if (strcmp(param[i], "number") == 0) {
-      require_index(i + 1, num_param, "Usage: number <N> or number all");
-      if (strcmp(param[i + 1], "all") == 0) {
-        cfg.number_all = true;
-        cfg.has_number = true;
-      } else {
-        cfg.number = require_int(param, num_param, i + 1, "number N should be an integer.");
-        if (cfg.number < 1) {
-          PRINT_INPUT_ERROR("deposit number should be >= 1.");
-        }
-        cfg.has_number = true;
-      }
-      i += 2;
-    } else if (strcmp(param[i], "direction") == 0) {
-      require_index(i + 1, num_param, "Usage: direction axis <±x|±y|±z> or vector vx vy vz or target tx ty tz");
-      if (strcmp(param[i + 1], "axis") == 0) {
-        require_index(i + 2, num_param, "Usage: direction axis <±x|±y|±z>");
-        if (!parse_axis(param[i + 2], cfg.flight)) {
-          PRINT_INPUT_ERROR("direction axis must be x, y, z, -x, -y, or -z.");
-        }
-        cfg.direction_kind = DepositConfig::Axis;
-        i += 3;
-      } else if (strcmp(param[i + 1], "vector") == 0) {
-        cfg.flight[0] = real_at(i + 2, "direction vector values should be numbers.");
-        cfg.flight[1] = real_at(i + 3, "direction vector values should be numbers.");
-        cfg.flight[2] = real_at(i + 4, "direction vector values should be numbers.");
-        normalize3(cfg.flight, "direction vector must be non-zero.");
-        cfg.direction_kind = DepositConfig::Vector;
-        i += 5;
-      } else if (strcmp(param[i + 1], "target") == 0) {
-        cfg.target[0] = real_at(i + 2, "direction target values should be numbers.");
-        cfg.target[1] = real_at(i + 3, "direction target values should be numbers.");
-        cfg.target[2] = real_at(i + 4, "direction target values should be numbers.");
-        cfg.direction_kind = DepositConfig::Target;
-        i += 5;
-      } else {
-        PRINT_INPUT_ERROR("direction must be axis, vector, or target.");
-      }
-      cfg.has_direction = true;
-    } else if (strcmp(param[i], "normal") == 0) {
-      require_index(i + 1, num_param, "Usage: normal axis <±x|±y|±z> or vector nx ny nz");
-      if (strcmp(param[i + 1], "axis") == 0) {
-        require_index(i + 2, num_param, "Usage: normal axis <±x|±y|±z>");
-        if (!parse_axis(param[i + 2], cfg.normal)) {
-          PRINT_INPUT_ERROR("normal axis must be x, y, z, -x, -y, or -z.");
-        }
-        i += 3;
-      } else if (strcmp(param[i + 1], "vector") == 0) {
-        cfg.normal[0] = real_at(i + 2, "normal vector values should be numbers.");
-        cfg.normal[1] = real_at(i + 3, "normal vector values should be numbers.");
-        cfg.normal[2] = real_at(i + 4, "normal vector values should be numbers.");
-        normalize3(cfg.normal, "normal vector must be non-zero.");
-        i += 5;
-      } else {
-        PRINT_INPUT_ERROR("normal must be axis or vector.");
-      }
-      cfg.has_normal = true;
-    } else if (strcmp(param[i], "basis") == 0) {
-      cfg.basis[0] = real_at(i + 1, "basis values should be numbers.");
-      cfg.basis[1] = real_at(i + 2, "basis values should be numbers.");
-      cfg.basis[2] = real_at(i + 3, "basis values should be numbers.");
-      cfg.has_basis = true;
-      i += 4;
-    } else if (strcmp(param[i], "surface") == 0) {
-      require_index(i + 1, num_param, "Usage: surface fixed H, global gap D, or local radius R gap D");
-      if (strcmp(param[i + 1], "fixed") == 0) {
-        cfg.surface_H = real_at(i + 2, "surface fixed H should be a number.");
-        cfg.surface_kind = DepositConfig::Fixed;
-        i += 3;
-      } else if (strcmp(param[i + 1], "global") == 0) {
-        if (i + 2 >= num_param || strcmp(param[i + 2], "gap") != 0) {
-          PRINT_INPUT_ERROR("Usage: surface global gap <D>");
-        }
-        cfg.surface_gap = real_at(i + 3, "surface gap should be a number.");
-        if (cfg.surface_gap < 0.0) {
-          PRINT_INPUT_ERROR("surface gap should be >= 0.");
-        }
-        cfg.surface_kind = DepositConfig::Global;
-        i += 4;
-      } else if (strcmp(param[i + 1], "local") == 0) {
-        if (i + 4 >= num_param || strcmp(param[i + 2], "radius") != 0 ||
-            strcmp(param[i + 4], "gap") != 0) {
-          PRINT_INPUT_ERROR("Usage: surface local radius <R> gap <D> [mobile]");
-        }
-        cfg.surface_radius = real_at(i + 3, "surface local radius should be a number.");
-        cfg.surface_gap = real_at(i + 5, "surface gap should be a number.");
-        if (cfg.surface_radius <= 0.0) {
-          PRINT_INPUT_ERROR("surface local radius should be > 0.");
-        }
-        if (cfg.surface_gap < 0.0) {
-          PRINT_INPUT_ERROR("surface gap should be >= 0.");
-        }
-        cfg.surface_kind = DepositConfig::Local;
-        i += 6;
-        if (i < num_param && strcmp(param[i], "mobile") == 0) {
-          cfg.surface_mobile = true;
-          i += 1;
-        }
-      } else {
-        PRINT_INPUT_ERROR("surface must be fixed, global, or local.");
-      }
-      cfg.has_surface = true;
-    } else if (strcmp(param[i], "region") == 0) {
-      for (int k = 0; k < 4; ++k) {
-        cfg.region[k] = real_at(i + 1 + k, "region values should be numbers.");
-      }
-      if (cfg.region[0] > cfg.region[1] || cfg.region[2] > cfg.region[3]) {
-        PRINT_INPUT_ERROR("region min should be <= max.");
-      }
-      cfg.has_region = true;
-      i += 5;
-    } else if (strcmp(param[i], "spacing") == 0) {
-      cfg.spacing[0] = real_at(i + 1, "spacing values should be numbers.");
-      cfg.spacing[1] = real_at(i + 2, "spacing values should be numbers.");
-      if (cfg.spacing[0] <= 0.0 || cfg.spacing[1] <= 0.0) {
-        PRINT_INPUT_ERROR("spacing should be > 0.");
-      }
-      cfg.has_spacing = true;
-      i += 3;
-    } else if (strcmp(param[i], "origin") == 0) {
-      cfg.origin[0] = real_at(i + 1, "origin values should be numbers.");
-      cfg.origin[1] = real_at(i + 2, "origin values should be numbers.");
-      cfg.has_origin = true;
-      i += 3;
-    } else if (strcmp(param[i], "sigma") == 0) {
-      cfg.sigma = real_at(i + 1, "sigma should be a number.");
-      if (cfg.sigma < 0.0) {
-        PRINT_INPUT_ERROR("sigma should be >= 0.");
-      }
-      cfg.has_sigma = true;
-      i += 2;
-    } else if (strcmp(param[i], "spread") == 0) {
-      require_index(i + 1, num_param, "Usage: spread gaussian <sigma_deg>");
-      if (strcmp(param[i + 1], "gaussian") != 0) {
-        PRINT_INPUT_ERROR("Usage: spread gaussian <sigma_deg>");
-      }
-      cfg.spread_sigma_deg = real_at(i + 2, "spread gaussian sigma should be a number.");
-      if (cfg.spread_sigma_deg < 0.0) {
-        PRINT_INPUT_ERROR("spread gaussian sigma should be >= 0.");
-      }
-      cfg.has_spread = true;
-      i += 3;
-    } else if (strcmp(param[i], "velocity") == 0) {
-      require_index(i + 1, num_param, "Usage: velocity constant V or uniform Vmin Vmax");
-      if (strcmp(param[i + 1], "constant") == 0) {
-        cfg.speed = real_at(i + 2, "velocity constant V should be a number.");
-        if (cfg.speed < 0.0) {
-          PRINT_INPUT_ERROR("velocity should be >= 0.");
-        }
-        cfg.velocity_kind = DepositConfig::Constant;
-        i += 3;
-      } else if (strcmp(param[i + 1], "uniform") == 0) {
-        cfg.speed_min = real_at(i + 2, "velocity uniform values should be numbers.");
-        cfg.speed_max = real_at(i + 3, "velocity uniform values should be numbers.");
-        if (cfg.speed_min < 0.0 || cfg.speed_max < cfg.speed_min) {
-          PRINT_INPUT_ERROR("velocity uniform requires 0 <= Vmin <= Vmax.");
-        }
-        cfg.velocity_kind = DepositConfig::Uniform;
-        i += 4;
-      } else {
-        PRINT_INPUT_ERROR("velocity must be constant or uniform.");
-      }
-      cfg.has_velocity = true;
-    } else if (strcmp(param[i], "near") == 0) {
-      cfg.near_r = real_at(i + 1, "near R should be a number.");
-      if (cfg.near_r <= 0.0) {
-        PRINT_INPUT_ERROR("near R should be > 0.");
-      }
-      cfg.has_near = true;
-      i += 2;
-    } else if (strcmp(param[i], "select") == 0) {
-      require_index(i + 1, num_param, "Usage: select sequential or select random");
-      if (strcmp(param[i + 1], "sequential") == 0) {
-        cfg.select = DepositConfig::Sequential;
-      } else if (strcmp(param[i + 1], "random") == 0) {
-        cfg.select = DepositConfig::RandomSelect;
-      } else {
-        PRINT_INPUT_ERROR("select must be sequential or random.");
-      }
-      cfg.has_select = true;
-      i += 2;
-    } else if (strcmp(param[i], "attempt") == 0) {
-      cfg.attempt = require_int(param, num_param, i + 1, "attempt Q should be an integer.");
-      if (cfg.attempt < 1) {
-        PRINT_INPUT_ERROR("attempt should be >= 1.");
-      }
-      cfg.has_attempt = true;
-      i += 2;
-    } else if (strcmp(param[i], "seed") == 0) {
-      const int seed = require_int(param, num_param, i + 1, "seed should be an integer.");
-      if (seed < 0) {
-        PRINT_INPUT_ERROR("seed should be >= 0.");
-      }
-      cfg.seed = static_cast<unsigned>(seed);
-      cfg.has_seed = true;
-      i += 2;
-    } else {
-      PRINT_INPUT_ERROR("Unknown keyword in deposit.");
-    }
-  }
-}
-
-static void validate_deposit_config(const DepositConfig& cfg)
-{
-  if (!cfg.has_direction) {
-    PRINT_INPUT_ERROR("deposit requires direction.");
-  }
-  if (cfg.direction_kind == DepositConfig::Target && !cfg.has_normal) {
-    PRINT_INPUT_ERROR("direction target requires normal.");
-  }
-  if (!cfg.has_surface) {
-    PRINT_INPUT_ERROR("deposit requires surface.");
-  }
-  if (!cfg.has_velocity) {
-    PRINT_INPUT_ERROR("deposit requires velocity.");
-  }
-  if (cfg.number_all && cfg.style != DepositConfig::Grid) {
-    PRINT_INPUT_ERROR("number all is only valid for grid.");
-  }
-  if (cfg.has_select && cfg.style != DepositConfig::Grid) {
-    PRINT_INPUT_ERROR("select is only valid for grid.");
-  }
-  if (cfg.has_attempt && cfg.style != DepositConfig::Random && cfg.style != DepositConfig::Gaussian) {
-    PRINT_INPUT_ERROR("attempt is only valid for random or gaussian.");
-  }
-  if (cfg.has_spacing && cfg.style != DepositConfig::Grid) {
-    PRINT_INPUT_ERROR("spacing is only valid for grid.");
-  }
-  if (cfg.has_sigma && cfg.style != DepositConfig::Gaussian) {
-    PRINT_INPUT_ERROR("sigma is only valid for gaussian.");
-  }
-
-  if (cfg.style == DepositConfig::Grid) {
-    if (!cfg.has_region) {
-      PRINT_INPUT_ERROR("grid requires region <u_min> <u_max> <v_min> <v_max>.");
-    }
-    if (!cfg.has_spacing) {
-      PRINT_INPUT_ERROR("grid requires spacing <du> <dv>.");
-    }
-    if (!cfg.has_number) {
-      PRINT_INPUT_ERROR("grid requires number <N> or number all.");
-    }
-  } else if (cfg.style == DepositConfig::Random) {
-    if (!cfg.has_region) {
-      PRINT_INPUT_ERROR("random requires region <u_min> <u_max> <v_min> <v_max>.");
-    }
-    if (!cfg.has_number || cfg.number_all) {
-      PRINT_INPUT_ERROR("random requires number <N>.");
-    }
-  } else if (cfg.style == DepositConfig::Gaussian) {
-    if (!cfg.has_origin) {
-      PRINT_INPUT_ERROR("gaussian requires origin <u> <v>.");
-    }
-    if (!cfg.has_sigma) {
-      PRINT_INPUT_ERROR("gaussian requires sigma <s>.");
-    }
-    if (!cfg.has_number || cfg.number_all) {
-      PRINT_INPUT_ERROR("gaussian requires number <N>.");
-    }
-  } else {
-    if (!cfg.has_origin) {
-      PRINT_INPUT_ERROR("point requires origin <u> <v>.");
-    }
-  }
-
-  // seed is optional: without it the sampler draws a fresh random seed per
-  // command (std::random_device), so repeated deposits do not land on the
-  // exact same sites and pile up. An explicit seed keeps runs reproducible.
 }
 
 static double norm3(const double v[3])
@@ -581,7 +201,7 @@ static double norm3(const double v[3])
 static void normalize_or_die(double v[3], const char* what)
 {
   const double n = norm3(v);
-  if (n <= 1.0e-30) {
+  if (!std::isfinite(n) || n <= 1.0e-30) {
     PRINT_INPUT_ERROR(what);
   }
   v[0] /= n;
@@ -660,14 +280,6 @@ static void build_deposit_frame(const DepositConfig& cfg, DepositFrame& frame)
   frame.u[2] = a[2] - adotn * frame.n[2];
   normalize_or_die(frame.u, "basis is parallel to the surface normal.");
   cross3(frame.n, frame.u, frame.v);
-}
-
-static void print_deposit_frame(const DepositFrame& frame)
-{
-  printf("Deposition basis:\n");
-  printf("  u = %.8f %.8f %.8f\n", frame.u[0], frame.u[1], frame.u[2]);
-  printf("  v = %.8f %.8f %.8f\n", frame.v[0], frame.v[1], frame.v[2]);
-  printf("  n = %.8f %.8f %.8f\n", frame.n[0], frame.n[1], frame.n[2]);
 }
 
 static void uvH_to_xyz(const DepositFrame& frame, double u, double v, double H, double r[3])
@@ -978,8 +590,8 @@ struct SurfaceIndex
     // an early high `best` prunes every remaining deep chain (exact for a
     // max-H query: a cell whose highest atom cannot beat `best` is skipped).
     const int n_cell = (2 * span + 1) * (2 * span + 1);
-    int cells[512];
-    double cellH[512];
+    std::vector<int> cells(n_cell);
+    std::vector<double> cellH(n_cell);
     int n_used = 0;
     for (int du = -span; du <= span; ++du) {
       for (int dv = -span; dv <= span; ++dv) {
@@ -1094,6 +706,7 @@ struct SurfaceIndex
 struct NearIndex
 {
   double cell = 1.0;
+  bool brute_force = false;
   int nx = 1, ny = 1, nz = 1;
   int pbc[3] = {0, 0, 0};
   double L[3] = {1.0, 1.0, 1.0};
@@ -1161,11 +774,18 @@ struct NearIndex
     pbc[0] = box_.pbc_x;
     pbc[1] = box_.pbc_y;
     pbc[2] = box_.pbc_z;
-    nx = pbc[0] && L[0] > 0.0 ? std::max(1, (int)floor(L[0] / cell)) : std::max(1, (int)ceil(L[0] / cell));
-    ny = pbc[1] && L[1] > 0.0 ? std::max(1, (int)floor(L[1] / cell)) : std::max(1, (int)ceil(L[1] / cell));
-    nz = pbc[2] && L[2] > 0.0 ? std::max(1, (int)floor(L[2] / cell)) : std::max(1, (int)ceil(L[2] / cell));
-    if (pbc[0] && L[0] > 0.0) {
-      cell = std::min(cell, L[0] / nx);
+    brute_force = !std::isfinite(cell) || !(cell > 0.0);
+    for (int row = 0; row < 3; ++row) {
+      for (int col = 0; col < 3; ++col) {
+        if (!std::isfinite(box_.cpu_h[3 * row + col]))
+          PRINT_INPUT_ERROR("Exclusion distance requires a finite box matrix.");
+        if (row != col && fabs(box_.cpu_h[3 * row + col]) > 1.0e-10)
+          brute_force = true;
+      }
+      if (!(L[row] > 0.0) || !std::isfinite(L[row] / cell) ||
+          L[row] / cell > std::numeric_limits<int>::max() - 1 ||
+          (pbc[row] && L[row] < cutoff))
+        brute_force = true;
     }
     const int N = atom.number_of_atoms;
     const double* r0 = atom.cpu_position_per_atom.data();
@@ -1176,6 +796,20 @@ struct NearIndex
       x[i] = r0[i];
       y[i] = r0[i + N];
       z[i] = r0[i + 2 * N];
+    }
+    if (brute_force) {
+      head.clear();
+      next.clear();
+      overflow = -1;
+      return;
+    }
+    nx = pbc[0] && L[0] > 0.0 ? std::max(1, (int)floor(L[0] / cell)) : std::max(1, (int)ceil(L[0] / cell));
+    ny = pbc[1] && L[1] > 0.0 ? std::max(1, (int)floor(L[1] / cell)) : std::max(1, (int)ceil(L[1] / cell));
+    nz = pbc[2] && L[2] > 0.0 ? std::max(1, (int)floor(L[2] / cell)) : std::max(1, (int)ceil(L[2] / cell));
+    if (pbc[0] && L[0] > 0.0) {
+      cell = std::min(cell, L[0] / nx);
+    }
+    for (int i = 0; i < N; ++i) {
       if (pbc[0]) {
         x[i] = wrap01(x[i] / L[0]) * L[0];
       }
@@ -1194,6 +828,7 @@ struct NearIndex
     x.push_back(px);
     y.push_back(py);
     z.push_back(pz);
+    if (brute_force) return;
     next.push_back(-1);
     link_atom((int)x.size() - 1);
   }
@@ -1208,6 +843,18 @@ struct NearIndex
   bool overlaps(const double* xyz, int n_atoms, double cutoff) const
   {
     const double cut2 = cutoff * cutoff;
+    if (brute_force) {
+      for (int a = 0; a < n_atoms; ++a) {
+        for (size_t j = 0; j < x.size(); ++j) {
+          double rx = xyz[a * 3] - x[j];
+          double ry = xyz[a * 3 + 1] - y[j];
+          double rz = xyz[a * 3 + 2] - z[j];
+          apply_mic(*box, rx, ry, rz);
+          if (rx * rx + ry * ry + rz * rz < cut2) return true;
+        }
+      }
+      return false;
+    }
     const int span = 1;
     for (int a = 0; a < n_atoms; ++a) {
       const double px = xyz[a * 3];
@@ -1303,6 +950,9 @@ static GridView make_grid_view(const DepositConfig& cfg)
   g.dv = cfg.spacing[1];
   g.nu = count_grid_axis(cfg.region[0], cfg.region[1], cfg.spacing[0]);
   g.nv = count_grid_axis(cfg.region[2], cfg.region[3], cfg.spacing[1]);
+  if (g.nu > std::numeric_limits<int>::max() / g.nv) {
+    PRINT_INPUT_ERROR("grid spacing produced too many sites.");
+  }
   if (g.size() < 1) {
     PRINT_INPUT_ERROR("grid region/spacing produced no sites.");
   }
@@ -1380,12 +1030,6 @@ static bool grid_sites_separated(
   return true;
 }
 
-static int map_perm(std::unordered_map<int, int>& swapped, int i)
-{
-  auto it = swapped.find(i);
-  return it == swapped.end() ? i : it->second;
-}
-
 struct DepositSampler
 {
   std::mt19937 rng;
@@ -1397,31 +1041,6 @@ struct DepositSampler
   bool has_speed = false;
   bool has_uv = false;
 };
-
-static void prepare_sampler(const DepositConfig& cfg, DepositSampler& s)
-{
-  if (deposit_needs_rng(cfg)) {
-    if (cfg.has_seed) {
-      s.rng.seed(cfg.seed);
-    } else {
-      std::random_device rd;
-      s.rng.seed(rd());
-    }
-  }
-  if (cfg.velocity_kind == DepositConfig::Uniform && cfg.speed_min < cfg.speed_max) {
-    s.speed = std::uniform_real_distribution<double>(cfg.speed_min, cfg.speed_max);
-    s.has_speed = true;
-  }
-  if (cfg.style == DepositConfig::Random) {
-    if (cfg.region[0] < cfg.region[1]) {
-      s.uu = std::uniform_real_distribution<double>(cfg.region[0], cfg.region[1]);
-    }
-    if (cfg.region[2] < cfg.region[3]) {
-      s.vv = std::uniform_real_distribution<double>(cfg.region[2], cfg.region[3]);
-    }
-    s.has_uv = true;
-  }
-}
 
 static DepositUV sample_style_uv(const DepositConfig& cfg, DepositSampler& s)
 {
@@ -1489,7 +1108,8 @@ static void sample_flight_direction(
 
 static double sample_speed(const DepositConfig& cfg, DepositSampler& s)
 {
-  if (cfg.velocity_kind == DepositConfig::Constant) {
+  if (cfg.velocity_kind == DepositConfig::Constant ||
+      cfg.velocity_kind == DepositConfig::BeamVelocity) {
     return cfg.speed;
   }
   if (!s.has_speed) {
@@ -1505,9 +1125,25 @@ static void sample_velocity(
   DepositSampler& s,
   double vel[3])
 {
+  if (cfg.velocity_kind == DepositConfig::VectorVelocity) {
+    for (int k = 0; k < 3; ++k) {
+      vel[k] = cfg.vector_velocity[k] * TIME_UNIT_CONVERSION;
+    }
+    return;
+  }
+  if (cfg.velocity_kind == DepositConfig::ThermalVelocity) {
+    // GPUMD masses are amu; kB*T/m converts to (angstrom/fs)^2 here.
+    const double sigma = sqrt(8.617333262145e-5 * cfg.temperature /
+                              (103.6426965268 * cfg.entity_mass));
+    for (int k = 0; k < 3; ++k) {
+      vel[k] = (cfg.drift[k] + sigma * s.normal(s.rng)) * TIME_UNIT_CONVERSION;
+    }
+    return;
+  }
   double dir[3];
   sample_flight_direction(cfg, frame, r, s, dir);
-  const double speed = sample_speed(cfg, s);
+  const double speed = sample_speed(cfg, s) *
+    (cfg.velocity_kind == DepositConfig::BeamVelocity ? TIME_UNIT_CONVERSION : 1.0);
   vel[0] = speed * dir[0];
   vel[1] = speed * dir[1];
   vel[2] = speed * dir[2];
@@ -1800,141 +1436,264 @@ static bool near_test_is_redundant(
   return false;
 }
 
-static bool try_place(
-  const DepositConfig& cfg,
-  const EntityTemplate& tmpl,
-  const DepositFrame& frame,
-  const Box& box,
-  const SurfaceIndex& surface,
-  NearIndex* near,
-  bool skip_new_new,
-  DepositSampler& sampler,
-  const DepositUV& uv,
-  std::vector<double>& cand,
-  std::vector<Launch>& launches)
+namespace {
+
+double named_real(std::vector<std::string>& t, size_t i, const Box& box, VariableScope* vars)
 {
-  const double H = resolve_launch_H(cfg, surface, uv.u, uv.v);
-  double r[3];
-  uvH_to_xyz(frame, uv.u, uv.v, H, r);
-  wrap_lateral(box, frame, r);
-  fill_entity_xyz(tmpl, r, cand.data());
-  if (cfg.has_near && near != nullptr && near->overlaps(cand.data(), tmpl.n_atoms, cfg.near_r)) {
-      return false;
-    }
-  Launch L;
-  L.r[0] = r[0];
-  L.r[1] = r[1];
-  L.r[2] = r[2];
-  sample_velocity(cfg, frame, r, sampler, L.vel);
-  launches.push_back(L);
-  if (cfg.has_near && near != nullptr && !skip_new_new) {
-    near->insert(cand.data(), tmpl.n_atoms);
+  if (i >= t.size()) {
+    PRINT_INPUT_ERROR("Missing numeric deposit argument.");
   }
-  return true;
+  double v = 0.0;
+  if (vars != nullptr) {
+    v = vars->resolve_real(t[i], box, "Invalid deposit numeric argument.");
+  } else if (!is_valid_real(t[i].c_str(), &v)) {
+    PRINT_INPUT_ERROR("Invalid deposit numeric argument.");
+  }
+  if (!std::isfinite(v)) {
+    PRINT_INPUT_ERROR("Deposit arguments must be finite.");
+  }
+  t[i] = format_variable_number(v);
+  return v;
 }
 
-static NewAtoms launches_to_atoms(const EntityTemplate& tmpl, const std::vector<Launch>& launches)
+int named_int(std::vector<std::string>& t, size_t i, const Box& box, VariableScope* vars)
 {
-  const int n_atoms = (int)launches.size() * tmpl.n_atoms;
-  NewAtoms added = make_batch(n_atoms);
-  for (int k = 0; k < (int)launches.size(); ++k) {
-    place_entity(added, n_atoms, k * tmpl.n_atoms, tmpl, launches[k].r, launches[k].vel);
+  const double v = named_real(t, i, box, vars);
+  if (v < 0.0 || v > static_cast<double>(std::numeric_limits<int>::max()) ||
+      floor(v) != v) {
+    PRINT_INPUT_ERROR("Deposit argument must be a nonnegative integer.");
   }
-  return added;
+  return static_cast<int>(v);
 }
 
-static const char* style_name(DepositConfig::Style style)
+void named_size(const std::vector<std::string>& t, size_t n, const char* syntax)
 {
-  switch (style) {
-    case DepositConfig::Grid:
-      return "grid";
-    case DepositConfig::Random:
-      return "random";
-    case DepositConfig::Gaussian:
-      return "gaussian";
-    default:
-      return "point";
+  if (t.size() != n) {
+    PRINT_INPUT_ERROR(syntax);
   }
 }
 
-static NewAtoms deposit_grid(
-  const DepositConfig& cfg,
-  const EntityTemplate& tmpl,
-  const DepositFrame& frame,
-  const Box& box,
-  const SurfaceIndex& surface,
-  NearIndex* near,
-  bool skip_new_new,
-  DepositSampler& sampler,
-  std::vector<double>& cand)
+void named_positive(double v, const char* msg)
 {
-  const GridView grid = make_grid_view(cfg);
-  const int S = grid.size();
-  const int need = cfg.number_all ? S : cfg.number;
-  const bool random_order = !cfg.number_all && cfg.select == DepositConfig::RandomSelect;
-  std::vector<Launch> launches;
-  launches.reserve(need);
-  std::unordered_map<int, int> swapped;
-
-  for (int t = 0; t < S && (int)launches.size() < need; ++t) {
-    int s = t;
-    if (random_order) {
-      std::uniform_int_distribution<int> dist(t, S - 1);
-      const int j = dist(sampler.rng);
-      s = map_perm(swapped, j);
-      swapped[j] = map_perm(swapped, t);
-    }
-    try_place(cfg, tmpl, frame, box, surface, near, skip_new_new, sampler, grid.at(s), cand, launches);
-  }
-
-  if (launches.empty() || (!cfg.number_all && (int)launches.size() < need)) {
-    char msg[256];
-    snprintf(
-      msg,
-      sizeof(msg),
-      "Requested entities: %d. Valid grid sites: %d.",
-      cfg.number_all ? S : cfg.number,
-      (int)launches.size());
+  if (!(v > 0.0)) {
     PRINT_INPUT_ERROR(msg);
   }
-  printf("Requested entities : %d\n", cfg.number_all ? (int)launches.size() : cfg.number);
-  printf("Grid sites         : %d\n", S);
-  printf("Selected entities  : %d\n", (int)launches.size());
-  return launches_to_atoms(tmpl, launches);
 }
 
-static NewAtoms deposit_sampled(
-  const DepositConfig& cfg,
-  const EntityTemplate& tmpl,
-  const DepositFrame& frame,
-  const Box& box,
-  const SurfaceIndex& surface,
-  NearIndex* near,
-  DepositSampler& sampler,
-  std::vector<double>& cand)
+void parse_named_facet(
+  std::vector<std::string>& t, DepositConfig& cfg, const Box& box, VariableScope* vars)
 {
-  const int tries = (cfg.style == DepositConfig::Point) ? 1 : cfg.attempt;
-  std::vector<Launch> launches;
-  launches.reserve(cfg.number);
-  for (int k = 0; k < cfg.number; ++k) {
-    bool ok = false;
-    for (int t = 0; t < tries; ++t) {
-      const DepositUV uv = sample_style_uv(cfg, sampler);
-      if (try_place(cfg, tmpl, frame, box, surface, near, false, sampler, uv, cand, launches)) {
-        ok = true;
-        break;
-      }
-    }
-    if (!ok) {
-      PRINT_INPUT_ERROR("deposit failed: no valid insertion after attempt retries.");
-    }
+  if (t.empty()) {
+    PRINT_INPUT_ERROR("Empty deposit facet.");
   }
-  return launches_to_atoms(tmpl, launches);
+  if (t[0] == "particle") {
+    if (t.size() < 3) {
+      PRINT_INPUT_ERROR("Usage: particle atom SYMBOL | mixture SYMBOL WEIGHT ... | molecule PATH");
+    }
+    if (t[1] == "atom" || t[1] == "molecule") {
+      named_size(t, 3, "Usage: particle atom SYMBOL | molecule PATH");
+      cfg.entity = t[1] == "atom" ? DepositConfig::Atom : DepositConfig::Molecule;
+      cfg.source = vars ? vars->expand_text(t[2], box) : t[2];
+      t[2] = cfg.source;
+      if (cfg.source.empty()) {
+        PRINT_INPUT_ERROR("Particle source cannot be empty.");
+      }
+    } else if (t[1] == "mixture") {
+      if (t.size() < 6 || t.size() % 2 != 0) {
+        PRINT_INPUT_ERROR("Usage: particle mixture SYMBOL WEIGHT SYMBOL WEIGHT ...");
+      }
+      cfg.entity = DepositConfig::Atom;
+      cfg.mixture = true;
+      double sum = 0.0;
+      for (size_t i = 2; i < t.size(); i += 2) {
+        const std::string symbol = vars ? vars->expand_text(t[i], box) : t[i];
+        if (symbol.empty() || std::find(cfg.mixture_symbols.begin(), cfg.mixture_symbols.end(), symbol) !=
+                                cfg.mixture_symbols.end()) {
+          PRINT_INPUT_ERROR("Mixture symbols must be distinct and nonempty.");
+        }
+        t[i] = symbol;
+        cfg.mixture_symbols.push_back(symbol);
+        const double w = named_real(t, i + 1, box, vars);
+        if (w < 0.0) PRINT_INPUT_ERROR("Mixture probabilities must be nonnegative.");
+        cfg.mixture_weights.push_back(w);
+        sum += w;
+      }
+      if (!std::isfinite(sum) || fabs(sum - 1.0) > 1.0e-8) {
+        PRINT_INPUT_ERROR("Mixture probabilities must sum to one.");
+      }
+    } else {
+      PRINT_INPUT_ERROR("Particle style must be atom, mixture, or molecule.");
+    }
+  } else if (t[0] == "placement") {
+    if (t.size() < 2) {
+      PRINT_INPUT_ERROR("Missing placement style.");
+    }
+    if (t[1] == "point") {
+      named_size(t, 5, "Usage: placement point at u v");
+      if (t[2] != "at") PRINT_INPUT_ERROR("Usage: placement point at u v");
+      cfg.style = DepositConfig::Point;
+      cfg.origin[0] = named_real(t, 3, box, vars);
+      cfg.origin[1] = named_real(t, 4, box, vars);
+    } else if (t[1] == "grid") {
+      if (t.size() != 5 && t.size() != 7) PRINT_INPUT_ERROR("Usage: placement grid spacing du dv [select random|sequential]");
+      if (t[2] != "spacing") PRINT_INPUT_ERROR("Grid requires spacing.");
+      cfg.style = DepositConfig::Grid;
+      cfg.spacing[0] = named_real(t, 3, box, vars);
+      cfg.spacing[1] = named_real(t, 4, box, vars);
+      named_positive(cfg.spacing[0], "Grid spacing must be positive.");
+      named_positive(cfg.spacing[1], "Grid spacing must be positive.");
+      cfg.select = DepositConfig::RandomSelect;
+      if (t.size() == 7) {
+        if (t[5] != "select" || (t[6] != "random" && t[6] != "sequential"))
+          PRINT_INPUT_ERROR("Grid select must be random or sequential.");
+        cfg.select = t[6] == "random" ? DepositConfig::RandomSelect : DepositConfig::Sequential;
+      }
+    } else if (t[1] == "random") {
+      if (t.size() != 2 && t.size() != 4) PRINT_INPUT_ERROR("Usage: placement random [attempt N]");
+      cfg.style = DepositConfig::Random;
+      if (t.size() == 4) {
+        if (t[2] != "attempt") PRINT_INPUT_ERROR("Usage: placement random [attempt N]");
+        cfg.attempt = named_int(t, 3, box, vars);
+        named_positive(cfg.attempt, "Attempt must be positive.");
+      }
+    } else if (t[1] == "gaussian") {
+      if (t.size() != 7 && t.size() != 9)
+        PRINT_INPUT_ERROR("Usage: placement gaussian center u v sigma S [attempt N]");
+      if (t[2] != "center" || t[5] != "sigma")
+        PRINT_INPUT_ERROR("Usage: placement gaussian center u v sigma S [attempt N]");
+      cfg.style = DepositConfig::Gaussian;
+      cfg.origin[0] = named_real(t, 3, box, vars);
+      cfg.origin[1] = named_real(t, 4, box, vars);
+      cfg.sigma = named_real(t, 6, box, vars);
+      if (cfg.sigma < 0.0) PRINT_INPUT_ERROR("Gaussian sigma must be nonnegative.");
+      if (t.size() == 9) {
+        if (t[7] != "attempt") PRINT_INPUT_ERROR("Gaussian requires attempt N.");
+        cfg.attempt = named_int(t, 8, box, vars);
+        named_positive(cfg.attempt, "Attempt must be positive.");
+      }
+    } else {
+      PRINT_INPUT_ERROR("Placement style must be point, grid, random, or gaussian.");
+    }
+  } else if (t[0] == "region") {
+    if (t.size() < 2) PRINT_INPUT_ERROR("Missing region style.");
+    if (t[1] == "box") {
+      named_size(t, 9, "Usage: region box bounds xmin xmax ymin ymax zmin zmax");
+      if (t[2] != "bounds") PRINT_INPUT_ERROR("Box region requires bounds.");
+      cfg.box_region = true;
+      for (int k = 0; k < 6; ++k) cfg.xyz_bounds[k] = named_real(t, 3 + k, box, vars);
+      for (int k = 0; k < 3; ++k) {
+        if (cfg.xyz_bounds[2*k] > cfg.xyz_bounds[2*k+1]) PRINT_INPUT_ERROR("Box bounds are reversed.");
+      }
+    } else if (t[1] == "plane" || t[1] == "surface") {
+      if (t.size() < 12 || t[2] != "normal" || t[6] != "bounds")
+        PRINT_INPUT_ERROR("Usage: region plane|surface normal nx ny nz bounds umin umax vmin vmax height ...");
+      for (int k = 0; k < 3; ++k) cfg.normal[k] = named_real(t, 3 + k, box, vars);
+      normalize3(cfg.normal, "Region normal must be nonzero.");
+      cfg.has_normal = true;
+      cfg.has_region = true;
+      for (int k = 0; k < 4; ++k) cfg.region[k] = named_real(t, 7 + k, box, vars);
+      if (cfg.region[0] > cfg.region[1] || cfg.region[2] > cfg.region[3])
+        PRINT_INPUT_ERROR("Region bounds are reversed.");
+      if (t[11] != "height") PRINT_INPUT_ERROR("Region requires height.");
+      if (t[1] == "plane") {
+        if (t.size() != 13 && t.size() != 17)
+          PRINT_INPUT_ERROR("Usage: region plane normal ... bounds ... height H [basis bx by bz]");
+        cfg.surface_kind = DepositConfig::Fixed;
+        cfg.surface_H = named_real(t, 12, box, vars);
+        if (t.size() == 17) {
+          if (t[13] != "basis") PRINT_INPUT_ERROR("Usage: basis bx by bz");
+          for (int k = 0; k < 3; ++k) cfg.basis[k] = named_real(t, 14 + k, box, vars);
+          cfg.has_basis = true;
+        }
+      } else if (t.size() == 17 && t[12] == "global" && t[13] == "gap" && t[15] == "scope") {
+        cfg.surface_kind = DepositConfig::Global;
+        cfg.surface_gap = named_real(t, 14, box, vars);
+        if (t[16] != "all" && t[16] != "mobile") PRINT_INPUT_ERROR("Surface scope must be all or mobile.");
+        cfg.surface_mobile = t[16] == "mobile";
+      } else if (t.size() == 19 && t[12] == "local" && t[13] == "radius" &&
+                 t[15] == "gap" && t[17] == "scope") {
+        cfg.surface_kind = DepositConfig::Local;
+        cfg.surface_radius = named_real(t, 14, box, vars);
+        cfg.surface_gap = named_real(t, 16, box, vars);
+        named_positive(cfg.surface_radius, "Local surface radius must be positive.");
+        if (t[18] != "all" && t[18] != "mobile") PRINT_INPUT_ERROR("Surface scope must be all or mobile.");
+        cfg.surface_mobile = t[18] == "mobile";
+      } else {
+        PRINT_INPUT_ERROR("Usage: region surface normal ... bounds ... height global gap D scope all|mobile, or height local radius R gap D scope all|mobile");
+      }
+      if (cfg.surface_gap < 0.0) PRINT_INPUT_ERROR("Surface gap must be nonnegative.");
+    } else {
+      PRINT_INPUT_ERROR("Region style must be plane, surface, or box.");
+    }
+  } else if (t[0] == "velocity") {
+    if (t.size() < 2) PRINT_INPUT_ERROR("Missing velocity style.");
+    if (t[1] == "vector") {
+      named_size(t, 7, "Usage: velocity vector vx vy vz units angstrom/fs");
+      for (int k = 0; k < 3; ++k) cfg.vector_velocity[k] = named_real(t, 2 + k, box, vars);
+      if (t[5] != "units" || t[6] != "angstrom/fs") PRINT_INPUT_ERROR("Velocity units must be angstrom/fs.");
+      cfg.velocity_kind = DepositConfig::VectorVelocity;
+    } else if (t[1] == "beam") {
+      if (t.size() != 10 && t.size() != 12)
+        PRINT_INPUT_ERROR("Usage: velocity beam speed V units angstrom/fs direction dx dy dz [spread degrees]");
+      if (t[2] != "speed" || t[4] != "units" || t[5] != "angstrom/fs" || t[6] != "direction")
+        PRINT_INPUT_ERROR("Invalid beam syntax or units.");
+      cfg.speed = named_real(t, 3, box, vars);
+      named_positive(cfg.speed, "Beam speed must be positive.");
+      for (int k = 0; k < 3; ++k) cfg.flight[k] = named_real(t, 7 + k, box, vars);
+      normalize3(cfg.flight, "Beam direction must be nonzero.");
+      cfg.has_direction = true;
+      cfg.velocity_kind = DepositConfig::BeamVelocity;
+      if (t.size() == 12) {
+        if (t[10] != "spread") PRINT_INPUT_ERROR("Beam requires spread degrees.");
+        cfg.spread_sigma_deg = named_real(t, 11, box, vars);
+        if (cfg.spread_sigma_deg < 0.0 || cfg.spread_sigma_deg >= 90.0)
+          PRINT_INPUT_ERROR("Beam spread must be in [0,90) degrees.");
+        cfg.has_spread = cfg.spread_sigma_deg > 0.0;
+      }
+    } else if (t[1] == "thermal") {
+      named_size(t, 10, "Usage: velocity thermal temperature T drift vx vy vz units angstrom/fs");
+      if (t[2] != "temperature" || t[4] != "drift" || t[8] != "units" || t[9] != "angstrom/fs")
+        PRINT_INPUT_ERROR("Invalid thermal syntax or units.");
+      cfg.temperature = named_real(t, 3, box, vars);
+      if (cfg.temperature < 0.0) PRINT_INPUT_ERROR("Thermal temperature must be nonnegative.");
+      for (int k = 0; k < 3; ++k) cfg.drift[k] = named_real(t, 5 + k, box, vars);
+      cfg.velocity_kind = DepositConfig::ThermalVelocity;
+    } else {
+      PRINT_INPUT_ERROR("Velocity style must be vector, beam, or thermal.");
+    }
+    cfg.has_velocity = true;
+  } else if (t[0] == "flight") {
+    if (t.size() == 3 && t[1] == "skip" && t[2] == "off") {
+      cfg.skip_flight = false;
+    } else if (t.size() == 5 && t[1] == "skip" && t[2] == "on" &&
+               t[3] == "clearance" && t[4] == "auto") {
+      cfg.skip_flight = true;
+    } else {
+      PRINT_INPUT_ERROR("Usage: flight skip off | flight skip on clearance auto");
+    }
+  } else if (t[0] == "exclusion") {
+    named_size(t, 3, "Usage: exclusion distance R");
+    if (t[1] != "distance") PRINT_INPUT_ERROR("Usage: exclusion distance R");
+    cfg.near_r = named_real(t, 2, box, vars);
+    named_positive(cfg.near_r, "Exclusion distance must be positive.");
+    cfg.has_near = true;
+  } else {
+    PRINT_INPUT_ERROR("Unknown deposit facet.");
+  }
 }
 
-void Deposit(
-  const char** param,
-  int num_param,
+} // namespace
+
+bool DepositRegistry::skips_flight(const std::string& name) const
+{
+  const auto it = recipes_.find(name);
+  if (it == recipes_.end()) return false;
+  const auto& flight = it->second.flight;
+  return flight.size() == 5 && flight[1] == "skip" && flight[2] == "on";
+}
+
+DepositEvent DepositRegistry::execute(
+  const std::vector<std::string>& tokens,
   Box& box,
   Atom& atoms,
   std::vector<Group>& groups,
@@ -1942,370 +1701,367 @@ void Deposit(
   Force& force,
   VariableScope* variables)
 {
-  const auto time_begin = std::chrono::high_resolution_clock::now();
+  if (tokens.size() < 3 || tokens[0] != "deposit") {
+    PRINT_INPUT_ERROR("Usage: deposit NAME FACET ... | deposit NAME emit ... | deposit NAME pulse ...");
+  }
+  const std::string name = variables ? variables->expand_text(tokens[1], box) : tokens[1];
+  if (name.empty()) PRINT_INPUT_ERROR("Deposit recipe name cannot be empty.");
+  const std::string action = tokens[2];
+
+  if (action != "emit" && action != "pulse") {
+    if (action != "particle" && action != "placement" && action != "region" &&
+        action != "velocity" && action != "flight" && action != "exclusion" &&
+        action != "seed") {
+      PRINT_INPUT_ERROR("Unknown deposit facet.");
+    }
+    std::vector<std::string> facet(tokens.begin() + 2, tokens.end());
+    auto& recipe = recipes_[name];
+    if (action == "seed") {
+      named_size(facet, 2, "Usage: deposit NAME seed INTEGER");
+      const int seed = named_int(facet, 1, box, variables);
+      recipe.rng.seed(static_cast<unsigned>(seed));
+      recipe.rng_initialized = true;
+      printf("Deposit recipe %s: seed set to %d.\n", name.c_str(), seed);
+      return {};
+    }
+    DepositConfig check;
+    parse_named_facet(facet, check, box, variables);
+    if (action == "particle") recipe.particle = facet;
+    else if (action == "placement") recipe.placement = facet;
+    else if (action == "region") recipe.region = facet;
+    else if (action == "velocity") recipe.velocity = facet;
+    else if (action == "flight") recipe.flight = facet;
+    else recipe.exclusion = facet;
+    printf("Deposit recipe %s: %s configured.\n", name.c_str(), action.c_str());
+    return {};
+  }
+
+  auto found = recipes_.find(name);
+  if (found == recipes_.end()) PRINT_INPUT_ERROR("Unknown deposit recipe.");
+  Recipe& recipe = found->second;
+  if (recipe.particle.empty() || recipe.placement.empty() || recipe.region.empty() ||
+      recipe.velocity.empty()) {
+    PRINT_INPUT_ERROR("Deposit recipe requires particle, placement, region, and velocity facets.");
+  }
+  const bool pulse = action == "pulse";
+  if ((!pulse && tokens.size() != 5) || (pulse && tokens.size() != 11) || tokens[3] != "number") {
+    PRINT_INPUT_ERROR("Usage: deposit NAME emit number N|all, or pulse number N|all wait entry relax N max_wait M");
+  }
+  if (pulse && (tokens[5] != "wait" || tokens[6] != "entry" ||
+                tokens[7] != "relax" || tokens[9] != "max_wait")) {
+    PRINT_INPUT_ERROR("Usage: pulse number N|all wait entry relax N max_wait M");
+  }
+  std::vector<std::string> count_token = {"number", tokens[4]};
+  const bool number_all = tokens[4] == "all";
+  const int number = number_all ? 0 : named_int(count_token, 1, box, variables);
+  if (!number_all && number < 1) PRINT_INPUT_ERROR("Emit number must be positive.");
+  int relax_steps = 0, max_wait = 0;
+  if (pulse) {
+    std::vector<std::string> v = {"relax", tokens[8], "max_wait", tokens[10]};
+    relax_steps = named_int(v, 1, box, variables);
+    max_wait = named_int(v, 3, box, variables);
+    if (max_wait < 1 || relax_steps > std::numeric_limits<int>::max() - max_wait)
+      PRINT_INPUT_ERROR("Pulse requires max_wait > 0 and a representable total step count.");
+  }
 
   DepositConfig cfg;
-  parse_deposit_config(param, num_param, box, variables, cfg);
-  validate_deposit_config(cfg);
-
-  EntityTemplate tmpl;
-  resolve_entity_template(cfg, atoms, tmpl);
-
+  auto read = [&](const std::vector<std::string>& facet) {
+    if (!facet.empty()) {
+      std::vector<std::string> copy = facet;
+      parse_named_facet(copy, cfg, box, nullptr);
+    }
+  };
+  read(recipe.particle);
+  read(recipe.placement);
+  read(recipe.region);
+  read(recipe.velocity);
+  read(recipe.flight);
+  read(recipe.exclusion);
+  cfg.number = number;
+  cfg.number_all = number_all;
+  cfg.has_number = true;
+  if (number_all && cfg.style != DepositConfig::Grid)
+    PRINT_INPUT_ERROR("Emit number all requires grid placement.");
+  if (cfg.box_region && cfg.style != DepositConfig::Random)
+    PRINT_INPUT_ERROR("Box region currently requires random placement.");
+  if (cfg.box_region && (cfg.xyz_bounds[0] == cfg.xyz_bounds[1] ||
+                         cfg.xyz_bounds[2] == cfg.xyz_bounds[3] ||
+                         cfg.xyz_bounds[4] == cfg.xyz_bounds[5])) {
+    PRINT_INPUT_ERROR("Random box region must have nonzero volume.");
+  }
+  if (!cfg.box_region && cfg.style == DepositConfig::Point) {
+    if (cfg.origin[0] < cfg.region[0] || cfg.origin[0] > cfg.region[1] ||
+        cfg.origin[1] < cfg.region[2] || cfg.origin[1] > cfg.region[3])
+      PRINT_INPUT_ERROR("Placement center lies outside region bounds.");
+  }
+  if (!cfg.box_region && cfg.style == DepositConfig::Random &&
+      (cfg.region[0] == cfg.region[1] || cfg.region[2] == cfg.region[3])) {
+    PRINT_INPUT_ERROR("Random placement requires nonzero region area.");
+  }
+  if (!cfg.has_direction) {
+    cfg.flight[0] = cfg.vector_velocity[0];
+    cfg.flight[1] = cfg.vector_velocity[1];
+    cfg.flight[2] = cfg.vector_velocity[2];
+    if (cfg.velocity_kind == DepositConfig::ThermalVelocity) {
+      for (int k = 0; k < 3; ++k) cfg.flight[k] = cfg.drift[k];
+    }
+    if (norm3(cfg.flight) <= 1.0e-30) {
+      cfg.flight[0] = -cfg.normal[0];
+      cfg.flight[1] = -cfg.normal[1];
+      cfg.flight[2] = -cfg.normal[2];
+    }
+  }
   DepositFrame frame;
   build_deposit_frame(cfg, frame);
 
-  SurfaceIndex surface;
-  if (cfg.surface_kind == DepositConfig::Global) {
-    surface.reduce_global(atoms, frame);
-  } else if (cfg.surface_kind == DepositConfig::Local) {
-    std::vector<char> surface_keep;
-    const std::vector<char>* surface_mask = nullptr;
-    if (cfg.surface_mobile && !atoms.cpu_fixed.empty()) {
-      surface_keep.assign(atoms.number_of_atoms, 1);
-      for (int i = 0; i < atoms.number_of_atoms; ++i) {
-        if (atoms.cpu_fixed[i]) {
-          surface_keep[i] = 0;
-        }
+  double clearance = 0.0;
+  if (cfg.skip_flight || pulse) {
+    if (cfg.box_region) PRINT_INPUT_ERROR("Flight skip and pulse require a plane or surface region.");
+    if (frame.cartesian_n < 0) PRINT_INPUT_ERROR("Flight skip and pulse require a Cartesian normal.");
+    const int pbc[3] = {box.pbc_x, box.pbc_y, box.pbc_z};
+    if (pbc[frame.cartesian_n]) PRINT_INPUT_ERROR("Flight skip and pulse require a nonperiodic injection axis.");
+    for (int a = 0; a < 3; ++a) {
+      for (int b = 0; b < 3; ++b) {
+        if (a != b && fabs(box.cpu_h[3*a+b]) > 1.0e-10)
+          PRINT_INPUT_ERROR("Flight skip and pulse require an orthogonal box.");
       }
-      surface_mask = &surface_keep;
     }
-    surface.build(atoms, box, frame, cfg.surface_radius, 0.0, surface_mask);
+    clearance = force.deposition_clearance();
+    if (!(clearance > 0.0) || !std::isfinite(clearance))
+      PRINT_INPUT_ERROR("Potential has no finite-range deposition clearance; flight skip/pulse unsupported.");
   }
 
+  AtomMutation::sync_cpu_from_gpu(atoms);
+  const int first_atom = atoms.number_of_atoms;
+  double substrate_max = -std::numeric_limits<double>::infinity();
+  if (cfg.skip_flight || pulse) {
+    if (first_atom == 0) PRINT_INPUT_ERROR("Flight skip and pulse require existing atoms.");
+    for (int i = 0; i < first_atom; ++i) {
+      double h = 0.0;
+      for (int d = 0; d < 3; ++d)
+        h += atoms.cpu_position_per_atom[i + d * first_atom] * frame.n[d];
+      if (!std::isfinite(h))
+        PRINT_INPUT_ERROR("Flight skip/pulse requires finite substrate coordinates.");
+      substrate_max = std::max(substrate_max, h);
+    }
+  }
+
+  std::vector<EntityTemplate> templates;
+  if (cfg.mixture) {
+    for (const auto& symbol : cfg.mixture_symbols) {
+      DepositConfig one = cfg;
+      one.mixture = false;
+      one.source = symbol;
+      EntityTemplate t;
+      resolve_entity_template(one, atoms, t);
+      templates.push_back(t);
+    }
+  } else {
+    EntityTemplate t;
+    resolve_entity_template(cfg, atoms, t);
+    templates.push_back(t);
+  }
+  for (const auto& tmpl : templates) {
+    if (tmpl.n_atoms < 1) PRINT_INPUT_ERROR("Deposit particle template is empty.");
+    for (double m : tmpl.mass)
+      if (!std::isfinite(m) || !(m > 0.0)) PRINT_INPUT_ERROR("Deposit particle mass must be finite and positive.");
+    for (double x : tmpl.rel_pos)
+      if (!std::isfinite(x)) PRINT_INPUT_ERROR("Deposit particle coordinates must be finite.");
+  }
+  SurfaceIndex surface;
+  if (!cfg.box_region && cfg.surface_kind == DepositConfig::Global) {
+    if (cfg.surface_mobile) {
+      bool any = false;
+      surface.global_H = -std::numeric_limits<double>::infinity();
+      for (int i = 0; i < first_atom; ++i) {
+        if (i < (int)atoms.cpu_fixed.size() && atoms.cpu_fixed[i]) continue;
+        any = true;
+        double h = 0.0;
+        for (int d = 0; d < 3; ++d) h += atoms.cpu_position_per_atom[i + d * first_atom] * frame.n[d];
+        surface.global_H = std::max(surface.global_H, h);
+      }
+      if (!any) PRINT_INPUT_ERROR("Surface mobile scope has no mobile atoms.");
+    } else {
+      surface.reduce_global(atoms, frame);
+    }
+  } else if (!cfg.box_region && cfg.surface_kind == DepositConfig::Local) {
+    if (box.pbc_x || box.pbc_y || box.pbc_z) {
+      if (frame.cartesian_n < 0)
+        PRINT_INPUT_ERROR("Periodic local surfaces require a Cartesian normal.");
+      for (int row = 0; row < 3; ++row)
+        for (int col = 0; col < 3; ++col)
+          if (row != col && fabs(box.cpu_h[3 * row + col]) > 1.0e-10)
+            PRINT_INPUT_ERROR("Periodic local surfaces require an orthogonal box.");
+    }
+    std::vector<char> keep;
+    if (cfg.surface_mobile) {
+      keep.assign(first_atom, 1);
+      for (int i = 0; i < first_atom; ++i)
+        if (i < (int)atoms.cpu_fixed.size() && atoms.cpu_fixed[i]) keep[i] = 0;
+    }
+    surface.build(atoms, box, frame, cfg.surface_radius, 0.0, cfg.surface_mobile ? &keep : nullptr);
+  }
   NearIndex near;
-  NearIndex* near_ptr = nullptr;
-  if (cfg.has_near && !near_test_is_redundant(cfg, frame, box)) {
-    near.build(atoms, box, cfg.near_r);
-    near_ptr = &near;
-  } else if (cfg.has_near) {
-    printf("near %g: always satisfied (gap and radius >= near), index not built.\n", cfg.near_r);
-  }
+  const bool near_redundant = cfg.has_near && !cfg.skip_flight &&
+                              near_test_is_redundant(cfg, frame, box);
+  double max_template_radius = 0.0;
+  for (const auto& tmpl : templates)
+    max_template_radius = std::max(max_template_radius, tmpl.radius);
+  const bool skip_new_new = cfg.has_near && !cfg.skip_flight && cfg.style == DepositConfig::Grid &&
+    grid_sites_separated(cfg, frame, box, 2.0 * max_template_radius + cfg.near_r);
+  if (cfg.has_near && !near_redundant) near.build(atoms, box, cfg.near_r);
 
-  bool skip_new_new = false;
-  if (cfg.style == DepositConfig::Grid && cfg.has_near) {
-    skip_new_new = grid_sites_separated(cfg, frame, box, 2.0 * tmpl.radius + cfg.near_r);
+  if (!recipe.rng_initialized) {
+    std::random_device rd;
+    recipe.rng.seed(rd());
+    recipe.rng_initialized = true;
   }
-
   DepositSampler sampler;
-  prepare_sampler(cfg, sampler);
-  std::vector<double> cand((size_t)tmpl.n_atoms * 3);
+  sampler.rng = recipe.rng;
+  if (cfg.style == DepositConfig::Random && !cfg.box_region) {
+    sampler.uu = std::uniform_real_distribution<double>(cfg.region[0], cfg.region[1]);
+    sampler.vv = std::uniform_real_distribution<double>(cfg.region[2], cfg.region[3]);
+  }
+  const GridView grid = cfg.style == DepositConfig::Grid ? make_grid_view(cfg) : GridView{};
+  const int entities = number_all ? grid.size() : number;
+  if (entities > 100000000 || entities < 1) PRINT_INPUT_ERROR("Emit count is invalid or too large.");
+  if (cfg.style == DepositConfig::Grid && entities > grid.size())
+    PRINT_INPUT_ERROR("Emit count exceeds grid sites.");
+  std::vector<int> grid_order;
+  if (cfg.style == DepositConfig::Grid) {
+    grid_order.resize(grid.size());
+    std::iota(grid_order.begin(), grid_order.end(), 0);
+    if (cfg.select == DepositConfig::RandomSelect)
+      std::shuffle(grid_order.begin(), grid_order.end(), sampler.rng);
+  }
+  int grid_cursor = 0;
+  std::discrete_distribution<int> mixture_pick(cfg.mixture_weights.begin(), cfg.mixture_weights.end());
+  std::vector<Launch> launches;
+  std::vector<int> template_ids;
+  launches.reserve(entities);
+  template_ids.reserve(entities);
+  double omitted_min = std::numeric_limits<double>::infinity();
+  double omitted_max = 0.0;
+  const double entry_height = (cfg.skip_flight || pulse) ? substrate_max + clearance : 0.0;
+  double running_envelope = substrate_max;
 
-  print_line_1();
-  printf(
-    "deposit %s %s %s\n",
-    style_name(cfg.style),
-    cfg.entity == DepositConfig::Atom ? "atom" : "molecule",
-    cfg.source.c_str());
-  print_deposit_frame(frame);
-
-  NewAtoms added = (cfg.style == DepositConfig::Grid)
-                     ? deposit_grid(cfg, tmpl, frame, box, surface, near_ptr, skip_new_new, sampler, cand)
-                     : deposit_sampled(cfg, tmpl, frame, box, surface, near_ptr, sampler, cand);
-
-  int max_type = -1;
-  for (int t : tmpl.type) {
-    if (t > max_type) {
-      max_type = t;
+  for (int k = 0; k < entities; ++k) {
+    const int t_id = cfg.mixture ? mixture_pick(sampler.rng) : 0;
+    const EntityTemplate& tmpl = templates[t_id];
+    bool accepted = false;
+    const int attempts = cfg.style == DepositConfig::Grid ? (number_all ? 1 : grid.size()) :
+                         cfg.style == DepositConfig::Point ? 1 : cfg.attempt;
+    for (int attempt = 0; attempt < attempts; ++attempt) {
+      if (cfg.style == DepositConfig::Grid && grid_cursor >= grid.size()) break;
+      double r[3];
+      DepositUV uv;
+      if (cfg.box_region) {
+        for (int d = 0; d < 3; ++d) {
+          std::uniform_real_distribution<double> dist(cfg.xyz_bounds[2*d], cfg.xyz_bounds[2*d+1]);
+          r[d] = dist(sampler.rng);
+        }
+      } else {
+        if (cfg.style == DepositConfig::Grid) {
+          const int site = grid_order[grid_cursor++];
+          uv = grid.at(site);
+        } else {
+          uv = sample_style_uv(cfg, sampler);
+          if (!std::isfinite(uv.u) || !std::isfinite(uv.v))
+            PRINT_INPUT_ERROR("Sampled nonfinite deposition position.");
+          if (cfg.style == DepositConfig::Gaussian &&
+              (uv.u < cfg.region[0] || uv.u > cfg.region[1] ||
+               uv.v < cfg.region[2] || uv.v > cfg.region[3])) continue;
+        }
+        const double H = resolve_launch_H(cfg, surface, uv.u, uv.v);
+        if (!std::isfinite(H)) PRINT_INPUT_ERROR("Sampled nonfinite deposition height.");
+        uvH_to_xyz(frame, uv.u, uv.v, H, r);
+        wrap_lateral(box, frame, r);
+      }
+      for (double x : r)
+        if (!std::isfinite(x)) PRINT_INPUT_ERROR("Sampled nonfinite deposition position.");
+      DepositConfig velocity_cfg = cfg;
+      velocity_cfg.entity_mass = 0.0;
+      for (double m : tmpl.mass) velocity_cfg.entity_mass += m;
+      Launch L;
+      for (int d = 0; d < 3; ++d) L.r[d] = r[d];
+      sample_velocity(velocity_cfg, frame, r, sampler, L.vel);
+      for (int d = 0; d < 3; ++d)
+        if (!std::isfinite(L.vel[d])) PRINT_INPUT_ERROR("Sampled nonfinite deposition velocity.");
+      double omitted = 0.0;
+      if (cfg.skip_flight) {
+        const double vn = dot3(L.vel, frame.n);
+        if (!(vn < -1.0e-14)) PRINT_INPUT_ERROR("Flight skip requires velocity toward the surface.");
+        double low = std::numeric_limits<double>::infinity();
+        for (int a = 0; a < tmpl.n_atoms; ++a) {
+          double h = dot3(L.r, frame.n);
+          for (int d = 0; d < 3; ++d) h += tmpl.rel_pos[a + tmpl.n_atoms*d] * frame.n[d];
+          low = std::min(low, h);
+        }
+        const double target = running_envelope + clearance + 1.0e-8;
+        if (low > target) {
+          omitted = (low - target) / -vn;
+          for (int d = 0; d < 3; ++d) L.r[d] += L.vel[d] * omitted;
+        }
+        wrap_lateral(box, frame, L.r);
+      }
+      std::vector<double> cand((size_t)tmpl.n_atoms * 3);
+      fill_entity_xyz(tmpl, L.r, cand.data());
+      for (double x : cand)
+        if (!std::isfinite(x)) PRINT_INPUT_ERROR("Sampled nonfinite deposition position.");
+      if (cfg.has_near && !near_redundant &&
+          near.overlaps(cand.data(), tmpl.n_atoms, cfg.near_r)) continue;
+      if (cfg.has_near && !near_redundant && !skip_new_new)
+        near.insert(cand.data(), tmpl.n_atoms);
+      if (cfg.skip_flight) {
+        const double omitted_fs = omitted * TIME_UNIT_CONVERSION;
+        omitted_min = std::min(omitted_min, omitted_fs);
+        omitted_max = std::max(omitted_max, omitted_fs);
+        for (int a = 0; a < tmpl.n_atoms; ++a) {
+          const double xyz[3] = {cand[3*a], cand[3*a+1], cand[3*a+2]};
+          running_envelope = std::max(running_envelope, dot3(xyz, frame.n));
+        }
+      }
+      launches.push_back(L);
+      template_ids.push_back(t_id);
+      accepted = true;
+      break;
     }
+    if (!accepted && !number_all)
+      PRINT_INPUT_ERROR("Deposit failed: no valid insertion after placement attempts.");
   }
-  if ((int)atoms.cpu_type_size.size() < max_type + 1) {
+  if (launches.empty()) PRINT_INPUT_ERROR("Deposit found no valid insertion sites.");
+  recipe.rng = sampler.rng;
+
+  int added_count = 0;
+  for (int id : template_ids) added_count += templates[id].n_atoms;
+  NewAtoms added = make_batch(added_count);
+  int offset = 0;
+  int max_type = -1;
+  for (size_t k = 0; k < launches.size(); ++k) {
+    const EntityTemplate& tmpl = templates[template_ids[k]];
+    place_entity(added, added_count, offset, tmpl, launches[k].r, launches[k].vel);
+    offset += tmpl.n_atoms;
+    for (int t : tmpl.type) max_type = std::max(max_type, t);
+  }
+  if ((int)atoms.cpu_type_size.size() < max_type + 1)
     atoms.cpu_type_size.resize(max_type + 1, 0);
-  }
   AtomMutation::append_atoms(atoms, groups, thermo, force, added);
+  printf("Deposit recipe %s: emitted %d entities (%d atoms); total atoms %d.\n",
+         name.c_str(), (int)launches.size(), added_count, atoms.number_of_atoms);
+  if (cfg.skip_flight)
+    printf("Flight skip omitted %.9g to %.9g fs of free flight; MD time unchanged.\n",
+           omitted_min, omitted_max);
 
-  printf("Deposited %d atoms. Total number of atoms: %d\n", added.n, atoms.number_of_atoms);
-  print_line_2();
-
-  const auto time_finish = std::chrono::high_resolution_clock::now();
-  const std::chrono::duration<double> time_used = time_finish - time_begin;
-  printf("Time used for deposit = %g second.\n", time_used.count());
-}
-
-// Consecutive `deposit` commands: one CPU sync, one atom-count rebuild.
-// Each command's placed atoms are inserted back into the shared surface and
-// near indices, so command k+1 sees command k exactly as it would with
-// per-command rebuilds.
-void DepositSequence(
-  const std::vector<std::vector<std::string>>& commands,
-  Box& box,
-  Atom& atoms,
-  std::vector<Group>& groups,
-  GPU_Vector<double>& thermo,
-  Force& force,
-  VariableScope* variables)
-{
-  if (commands.empty()) {
-    return;
-  }
-
-  const auto time_begin = std::chrono::high_resolution_clock::now();
-
-  // Parse and validate everything up front: a bad command must fail before
-  // any atoms are appended (same as per-command execution).
-  const int n_cmd = (int)commands.size();
-  std::vector<std::vector<const char*>> cparam(n_cmd);
-  std::vector<DepositConfig> cfgs(n_cmd);
-  for (int c = 0; c < n_cmd; ++c) {
-    const auto& command = commands[c];
-    if (command.size() >= 32) {
-      PRINT_INPUT_ERROR("The number of parameters should be less than 32.");
-    }
-    cparam[c].resize(command.size());
-    for (size_t k = 0; k < command.size(); ++k) {
-      cparam[c][k] = command[k].c_str();
-    }
-    parse_deposit_config(cparam[c].data(), (int)command.size(), box, variables, cfgs[c]);
-    validate_deposit_config(cfgs[c]);
-  }
-
-  // Shared indices, sized for the whole batch. Per-command execution would
-  // rebuild these from scratch before every command; here the atoms placed
-  // by command k are inserted so command k+1 observes them.
-  double max_near_r = 0.0;
-  bool any_near = false;
-  for (const auto& cfg : cfgs) {
-    DepositFrame near_frame;
-    build_deposit_frame(cfg, near_frame);
-    if (cfg.has_near && !near_test_is_redundant(cfg, near_frame, box)) {
-      any_near = true;
-      max_near_r = std::max(max_near_r, cfg.near_r);
-    }
-  }
-  NearIndex near;
-  NearIndex* near_ptr = nullptr;
-  if (any_near) {
-    near.build(atoms, box, max_near_r);
-    near_ptr = &near;
-  }
-
-  // Accumulate all placed atoms, one append at the end.
-  NewAtoms all;
-  all.n = 0;
-  int max_type = -1;
-
-  // Persistent surface index: rebuilt only when the deposition frame changes
-  // between commands; otherwise command k's atoms are inserted so command
-  // k+1's launch heights clear them (same as per-command rebuild would see).
-  SurfaceIndex surface;
-  DepositFrame prev_frame;
-  bool have_prev_frame = false;
-  bool surface_active = false;
-  DepositConfig::Surface active_surface_kind = DepositConfig::Fixed;
-
-  // entity templates resolved once per (entity, source) within the batch
-  bool any_mobile_surface = false;
-  for (const auto& c2 : cfgs) {
-    if (c2.surface_mobile) {
-      any_mobile_surface = true;
-    }
-  }
-  std::map<std::string, EntityTemplate> tmpl_cache;
-  std::vector<char> surface_keep; // 1 = mobile (surface local mobile measures these)
-
-  for (int c = 0; c < n_cmd; ++c) {
-    const DepositConfig& cfg = cfgs[c];
-
-    // resolve_entity_template scans all atoms (symbols_from_atom) per call;
-    // within a batch the type table does not change, so resolve once per
-    // (entity, source) and reuse.
-    EntityTemplate tmpl;
-    const std::string tmpl_key = cfg.source + "|" +
-      (cfg.entity == DepositConfig::Atom ? "a" : "m");
-    const auto cached = tmpl_cache.find(tmpl_key);
-    if (cached != tmpl_cache.end()) {
-      tmpl = cached->second;
-    } else {
-      resolve_entity_template(cfg, atoms, tmpl);
-      tmpl_cache[tmpl_key] = tmpl;
-    }
-
-    DepositFrame frame;
-    build_deposit_frame(cfg, frame);
-
-    const bool frame_same = have_prev_frame && frames_equal(prev_frame, frame);
-    bool rebuilt_surface = false;
-    if (cfg.surface_kind == DepositConfig::Global) {
-      if (!surface_active || !frame_same || active_surface_kind != DepositConfig::Global) {
-        surface.reduce_global(atoms, frame);
-        surface_active = true;
-        rebuilt_surface = true;
-      }
-    } else if (cfg.surface_kind == DepositConfig::Local) {
-      if (!surface_active || !frame_same || active_surface_kind != DepositConfig::Local ||
-          cfg.surface_radius != surface.build_radius) {
-        // min radius in the batch: an atom shadowed within this radius can
-        // never be a query answer for any command's radius (>= min), so the
-        // filter is exact for the whole batch
-        double min_surf_r = cfg.surface_radius;
-        for (const auto& c2 : cfgs) {
-          if (c2.surface_kind == DepositConfig::Local) {
-            min_surf_r = std::min(min_surf_r, c2.surface_radius);
-          }
-        }
-        if (any_mobile_surface && !atoms.cpu_fixed.empty() && surface_keep.empty()) {
-          surface_keep.assign(atoms.number_of_atoms, 1);
-          for (int i = 0; i < atoms.number_of_atoms; ++i) {
-            if (atoms.cpu_fixed[i]) {
-              surface_keep[i] = 0;
-            }
-          }
-        }
-        const std::vector<char>* surface_mask =
-          (any_mobile_surface && !surface_keep.empty()) ? &surface_keep : nullptr;
-        surface.build(atoms, box, frame, cfg.surface_radius, min_surf_r, surface_mask);
-        surface.build_radius = cfg.surface_radius;
-        surface_active = true;
-        rebuilt_surface = true;
-      }
-    } else {
-      surface_active = false;
-    }
-    if (rebuilt_surface) {
-      for (int k = 0; k < all.n; ++k) {
-        const double r[3] = {all.position[k], all.position[k + all.n],
-                             all.position[k + 2 * all.n]};
-        surface.insert_one(frame, r);
-      }
-    }
-    active_surface_kind = cfg.surface_kind;
-    prev_frame = frame;
-    have_prev_frame = true;
-
-    NearIndex* cmd_near = nullptr;
-    std::unique_ptr<NearIndex> own_near;
-    if (cfg.has_near && near_test_is_redundant(cfg, frame, box)) {
-      cmd_near = nullptr; // provably no rejection; see near_test_is_redundant
-    } else if (cfg.has_near && cfg.near_r > max_near_r + 1.0e-12) {
-      // rarer case: this command's near radius exceeds the shared build
-      own_near = std::make_unique<NearIndex>();
-      own_near->build(atoms, box, cfg.near_r);
-      cmd_near = own_near.get();
-    } else {
-      cmd_near = near_ptr;
-    }
-
-    bool skip_new_new = false;
-    if (cfg.style == DepositConfig::Grid && cfg.has_near) {
-      skip_new_new = grid_sites_separated(cfg, frame, box, 2.0 * tmpl.radius + cfg.near_r);
-    }
-
-    DepositSampler sampler;
-    prepare_sampler(cfg, sampler);
-    std::vector<double> cand((size_t)tmpl.n_atoms * 3);
-    print_line_1();
-    printf(
-      "deposit %s %s %s\n",
-      style_name(cfg.style),
-      cfg.entity == DepositConfig::Atom ? "atom" : "molecule",
-      cfg.source.c_str());
-    if (n_cmd > 1) {
-      printf("Deposit command %d of %d in batch.\n", c + 1, n_cmd);
-    }
-    print_deposit_frame(frame);
-
-    NewAtoms added = (cfg.style == DepositConfig::Grid)
-                       ? deposit_grid(cfg, tmpl, frame, box, surface, cmd_near, skip_new_new, sampler, cand)
-                       : deposit_sampled(cfg, tmpl, frame, box, surface, cmd_near, sampler, cand);
-
-    for (int t : tmpl.type) {
-      if (t > max_type) {
-        max_type = t;
-      }
-    }
-
-    // Make later commands see this command's atoms (sequential semantics):
-    // surface: insert entities so later launch heights clear them;
-    // near: the shared index must see every command, including a command
-    // whose intra-command spacing let it defer insertion until now.
-    if (surface_active && (cfg.surface_kind != DepositConfig::Fixed)) {
-      for (int k = 0; k < added.n; ++k) {
-        const double r[3] = {added.position[k],
-                             added.position[k + added.n],
-                             added.position[k + 2 * added.n]};
-        surface.insert_one(frame, r);
-      }
-    }
-    // a command that skipped its own near test still feeds the shared index,
-    // so a later command of the batch that does test sees its atoms
-    if (near_ptr != nullptr && (!cfg.has_near || cmd_near != near_ptr || skip_new_new)) {
-      for (int k = 0; k < added.n; ++k) {
-        const double r[3] = {added.position[k],
-                             added.position[k + added.n],
-                             added.position[k + 2 * added.n]};
-        near_ptr->insert_one(r[0], r[1], r[2]);
-      }
-    }
-
-    // stash into the batch accumulator (SoA with new_n stride)
-    const int old_n = all.n;
-    const int new_n = old_n + added.n;
-    if (old_n > 0) {
-      // re-stride the previous entries from old_n to new_n blocks
-      NewAtoms moved;
-      moved.n = old_n;
-      moved.type = all.type;
-      moved.mass = all.mass;
-      moved.charge = all.charge;
-      moved.symbol = all.symbol;
-      moved.position.resize(old_n * 3);
-      moved.velocity.resize(old_n * 3);
-      for (int k = 0; k < old_n; ++k) {
-        for (int d = 0; d < 3; ++d) {
-          moved.position[k + old_n * d] = all.position[k + old_n * d];
-          moved.velocity[k + old_n * d] = all.velocity[k + old_n * d];
-        }
-      }
-      all.position.resize(new_n * 3);
-      all.velocity.resize(new_n * 3);
-      for (int k = 0; k < old_n; ++k) {
-        for (int d = 0; d < 3; ++d) {
-          all.position[k + new_n * d] = moved.position[k + old_n * d];
-          all.velocity[k + new_n * d] = moved.velocity[k + old_n * d];
-        }
-      }
-    } else {
-      all.position.resize(new_n * 3);
-      all.velocity.resize(new_n * 3);
-    }
-    all.type.resize(new_n);
-    all.mass.resize(new_n);
-    all.charge.resize(new_n);
-    all.symbol.resize(new_n);
-    for (int k = 0; k < added.n; ++k) {
-      all.type[old_n + k] = added.type[k];
-      all.mass[old_n + k] = added.mass[k];
-      all.charge[old_n + k] = added.charge[k];
-      all.symbol[old_n + k] = added.symbol[k];
-      for (int d = 0; d < 3; ++d) {
-        all.position[old_n + k + new_n * d] = added.position[k + added.n * d];
-        all.velocity[old_n + k + new_n * d] = added.velocity[k + added.n * d];
-      }
-    }
-    all.n = new_n;
-    printf("Deposited %d atoms. Batch total so far: %d\n", added.n, new_n);
-    print_line_2();
-  }
-
-  if (all.n == 0) {
-    PRINT_INPUT_ERROR("deposit batch placed no atoms.");
-  }
-  if ((int)atoms.cpu_type_size.size() < max_type + 1) {
-    atoms.cpu_type_size.resize(max_type + 1, 0);
-  }
-
-  if (n_cmd > 1) {
-    print_line_1();
-    printf("Deposited %d atoms in %d commands. Total number of atoms: %d\n", all.n, n_cmd, atoms.number_of_atoms + all.n);
-    print_line_2();
-  }
-
-  AtomMutation::append_atoms(atoms, groups, thermo, force, all);
-
-  if (n_cmd > 1) {
-    printf("Remaining number of atoms: %d\n", atoms.number_of_atoms);
-  }
-
-  const auto time_finish = std::chrono::high_resolution_clock::now();
-  const std::chrono::duration<double> time_used = time_finish - time_begin;
-  printf("Time used for deposit batch (%d commands) = %g second.\n", n_cmd, time_used.count());
+  DepositEvent event;
+  event.active = true;
+  event.pulse = pulse;
+  event.first_atom = first_atom;
+  event.count = added_count;
+  for (int d = 0; d < 3; ++d) event.normal[d] = frame.n[d];
+  event.entry_height = entry_height;
+  event.relax_steps = relax_steps;
+  event.max_wait = max_wait;
+  event.omitted_time_min_fs = cfg.skip_flight ? omitted_min : 0.0;
+  event.omitted_time_max_fs = cfg.skip_flight ? omitted_max : 0.0;
+  return event;
 }

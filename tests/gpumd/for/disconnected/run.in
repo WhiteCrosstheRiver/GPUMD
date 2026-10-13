@@ -5,6 +5,10 @@ time_step       1.0
 ensemble        nve
 
 delete disconnected cutoff 2.9
-deposit point atom C origin 3.57 3.57 direction axis -z surface fixed 50.0 velocity constant 0.0
+deposit carbon particle atom C
+deposit carbon placement point at 3.57 3.57
+deposit carbon region plane normal 0 0 1 bounds 0 1000 0 1000 height 50.0
+deposit carbon velocity vector 0 0 0 units angstrom/fs
+deposit carbon emit number 1
 delete disconnected cutoff 2.9
 run 1
