@@ -7,6 +7,11 @@
 
 This keyword inserts atom(s) or molecule(s) into the current configuration.
 
+Insertion is instantaneous in simulation time. The command does not integrate
+motion, advance the MD clock, or certify that an inserted particle has arrived
+at or remained on a substrate. The ``Deposited`` count in the log is the number
+of inserted atoms, not a measured retained-film count.
+
 It is meant for special simulations that grow or inject atoms during MD, such as molecular-beam deposition.
 Ordinary MD simulations do not need this keyword.
 
@@ -124,8 +129,26 @@ Velocity and spread
   velocity uniform Vmin Vmax
   spread gaussian sigma_deg
 
-``velocity`` sets only the speed :math:`|\mathbf v|` (Å/fs).
+``velocity`` sets only the speed :math:`|\mathbf v|` in GPUMD's internal units
+(angstrom per natural time unit). The legacy command copies this value directly
+into the internal velocity array; it does not perform the conversion used when
+reading velocities from an extended XYZ file.
+
+With ``TIME_UNIT_CONVERSION = 10.18051``, the speed in angstrom/fs is
+``V / 10.18051``. For example, ``velocity constant 0.08`` gives approximately
+``0.00785815`` angstrom/fs, not ``0.08`` angstrom/fs. To express a requested
+physical speed using the existing syntax, multiply the angstrom/fs value by
+``10.18051``. This documentation correction does not change old input values or
+the physical results of existing runs.
+
 The flight direction is ``direction``, optionally broadened by ``spread gaussian`` with angular standard deviation in degrees.
+An explicit ``normal`` defines the launch plane independently of that direction;
+the command does not require every sampled velocity to point into the surface.
+
+Placing a particle at ``surface local/global ... gap D`` reduces the initial
+distance to the surface. It is not a ballistic flight-time shortcut: the
+remaining trajectory is evolved only by subsequent ``run`` commands. A small
+gap can already lie inside the potential's interaction range.
 
 Other keywords
 --------------
@@ -180,6 +203,12 @@ Caveats
   Issue those keywords after ``deposit`` in the same run block, or they will not see the new number of atoms.
 * Consecutive ``deposit`` commands with no other keyword between them are executed as one batch:
   one CPU–GPU sync and one atom-count rebuild for the whole group, instead of one per command.
-  Each command still sees the atoms placed by the previous commands in the batch
-  (surface heights and ``near`` checks include them), so results match per-command execution.
+  Each command sees the atoms placed by the previous commands in the batch
+  (surface heights and ``near`` checks include them). No MD time passes between
+  these commands; they are not temporally separated deposition pulses.
   Any intervening keyword (``ensemble``, ``run``, ``velocity``, ...) splits the batch.
+  There is a known mixed-selection limitation: a batch containing both
+  ``surface local ... mobile`` and ordinary ``surface local`` commands shares
+  the mobile-only surface filter. Separate such commands with a non-deposit
+  keyword (for example, repeat the intended ``time_step``) until this limitation
+  is fixed. Ordinary batches without ``mobile`` are not affected by this issue.
