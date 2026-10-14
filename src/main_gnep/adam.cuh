@@ -29,6 +29,7 @@ public:
 
   // void zero_gradients();
   void update(float lr, float* gradients); // Update moments and parameters
+  void sync_parameters();                  // upload a projected host parameter vector
   float* get_parameters(); // get current parameters pointer
   void output_parameters(Parameters& para); // Output parameters
   void initialize_parameters(Parameters& para); // Initialize optimizer parameters
@@ -46,6 +47,12 @@ protected:
   // training parameters
   int step = 0; // initial step
   int number_of_variables; // number of variables
+
+  GPU_Vector<int> update_mask;
+  bool project_output = false;
+  double lambda1 = 0;
+  double lambda2 = 0;
+  double loss_epsilon = 1e-8;
 
   // CPU vectors
   GPU_Vector<curandState> curand_states; 

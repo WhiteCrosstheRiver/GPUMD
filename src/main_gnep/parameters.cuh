@@ -23,6 +23,17 @@ class Parameters
 public:
   Parameters();
 
+  // Opt-in FCVP/consistent RMSE training (legacy Adam stays the default).
+  int fcvp_interval = 0;
+  int fcvp_iterations = 40;
+  int seed = 1234567;
+  bool loss_rmse = false;
+  int fcvp_check = 0;
+  double fcvp_epsilon = 1e-8;
+  double fcvp_tolerance = 1e-8;
+  double lambda_1 = 0.0;
+  double lambda_2 = 0.0;
+
   // parameters to be read in
   int batch_size;         // number of configurations in one batch
   int use_full_batch;     // 1 for effective full-batch even though batch_size is not full-batch
@@ -67,6 +78,7 @@ public:
   
 
   // check if a parameter has been set:
+  bool is_seed_set = false;
   bool is_prediction_set;
   bool is_type_set;
   bool is_cutoff_set;
@@ -121,6 +133,11 @@ private:
 
   void parse_one_keyword(std::vector<std::string>& tokens);
 
+  void parse_fcvp(const char** param, int num_param);
+  void parse_fcvp_check(const char** param, int num_param);
+  void parse_loss_rmse(const char** param, int num_param);
+  void parse_regularization(const char** param, int num_param);
+  void parse_seed(const char** param, int num_param);
   void parse_prediction(const char** param, int num_param);
   void parse_type(const char** param, int num_param);
   void parse_type_weight(const char** param, int num_param);

@@ -20,6 +20,7 @@
 #include <cmath>
 #include <cstring>
 #include <iostream>
+#include <limits>
 
 const std::string ELEMENTS[NUM_ELEMENTS] = {
   "H",  "He", "Li", "Be", "B",  "C",  "N",  "O",  "F",  "Ne", "Na", "Mg", "Al", "Si", "P",  "S",
@@ -39,6 +40,20 @@ Parameters::Parameters()
   read_gmlp_in();
   if (is_zbl_set) {
     read_zbl_in();
+  }
+  if (fcvp_interval && weight_decay != 0.0f) {
+    PRINT_INPUT_ERROR("FCVP requires weight_decay 0; use lambda_2 for norm regularization.");
+  }
+  if ((lambda_1 > 0 || lambda_2 > 0) && !loss_rmse) {
+    PRINT_INPUT_ERROR("lambda_1/lambda_2 require loss_rmse or fcvp.");
+  }
+  if (loss_rmse && use_full_batch) {
+    PRINT_INPUT_ERROR("loss_rmse/FCVP does not support batch accumulation; use batch <size> 0.");
+  }
+  if (
+    loss_rmse && (fcvp_epsilon < std::numeric_limits<float>::min() ||
+                  fcvp_epsilon > std::numeric_limits<float>::max())) {
+    PRINT_INPUT_ERROR("RMSE epsilon must be in the positive normal float range.");
   }
   calculate_parameters();
   report_inputs();
@@ -60,6 +75,7 @@ void Parameters::set_default_parameters()
   is_weight_decay_set = false;
   is_start_lr_set = false;
   is_stop_lr_set = false;
+  is_lambda_e_set = is_lambda_f_set = is_lambda_v_set = false;
   is_lambda_shear_set = false;
   is_batch_set = false;
   is_epoch_set = false;
@@ -180,6 +196,9 @@ void Parameters::calculate_parameters()
 
   int deviceCount;
   CHECK(cudaGetDeviceCount(&deviceCount));
+  if (deviceCount < 1 || deviceCount > 16) {
+    PRINT_INPUT_ERROR("GNEP requires between 1 and 16 visible GPUs.");
+  }
   for (int device_id = 0; device_id < deviceCount; device_id++) {
     CHECK(cudaSetDevice(device_id));
     q_scaler_gpu[device_id].resize(dim);
@@ -197,6 +216,10 @@ void Parameters::report_inputs()
   }
 
   printf("Input or default parameters:\n");
+  printf("    seed = %d; loss_rmse = %d; fcvp interval = %d\n", seed, loss_rmse, fcvp_interval);
+  if (loss_rmse)
+    printf(
+      "    RMSE epsilon = %g; lambda_1 = %g; lambda_2 = %g\n", fcvp_epsilon, lambda_1, lambda_2);
 
   std::string train_mode_name = "potential";
   printf("model_type = %s.\n", train_mode_name.c_str());
@@ -389,7 +412,17 @@ void Parameters::parse_one_keyword(std::vector<std::string>& tokens)
   for (int n = 0; n < num_param; ++n) {
     param[n] = tokens[n].c_str();
   }
-  if (strcmp(param[0], "prediction") == 0) {
+  if (strcmp(param[0], "fcvp") == 0) {
+    parse_fcvp(param, num_param);
+  } else if (strcmp(param[0], "fcvp_check") == 0) {
+    parse_fcvp_check(param, num_param);
+  } else if (strcmp(param[0], "loss_rmse") == 0) {
+    parse_loss_rmse(param, num_param);
+  } else if (strcmp(param[0], "lambda_1") == 0 || strcmp(param[0], "lambda_2") == 0) {
+    parse_regularization(param, num_param);
+  } else if (strcmp(param[0], "seed") == 0) {
+    parse_seed(param, num_param);
+  } else if (strcmp(param[0], "prediction") == 0) {
     parse_prediction(param, num_param);
   } else if (strcmp(param[0], "type") == 0) {
     parse_type(param, num_param);
@@ -666,6 +699,58 @@ void Parameters::parse_neuron(const char** param, int num_param)
   } else if (num_neurons1 > 200) {
     PRINT_INPUT_ERROR("number of neurons should <= 200.");
   }
+}
+
+void Parameters::parse_fcvp(const char** param, int num_param)
+{
+  if (
+    num_param != 5 || !is_valid_int(param[1], &fcvp_interval) ||
+    !is_valid_int(param[2], &fcvp_iterations) || !is_valid_real(param[3], &fcvp_epsilon) ||
+    !is_valid_real(param[4], &fcvp_tolerance) || fcvp_interval < 1 || fcvp_iterations < 1 ||
+    !(fcvp_epsilon > 0) || !(fcvp_tolerance > 0) || !std::isfinite(fcvp_epsilon) ||
+    !std::isfinite(fcvp_tolerance)) {
+    PRINT_INPUT_ERROR("fcvp requires: interval>=1 iterations>=1 epsilon>0 tolerance>0.");
+  }
+  loss_rmse = true;
+}
+
+void Parameters::parse_fcvp_check(const char** param, int num_param)
+{
+  if (num_param != 2 || !is_valid_int(param[1], &fcvp_check) || fcvp_check != 1) {
+    PRINT_INPUT_ERROR("fcvp_check requires 1.");
+  }
+  loss_rmse = true;
+}
+
+void Parameters::parse_loss_rmse(const char** param, int num_param)
+{
+  if (
+    num_param != 2 || !is_valid_real(param[1], &fcvp_epsilon) || !(fcvp_epsilon > 0) ||
+    !std::isfinite(fcvp_epsilon)) {
+    PRINT_INPUT_ERROR("loss_rmse requires a positive finite smoothing epsilon.");
+  }
+  loss_rmse = true;
+}
+
+void Parameters::parse_regularization(const char** param, int num_param)
+{
+  double value;
+  if (num_param != 2 || !is_valid_real(param[1], &value) || value < 0 || !std::isfinite(value)) {
+    PRINT_INPUT_ERROR("Regularization weight must be finite and nonnegative.");
+  }
+  if (strcmp(param[0], "lambda_1") == 0) {
+    lambda_1 = value;
+  } else {
+    lambda_2 = value;
+  }
+}
+
+void Parameters::parse_seed(const char** param, int num_param)
+{
+  if (num_param != 2 || !is_valid_int(param[1], &seed) || seed < 0) {
+    PRINT_INPUT_ERROR("seed must be a nonnegative integer.");
+  }
+  is_seed_set = true;
 }
 
 void Parameters::parse_weight_decay(const char** param, int num_param)

@@ -12,3 +12,4 @@ nep executable
    input_files/index
    input_parameters/index
    output_files/index
+   gnep_fcvp

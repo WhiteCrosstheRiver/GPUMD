@@ -361,8 +361,11 @@ void Dataset::construct(
 
   error_cpu_e.resize(Nc);
   error_cpu_v.resize(Nc);
+  error_cpu_v_unweighted.resize(Nc);
   error_cpu_f.resize(Nc);
   error_gpu.resize(Nc);
+  error_gpu_e.resize(Nc);
+  error_gpu_v_unweighted.resize(Nc);
   diff_gpu_v.resize(Nc * 6);
   diff_gpu_e.resize(Nc);
   find_Na(para);
@@ -519,7 +522,8 @@ std::vector<float> Dataset::get_mse_virial(Parameters& para, const bool use_weig
 
   for (int n = 0; n < Nc; ++n) {
     if (structures[n].has_virial) {
-      float mse_temp = use_weight ? weight_cpu[n] * weight_cpu[n] * error_cpu_v[n] : error_cpu_v[n];
+      float mse_temp =
+        use_weight ? weight_cpu[n] * weight_cpu[n] * error_cpu_v[n] : error_cpu_v_unweighted[n];
       for (int t = 0; t < para.num_types + 1; ++t) {
         if (has_type[t * Nc + n]) {
           mse_array[t] += mse_temp;
@@ -535,4 +539,30 @@ std::vector<float> Dataset::get_mse_virial(Parameters& para, const bool use_weig
     }
   }
   return mse_array;
+}
+
+Batch_MSE get_batch_mse(Parameters& para, std::vector<Dataset>& datasets, bool use_weight)
+{
+  Batch_MSE result;
+  for (int device_id = 0; device_id < datasets.size(); ++device_id) {
+    auto& data = datasets[device_id];
+    result.energy += double(data.get_mse_energy(para, use_weight, device_id).back()) * data.Nc;
+    result.force += double(data.get_mse_force(para, use_weight, device_id).back()) * data.N;
+    result.virial +=
+      double(data.get_mse_virial(para, use_weight, device_id).back()) * data.sum_virial_Nc;
+    result.configurations += data.Nc;
+    result.atoms += data.N;
+    result.virial_configurations += data.sum_virial_Nc;
+  }
+  if (result.configurations > 0) {
+    result.energy /= result.configurations;
+  }
+  if (result.atoms > 0) {
+    result.force /= result.atoms;
+  }
+  if (result.virial_configurations > 0) {
+    result.virial /= result.virial_configurations;
+  }
+  CHECK(cudaSetDevice(0));
+  return result;
 }

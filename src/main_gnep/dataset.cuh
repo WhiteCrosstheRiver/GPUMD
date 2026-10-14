@@ -67,8 +67,11 @@ public:
 
   std::vector<float> error_cpu_e; // error in energy (squared)
   std::vector<float> error_cpu_v; // error in virial (squared)
+  std::vector<float> error_cpu_v_unweighted; // virial error without shear weights
   std::vector<float> error_cpu_f; // error in force (squared)
-  GPU_Vector<float> error_gpu;  // error in energy, virial, or force (squared)
+  GPU_Vector<float> error_gpu;    // scratch virial or force squared errors
+  GPU_Vector<float> error_gpu_e;
+  GPU_Vector<float> error_gpu_v_unweighted;
   GPU_Vector<float> diff_gpu_e; // error in energy (before squared)
   GPU_Vector<float> diff_gpu_v; // error in virial (before squared)
   std::vector<bool> has_type;
@@ -93,3 +96,14 @@ private:
   void initialize_gpu_data(Parameters& para);
   void find_neighbor(Parameters& para);
 };
+
+struct Batch_MSE {
+  double energy = 0.0;
+  double force = 0.0;
+  double virial = 0.0;
+  int configurations = 0;
+  int atoms = 0;
+  int virial_configurations = 0;
+};
+
+Batch_MSE get_batch_mse(Parameters& para, std::vector<Dataset>& datasets, bool use_weight);

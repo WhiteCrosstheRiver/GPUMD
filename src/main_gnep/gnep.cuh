@@ -45,6 +45,7 @@ class GNEP : public Potential
 {
 public:
   struct ParaMB {
+    bool consistent_loss = false;
     bool use_typewise_cutoff = false;
     bool use_typewise_cutoff_zbl = false;
     float typewise_cutoff_radial_factor = 2.5f;
@@ -104,14 +105,20 @@ public:
     bool calculate_neighbor,
     int deviceCount);
 
+  // Uses the descriptors/neighbors cached by the immediately preceding find_force.
+  // Produces one local E/F/V basis column on the selected device, excluding ZBL.
+  void find_output_basis(Parameters& para, Dataset& dataset, int column, int device_id = 0);
+
   Gradients gradients;
   virtual Gradients& getGradients() override {return gradients;}
 
 private:
+  // Each device accumulates gradients for its nonempty structure shard.
+  Gradients device_gradients[15];
   ParaMB paramb;
   ANN annmb[16];
   GNEP_Data gnep_data[16];
   ZBL zbl;
   void update_potential(Parameters& para, const float* parameters, ANN& ann);
-  void initialize_gradients(Parameters& para, const int N);
+  void initialize_gradients(Parameters& para, const int N, int device_id);
 };
