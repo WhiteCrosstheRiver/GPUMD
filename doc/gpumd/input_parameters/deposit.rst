@@ -7,6 +7,10 @@
 
 Define a named source, then explicitly insert particles or execute a pulse.
 This replaces ``deposit grid/random/...``. Ordinary MD commands are unchanged.
+Old deposition lines must be rewritten as source facets followed by ``emit``;
+they are not accepted as aliases. Incident velocity now requires explicit
+``angstrom/fs`` units, so convert old internal velocity numbers by dividing
+by 10.18051.
 
 Syntax and lifecycle
 -------------------
@@ -19,6 +23,8 @@ Each configuration line replaces only that facet of its source; it never emits
 or advances time. Required facets: particle, placement, region, velocity.
 Sources persist across loops/runs in this process. Commands execute in script
 order, without implicit cross-command batching. Write one command per line.
+The source name identifies independent configuration and random state; it is
+not an atom type or grouping label.
 
 Particle and placement
 ----------------------
@@ -131,6 +137,10 @@ geometry, not intramolecular pairs; default is disabled. Each source owns a
 persistent RNG. Repeated emits advance it; reissuing seed resets it. Replacing
 another facet does not reset it. Omitted seed initializes randomly. Expressions
 are resolved when configuration executes, not at a later emit.
+Numeric configuration arguments can use ``v_name`` for delayed variable
+evaluation. Reissue the relevant configuration line inside a loop to evaluate
+it once per pulse; random or Gaussian placement samples separately for each
+emitted entity. See :ref:`variable <kw_variable>`.
 
 Source definitions and RNG state are NOT stored in restart.xyz. An XYZ restart
 is not a bitwise random-stream continuation; redefine sources and record seeds.

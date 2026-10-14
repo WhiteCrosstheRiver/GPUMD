@@ -73,8 +73,14 @@ used the positions of the last ``deposit``/``delete``, which are stale after a `
 
 Deposition loop with a sliding frozen zone::
 
+  deposit beam particle atom Si
+  deposit beam placement grid spacing 4 4 select random
+  deposit beam region surface normal 0 0 1 bounds 0 $(lx) 0 $(ly) height local radius 6 gap 3 scope all
+  deposit beam velocity vector 0 0 -0.0078581525 units angstrom/fs
+  deposit beam exclusion distance 2.5
+  deposit beam seed 1
   for i range 1 2352
-      deposit grid atom Si number 5 ... surface local radius 6.0 gap 3.0 near 2.5 ...
+      deposit beam emit number 5
       ensemble nvt_ber 800 800 40.0
       fix 1
       fix shell substrate z cutoff 2.9 offset 20 surface radius 3 mode grow every 10
@@ -88,8 +94,13 @@ validate against that reference before production.
 
 Etch loop::
 
+  deposit etch particle atom F
+  deposit etch placement gaussian center $(lx/2) $(ly/2) sigma 30 attempt 100
+  deposit etch region surface normal 0 0 1 bounds 0 $(lx) 0 $(ly) height local radius 5 gap 2.5 scope all
+  deposit etch velocity vector 0 0 -0.00068759 units angstrom/fs
+  deposit etch seed 1
   for i range 1 100
-      deposit gaussian atom F number 1 origin 32.662 40.828 sigma 30 direction axis -z surface local radius 5.0 gap 2.5 spread gaussian 5 velocity constant 0.007 seed 1
+      deposit etch emit number 1
       ensemble nvt_ber 300 300 100
       fix 1 2
       fix shell substrate z cutoff 2.4 offset 5.0 type Si Ge

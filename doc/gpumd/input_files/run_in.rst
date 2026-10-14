@@ -33,6 +33,11 @@ The overall structure of a ``run.in`` file is as follows:
   * Use the :ref:`run <kw_run>` keyword to run a number of :term:`MD` steps according to the above settings. 
   * The last two steps can be repeated.
 
+For deposition, use :ref:`deposit <kw_deposit>` to configure a named source,
+then insert particles with ``emit`` or run an entry-triggered ``pulse``.
+Source configuration persists across ``run`` commands; per-run settings such
+as ``ensemble`` and ``fix`` follow their usual propagation rules.
+
 The following tables provide an overview of the different keywords.
 A complete list can also be found :ref:`here <gpumd_input_parameters>`.
 The last two columns indicate whether the command is executed immediately (*Exec.*) and whether it is propagted from one ``run`` command to the next (*Prop.*).
@@ -105,9 +110,9 @@ Actions
      - Yes
      - N/A
    * - :ref:`deposit <kw_deposit>`
-     - Insert atom(s) (special-purpose; deposition)
+     - Configure a named source; emit particles or run a pulse
      - Yes
-     - N/A
+     - Source: Yes
    * - :ref:`delete <kw_delete>`
      - Remove atoms (``disconnected`` is special-purpose and expensive)
      - Yes

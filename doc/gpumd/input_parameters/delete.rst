@@ -81,8 +81,14 @@ Examples
 
 Deposition loop that also drops disconnected atoms (special-purpose)::
 
+  deposit beam particle atom Ge
+  deposit beam placement gaussian center $(lx/2) $(ly/2) sigma 8.33 attempt 100
+  deposit beam region surface normal 0 0 1 bounds 0 $(lx) 0 $(ly) height local radius 5 gap 2.6 scope all
+  deposit beam velocity vector 0 0 -0.00068759 units angstrom/fs
+  deposit beam seed 1
   for i range 1 500
-      deposit gaussian atom Ge number 1 origin 0 0 sigma 8.33 direction axis -z surface local radius 5.0 gap 2.6 spread gaussian 5 velocity constant 0.007 seed 1
+      deposit beam emit number 1
+      ensemble nvt_ber 800 800 40
       run 100
       delete disconnected cutoff 2.9
   end

@@ -37,7 +37,11 @@ This is the LAMMPS ``$`` / ``v_`` split.
 * ``${name}`` and ``$(formula)`` are expanded **before** the original command parser runs. The command only sees a number string. For a for-loop name, ``${i}`` is the current string. For an equal-style name, ``${x}`` evaluates the formula **now** and freezes that number.
 * ``v_name`` is **not** expanded by the control layer. Only commands that accept a delayed slot evaluate it, and they do so at use time.
 
-``deposit`` numeric values accept delayed ``v_name`` tokens (``origin``, ``region``, ``surface``, ``velocity``, and so on). Each token is evaluated once when that ``deposit`` command runs.
+Numeric arguments in named ``deposit`` source configuration accept delayed ``v_name``
+tokens (placement coordinates, region bounds, velocity, and so on). Each token is
+evaluated when that configuration line executes. A later ``emit`` does not
+re-evaluate configuration values; repeat the configuration line inside a loop
+if its value should change for each pulse.
 
 Examples
 --------
@@ -48,30 +52,41 @@ Snapshot vs live box length::
   variable L0 equal ${tmp}
   variable L1 equal v_tmp
   change_box 1.0 0 0
-  deposit point atom C origin ${L0} 0 direction axis -z surface fixed 20 velocity constant 0.001
-  deposit point atom C origin v_L1 0 direction axis -z surface fixed 20 velocity constant 0.001
+  deposit snap placement point at ${L0} 0
+  deposit live placement point at v_L1 0
 
-After ``change_box``, ``${L0}`` is still the original ``lx``; ``v_L1`` follows the new ``lx``.
+After ``change_box``, ``${L0}`` is still the original ``lx``; ``v_L1`` uses
+the new ``lx`` when the ``live`` placement line executes. These lines only set
+placement; define the other required source facets before emitting.
 
-Random XY in one pulse (one GPU rebuild)::
+New random XY for each pulse::
 
   variable rx equal random(0,lx,12345)
   variable ry equal random(0,ly,12345)
+  deposit beam particle atom Si
+  deposit beam region surface normal 0 0 1 bounds 0 $(lx) 0 $(ly) height global gap 20 scope all
+  deposit beam velocity vector 0 0 -0.001 units angstrom/fs
   for p range 1 500
-      deposit gaussian atom Si number 64 origin v_rx v_ry sigma 0 direction axis -z surface local radius 5.0 gap 2.5 spread gaussian 5 velocity constant 0.015 seed 12345
+      deposit beam placement point at v_rx v_ry
+      deposit beam emit number 1
+      ensemble nvt_ber 800 800 40
       run 400
   end
 
-Do **not** write ``origin ${rx} ${ry}`` with ``number > 1``: ``${rx}`` is one number, so every entity in that pulse uses the same center.
+Both ``${rx}`` and ``v_rx`` resolve once per placement configuration, not once
+per emitted atom. Use ``placement random`` or ``placement gaussian`` when
+particles within one emit need separately sampled positions. The source RNG
+persists across emits; configure its ``seed`` once rather than resetting it
+inside the loop.
 
 Anonymous immediate formula::
 
-  deposit point atom C origin $(lx/2) $(ly/2) direction axis -z surface fixed 20 velocity constant 0.001
+  deposit beam placement point at $(lx/2) $(ly/2)
 
 Caveats
 -------
 
 * ``potential`` must not use ``${}`` / ``$()``; some setup code scans ``run.in`` before expansion.
 * ``$i`` without braces is not recognized. Use ``${i}``.
-* Most GPUMD keywords still only accept numbers after ``${}`` expansion. ``v_name`` outside the ``deposit`` slots above is passed through as a literal token and will fail as "not a number".
+* Most GPUMD keywords still only accept numbers after ``${}`` expansion. ``v_name`` outside named ``deposit`` numeric slots above is passed through as a literal token and will fail as "not a number".
 * atom / vector / python / file / loop / index styles are not implemented.

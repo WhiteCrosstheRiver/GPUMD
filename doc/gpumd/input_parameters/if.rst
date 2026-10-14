@@ -53,24 +53,35 @@ Numeric then / else::
 Random species (binomial, not a fixed 50/50 count)::
 
   variable u equal random(0,1,12345)
+  deposit beam placement gaussian center $(lx/2) $(ly/2) sigma 6 attempt 100
+  deposit beam region surface normal 0 0 1 bounds 0 $(lx) 0 $(ly) height local radius 5 gap 2.5 scope all
+  deposit beam velocity vector 0 0 -0.0014734 units angstrom/fs
+  deposit beam seed 12345
   for p range 1 100
-      variable u equal random(0,1,12345)
       if ${u} < 0.5
-          deposit gaussian atom Si number 1 origin 0 0 sigma 6.0 direction axis -z surface local radius 5.0 gap 2.5 spread gaussian 5 velocity constant 0.015 seed 12345
+          deposit beam particle atom Si
       else
-          deposit gaussian atom Ge number 1 origin 0 0 sigma 6.0 direction axis -z surface local radius 5.0 gap 2.5 spread gaussian 5 velocity constant 0.015 seed 12345
+          deposit beam particle atom Ge
       end
+      deposit beam emit number 1
+      ensemble nvt_ber 800 800 40
       run 100
   end
 
 String compare with a for-loop value::
 
+  deposit beam placement gaussian center $(lx/2) $(ly/2) sigma 6 attempt 100
+  deposit beam region surface normal 0 0 1 bounds 0 $(lx) 0 $(ly) height local radius 5 gap 2.5 scope all
+  deposit beam velocity vector 0 0 -0.0014734 units angstrom/fs
+  deposit beam seed 12345
   for sp values Si Ge
       if ${sp} == Si
-          deposit gaussian atom Si number 1 origin 0 0 sigma 6.0 direction axis -z surface local radius 5.0 gap 2.5 spread gaussian 5 velocity constant 0.015 seed 12345
+          deposit beam particle atom Si
       else
-          deposit gaussian atom Ge number 1 origin 0 0 sigma 6.0 direction axis -z surface local radius 5.0 gap 2.5 spread gaussian 5 velocity constant 0.015 seed 12345
+          deposit beam particle atom Ge
       end
+      deposit beam emit number 1
+      ensemble nvt_ber 800 800 40
       run 100
   end
 
