@@ -30,10 +30,10 @@ static void print_memory_info(const char* stage) {
 }
 
 struct Gradients {
-  void resize(int N, int num_variables, int number_of_variables_ann, int dim) {
+  void resize(int tile_atoms, int num_variables, int number_of_variables_ann, int dim) {
     grad_sum.resize(num_variables, 0.0f);
-    E_wb_grad.resize(N * number_of_variables_ann, 0.0f);
-    Fp_wb.resize(N * number_of_variables_ann * dim, 0.0f);
+    E_wb_grad.resize(size_t(tile_atoms) * number_of_variables_ann, 0.0f);
+    Fp_wb.resize(size_t(tile_atoms) * number_of_variables_ann * dim, 0.0f);
   }
   void clear() {
     E_wb_grad.fill(0.0f);

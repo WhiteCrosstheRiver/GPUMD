@@ -168,6 +168,7 @@ seed 20261014
 weight_decay 0
 fcvp 1 40 1e-8 1e-8
 fcvp_memory 512
+gradient_memory 512
 lambda_1 0
 lambda_2 0
 ```
@@ -210,6 +211,32 @@ snapshots take memory proportional to the batch row count. With `P` output
 parameters, Gram storage grows as `O(P^2)` and the direct MM solve costs
 `O(P^3)` time. Removing the former 512-column cap does not guarantee practical
 performance for arbitrary model dimensions.
+
+`gradient_memory <MiB>` is a separate positive-integer budget (default 512 per
+GPU) for the native nonlinear gradient's center-atom derivative tiles. It
+bounds the mixed ANN/descriptor derivatives, energy derivatives, and descriptor
+Hessian scratch, instead of retaining those arrays for every atom at once.
+All batch predictions, neighbor interactions, and residuals remain available;
+the global loss normalization is computed once and the tile gradients are
+summed before the single Adam update. This is execution tiling, not mini-batch
+training. It also applies to ordinary GNEP gradients without FCVP.
+Per-device buffers are prepared first, then tiles are submitted round-robin
+across GPUs so a long queue on one device does not delay the other devices.
+
+Neither memory setting bounds the full process: input datasets, neighbors,
+forward buffers, angular derivative caches, optimizer state, CUDA runtime, and
+validation (still on GPU 0) are separate. Prediction does not allocate ANN
+gradient temporaries. The log reports each GPU's derivative tile size/count.
+Different tilings can have small floating-point reduction-order differences.
+Global angular caches retain 32-bit kernel indexing; an oversized cache is
+rejected explicitly. This can require a smaller batch or more GPUs even when
+the ANN derivative tile fits.
+
+`gnep.restart` stores parameters only. It does not restore descriptor scales,
+Adam moments, the step, or the random-generator state. Training recomputes the
+scales from the training data, so a converted model's parameter-only restart
+is not guaranteed to preserve its initial predictions. Do not report such a
+warm start as a from-scratch or exact-resume convergence benchmark.
 
 ```
 CUDA_VISIBLE_DEVICES=0 /absolute/path/to/GPUMD/src/gnep

@@ -144,6 +144,10 @@ Additional controls are:
      - ``512`` per active GPU
      - Positive integer budget for explicit FCVP GPU temporaries, including the
        row-tiled basis, Gram matrices, and reconstruction buffers.
+   * - ``gradient_memory <MiB>``
+     - ``512`` per active GPU
+     - Positive integer budget for center-atom tiles of native ANN derivative
+       temporaries. Applies to both FCVP and ordinary GNEP training.
    * - ``lambda_1 <value>``
      - ``0``
      - Nonnegative normalized L1 penalty on the complete parameter vector.
@@ -223,6 +227,49 @@ parameters. A budget too small for the Grams and one basis row fails with an
 input error. Large output dimensions are therefore not guaranteed to be
 practical even without the former column cap.
 
+Native gradient memory
+----------------------
+
+``gradient_memory`` controls a different allocation from ``fcvp_memory``.
+The native nonlinear gradient formerly stored mixed descriptor/ANN-parameter
+derivatives for every atom in the batch. Its largest array required
+:math:`4 N D P_{ANN}` bytes in FP32, where :math:`N` is the local atom count,
+:math:`D` the descriptor dimension, and :math:`P_{ANN}` the total ANN parameter
+count across types. This can exceed GPU memory even when the FCVP basis fits.
+
+The nonlinear gradient now generates these derivatives in center-atom tiles.
+The budget covers the mixed ANN derivatives, energy derivatives, and descriptor
+Hessian tile. All predictions and residuals still refer to the complete batch;
+neighbors outside a tile are not discarded. The global RMSE factors are
+computed once, tile contributions are summed, and only then is Adam applied
+once. Changing this memory budget therefore changes execution blocking, not
+the batch size, loss, or optimizer update count. Floating-point reduction order
+can produce small numerical differences.
+
+Each device's tile buffers are allocated before gradient work is submitted.
+Tiles are then submitted round-robin across devices, preserving each device's
+stream order without filling one device's launch queue before serving the next.
+
+This is not a total-memory cap or out-of-core dataset loader. Input datasets,
+neighbor lists, full forward quantities, angular derivative caches, CUDA
+runtime allocations, and optimizer buffers remain separate. Validation is
+still placed on device 0. A model or dataset can still exceed available memory;
+increasing ``gradient_memory`` is not a remedy for that. Prediction-only calls
+do not allocate these ANN gradient temporaries. The log reports the tile size
+and count on each active device.
+Global angular caches still use 32-bit kernel indices; an oversized cache is
+rejected explicitly before allocation. Reduce the batch or use more devices
+when that limit is reached. Tiling ANN derivatives does not remove this limit.
+
+``gnep.restart`` contains parameters only, not descriptor scales, Adam state,
+or random-generator state. Training recomputes descriptor scales from its
+training data. Supplying a parameter-only file converted from a fitted model
+does not by itself preserve that model's initial predictions or constitute an
+exact training resume. Prediction mode loads the serialized model scales.
+
+Solver and multi-GPU details
+----------------------------
+
 Native GPU training sets the relative proximal shift to FP32 machine epsilon,
 because the basis entries originate in FP32. The host-only FP64 reference
 solver uses a smaller default shift. This damping is centered on the current
@@ -284,6 +331,30 @@ executable and NEP_CPU bridge::
 
 Historical measured scope
 -------------------------
+
+On 2026-10-15, a separate large-batch memory regression used 13,348 Si/Ge
+training structures (912,932 atoms), 1,484 validation structures (99,793 atoms),
+42 descriptors, and 40 hidden neurons on two A100-PCIE-40GB GPUs. The original
+unblocked ANN mixed-derivative arrays alone required about 254 and 249 GiB per
+shard, with 32-bit allocation-expression overflow as an additional defect.
+Removing the validation set did not resolve the failure.
+
+With ``gradient_memory 512``, each device used 876-center derivative tiles,
+and the complete training and validation data ran for three epochs from random
+initialization without an out-of-memory failure. Sampled per-process peak GPU
+memory was 13,040 and 12,852 MiB. Round-robin submission reduced measured
+end-to-end time from 260.62 to 165.05 seconds compared with an intermediate
+device-at-a-time tiled build (1.58 times faster in this single paired pilot).
+The pre-fix program could not complete this workload, so this is not a speedup
+measurement against the original unblocked implementation.
+
+The three-epoch validation errors were about 0.2644 eV/atom and 0.3349 eV/Angstrom;
+the run established memory feasibility, not convergence to a paper accuracy
+target. Independent CPU inference agreed with native validation output to
+9.3e-6 eV/atom and 8.1e-5 eV/Angstrom maximum absolute differences. Exact ordered
+geometry auditing found train overlap in 1,092 of the 1,484 supplied validation
+frames; the split was preserved for the program regression, not certified as
+an independent generalization benchmark.
 
 The following measurements predate the expanded descriptor, prediction, and
 row-tiled FCVP changes. They are historical results, not measurements of the

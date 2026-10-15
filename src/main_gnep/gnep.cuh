@@ -119,6 +119,7 @@ public:
 private:
   // Each device accumulates gradients for its nonempty structure shard.
   Gradients device_gradients[15];
+  bool gradient_tile_reported[16] = {};
   ParaMB paramb;
   ANN annmb[16];
   GNEP_Data gnep_data[16];

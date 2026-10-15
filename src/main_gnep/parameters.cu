@@ -379,6 +379,7 @@ void Parameters::report_inputs()
 
   printf("Input or default parameters:\n");
   printf("    seed = %d; loss_rmse = %d; fcvp interval = %d\n", seed, loss_rmse, fcvp_interval);
+  printf("    gradient temporary memory = %d MiB per GPU\n", gradient_memory_mib);
   if (loss_rmse)
     printf(
       "    RMSE epsilon = %g; lambda_1 = %g; lambda_2 = %g\n", fcvp_epsilon, lambda_1, lambda_2);
@@ -590,6 +591,8 @@ void Parameters::parse_one_keyword(std::vector<std::string>& tokens)
     parse_fcvp(param, num_param);
   } else if (strcmp(param[0], "fcvp_memory") == 0) {
     parse_fcvp_memory(param, num_param);
+  } else if (strcmp(param[0], "gradient_memory") == 0) {
+    parse_gradient_memory(param, num_param);
   } else if (strcmp(param[0], "fcvp_check") == 0) {
     parse_fcvp_check(param, num_param);
   } else if (strcmp(param[0], "loss_rmse") == 0) {
@@ -876,6 +879,13 @@ void Parameters::parse_fcvp_memory(const char** param, int num_param)
 {
   if (num_param != 2 || !is_valid_int(param[1], &fcvp_memory_mib) || fcvp_memory_mib < 1) {
     PRINT_INPUT_ERROR("fcvp_memory requires a positive integer number of MiB per GPU.");
+  }
+}
+
+void Parameters::parse_gradient_memory(const char** param, int num_param)
+{
+  if (num_param != 2 || !is_valid_int(param[1], &gradient_memory_mib) || gradient_memory_mib < 1) {
+    PRINT_INPUT_ERROR("gradient_memory requires a positive integer number of MiB per GPU.");
   }
 }
 

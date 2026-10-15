@@ -27,6 +27,7 @@ public:
   int fcvp_interval = 0;
   int fcvp_iterations = 40;
   int fcvp_memory_mib = 512;
+  int gradient_memory_mib = 512;
   int seed = 1234567;
   bool loss_rmse = false;
   int fcvp_check = 0;
@@ -144,6 +145,7 @@ private:
 
   void parse_fcvp(const char** param, int num_param);
   void parse_fcvp_memory(const char** param, int num_param);
+  void parse_gradient_memory(const char** param, int num_param);
   void parse_fcvp_check(const char** param, int num_param);
   void parse_loss_rmse(const char** param, int num_param);
   void parse_regularization(const char** param, int num_param);
