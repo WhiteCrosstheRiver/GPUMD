@@ -184,11 +184,8 @@ Adam::Adam(Parameters& para)
   gpu_parameters.resize(number_of_variables);
   if (project_output) {
     std::vector<int> mask(number_of_variables, 1);
-    const int block = (para.dim + 2) * para.num_neurons1 + 1;
-    for (int t = 0; t < para.num_types; ++t) {
-      for (int j = 0; j <= para.num_neurons1; ++j) {
-        mask[t * block + (para.dim + 1) * para.num_neurons1 + j] = 0;
-      }
+    for (const int index : para.output_parameter_indices()) {
+      mask[index] = 0;
     }
     update_mask.resize(number_of_variables);
     update_mask.copy_from_host(mask.data());

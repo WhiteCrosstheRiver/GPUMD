@@ -28,7 +28,10 @@ when there is NVlink, but is also not very bad when there is only PCI-E.
 #include "utilities/error.cuh"
 #include "utilities/gpu_macro.cuh"
 #include "utilities/nep_utilities.cuh"
+#include <algorithm>
+#include <cmath>
 #include <iostream>
+#include <limits>
 #include <string>
 #include <thrust/execution_policy.h>
 #include <thrust/scan.h>
@@ -138,6 +141,10 @@ NEP_MULTIGPU::NEP_MULTIGPU(
     exit(1);
   }
   paramb.num_types = get_int_from_token(tokens[1], __FILE__, __LINE__);
+  if (paramb.num_types < 1 || paramb.num_types > NUM_ELEMENTS ||
+      (paramb.model_type == 2 && paramb.num_types > 10)) {
+    PRINT_INPUT_ERROR("NEP atom-type count exceeds this MD implementation's capacity.");
+  }
   if (tokens.size() != 2 + paramb.num_types) {
     std::cout << "The first line of nep.txt should have " << paramb.num_types << " atom symbols."
               << std::endl;
@@ -158,6 +165,9 @@ NEP_MULTIGPU::NEP_MULTIGPU(
         break;
       }
     }
+    if (atomic_number == 0) {
+      PRINT_INPUT_ERROR("Unknown element in NEP model.");
+    }
     zbl.atomic_numbers[n] = atomic_number;
     paramb.atomic_numbers[n] = atomic_number - 1;
     printf("    type %d (%s with Z = %d).\n", n, tokens[2 + n].c_str(), zbl.atomic_numbers[n]);
@@ -174,6 +184,10 @@ NEP_MULTIGPU::NEP_MULTIGPU(
     zbl.rc_outer = get_double_from_token(tokens[2], __FILE__, __LINE__);
     if (zbl.rc_inner == 0 && zbl.rc_outer == 0) {
       zbl.flexibled = true;
+      if (10 * paramb.num_types * (paramb.num_types + 1) / 2 >
+          sizeof(zbl.para) / sizeof(zbl.para[0])) {
+        PRINT_INPUT_ERROR("Flexible ZBL exceeds this MD implementation's coefficient capacity.");
+      }
       printf("    has the flexible ZBL potential\n");
     } else {
       printf(
@@ -192,6 +206,10 @@ NEP_MULTIGPU::NEP_MULTIGPU(
   }
   paramb.rc_radial = get_double_from_token(tokens[1], __FILE__, __LINE__);
   paramb.rc_angular = get_double_from_token(tokens[2], __FILE__, __LINE__);
+  if (!std::isfinite(paramb.rc_radial) || !std::isfinite(paramb.rc_angular) ||
+      paramb.rc_angular <= 0.0f || paramb.rc_radial < paramb.rc_angular) {
+    PRINT_INPUT_ERROR("NEP cutoffs must satisfy 0 < angular <= radial.");
+  }
   printf("    radial cutoff = %g A.\n", paramb.rc_radial);
   printf("    angular cutoff = %g A.\n", paramb.rc_angular);
 
@@ -213,6 +231,13 @@ NEP_MULTIGPU::NEP_MULTIGPU(
     paramb.typewise_cutoff_radial_factor = get_double_from_token(tokens[5], __FILE__, __LINE__);
     paramb.typewise_cutoff_angular_factor = get_double_from_token(tokens[6], __FILE__, __LINE__);
     paramb.typewise_cutoff_zbl_factor = get_double_from_token(tokens[7], __FILE__, __LINE__);
+    if (!std::isfinite(paramb.typewise_cutoff_radial_factor) ||
+        !std::isfinite(paramb.typewise_cutoff_angular_factor) ||
+        !std::isfinite(paramb.typewise_cutoff_zbl_factor) ||
+        ((paramb.typewise_cutoff_radial_factor > 0.0f) !=
+         (paramb.typewise_cutoff_angular_factor > 0.0f))) {
+      PRINT_INPUT_ERROR("Invalid NEP typewise cutoff factors.");
+    }
     if (paramb.typewise_cutoff_radial_factor > 0.0f) {
       paramb.use_typewise_cutoff = true;
     }
@@ -234,6 +259,10 @@ NEP_MULTIGPU::NEP_MULTIGPU(
   }
   paramb.n_max_radial = get_int_from_token(tokens[1], __FILE__, __LINE__);
   paramb.n_max_angular = get_int_from_token(tokens[2], __FILE__, __LINE__);
+  if (paramb.n_max_radial < 0 || paramb.n_max_radial >= MAX_DIM ||
+      paramb.n_max_angular < 0 || paramb.n_max_angular >= MAX_DIM) {
+    PRINT_INPUT_ERROR("NEP n_max exceeds this MD implementation's descriptor capacity.");
+  }
   printf("    n_max_radial = %d.\n", paramb.n_max_radial);
   printf("    n_max_angular = %d.\n", paramb.n_max_angular);
 
@@ -246,6 +275,10 @@ NEP_MULTIGPU::NEP_MULTIGPU(
   }
   paramb.basis_size_radial = get_int_from_token(tokens[1], __FILE__, __LINE__);
   paramb.basis_size_angular = get_int_from_token(tokens[2], __FILE__, __LINE__);
+  if (paramb.basis_size_radial < 0 || paramb.basis_size_radial >= MAX_NUM_N ||
+      paramb.basis_size_angular < 0 || paramb.basis_size_angular >= MAX_NUM_N) {
+    PRINT_INPUT_ERROR("NEP basis_size exceeds this MD implementation's basis capacity.");
+  }
   printf("    basis_size_radial = %d.\n", paramb.basis_size_radial);
   printf("    basis_size_angular = %d.\n", paramb.basis_size_angular);
 
@@ -262,6 +295,15 @@ NEP_MULTIGPU::NEP_MULTIGPU(
 
   int L_max_4body = get_int_from_token(tokens[2], __FILE__, __LINE__);
   int L_max_5body = get_int_from_token(tokens[3], __FILE__, __LINE__);
+  if (paramb.L_max < 0 || paramb.L_max > 8 ||
+      (L_max_4body != 0 && L_max_4body != 2) || L_max_4body > paramb.L_max ||
+      (L_max_5body != 0 && L_max_5body != 1) ||
+      (L_max_5body == 1 && L_max_4body != 2)) {
+    PRINT_INPUT_ERROR("Unsupported NEP l_max combination.");
+  }
+  if (paramb.L_max > 0 && paramb.n_max_angular >= MAX_NUM_N) {
+    PRINT_INPUT_ERROR("NEP angular n_max exceeds this MD implementation's moment capacity.");
+  }
   printf("    l_max_4body = %d.\n", L_max_4body);
   printf("    l_max_5body = %d.\n", L_max_5body);
   if (L_max_4body == 2) {
@@ -285,6 +327,12 @@ NEP_MULTIGPU::NEP_MULTIGPU(
   if (paramb.model_type == 3) {
     annmb[0].dim += 1;
   }
+  if (paramb.dim_angular > MAX_DIM_ANGULAR || annmb[0].dim > MAX_DIM) {
+    PRINT_INPUT_ERROR("NEP descriptor dimension exceeds this MD implementation's capacity.");
+  }
+  if (annmb[0].num_neurons1 <= 0) {
+    PRINT_INPUT_ERROR("NEP ANN must have a positive number of neurons.");
+  }
   printf("    ANN = %d-%d-1.\n", annmb[0].dim, annmb[0].num_neurons1);
 
   // calculated parameters:
@@ -293,24 +341,31 @@ NEP_MULTIGPU::NEP_MULTIGPU(
   paramb.rcinv_angular = 1.0f / paramb.rc_angular;
   paramb.num_types_sq = paramb.num_types * paramb.num_types;
 
+  const long long parameters_per_type =
+    (static_cast<long long>(annmb[0].dim) + 2) * annmb[0].num_neurons1;
+  long long num_para_ann;
   if (paramb.version == 3) {
-    annmb[0].num_para_ann = (annmb[0].dim + 2) * annmb[0].num_neurons1 + 1;
+    num_para_ann = parameters_per_type + 1;
   } else if (paramb.version == 4) {
-    annmb[0].num_para_ann = (annmb[0].dim + 2) * annmb[0].num_neurons1 * paramb.num_types + 1;
+    num_para_ann = parameters_per_type * paramb.num_types + 1;
   } else {
-    annmb[0].num_para_ann = ((annmb[0].dim + 2) * annmb[0].num_neurons1 + 1) * paramb.num_types + 1;
+    num_para_ann = (parameters_per_type + 1) * paramb.num_types + 1;
   }
 
   if (paramb.model_type == 2) {
     // Polarizability models have twice as many parameters
-    annmb[0].num_para_ann *= 2;
+    num_para_ann *= 2;
   }
-  printf("    number of neural network parameters = %d.\n", annmb[0].num_para_ann);
   int num_para_descriptor =
     paramb.num_types_sq * ((paramb.n_max_radial + 1) * (paramb.basis_size_radial + 1) +
                            (paramb.n_max_angular + 1) * (paramb.basis_size_angular + 1));
   printf("    number of descriptor parameters = %d.\n", num_para_descriptor);
+  if (num_para_ann + num_para_descriptor > std::numeric_limits<int>::max()) {
+    PRINT_INPUT_ERROR("NEP parameter count exceeds this MD implementation's index capacity.");
+  }
+  annmb[0].num_para_ann = static_cast<int>(num_para_ann);
   annmb[0].num_para = annmb[0].num_para_ann + num_para_descriptor;
+  printf("    number of neural network parameters = %d.\n", annmb[0].num_para_ann);
   printf("    total number of parameters = %d\n", annmb[0].num_para);
 
   paramb.num_c_radial =
@@ -335,6 +390,31 @@ NEP_MULTIGPU::NEP_MULTIGPU(
       zbl.para[d] = get_double_from_token(tokens[0], __FILE__, __LINE__);
     }
     zbl.num_types = paramb.num_types;
+  }
+
+  // MD evaluates ZBL on the angular neighbor list; never silently truncate it.
+  if (zbl.enabled) {
+    float radii[NUM_ELEMENTS];
+    CHECK(gpuMemcpyFromSymbol(radii, COVALENT_RADIUS, sizeof(radii), 0, gpuMemcpyDeviceToHost));
+    for (int t1 = 0, pair = 0; t1 < paramb.num_types; ++t1) {
+      for (int t2 = t1; t2 < paramb.num_types; ++t2, ++pair) {
+        const float radius_sum = radii[paramb.atomic_numbers[t1]] + radii[paramb.atomic_numbers[t2]];
+        const float angular_cutoff = paramb.use_typewise_cutoff
+          ? std::min(paramb.rc_angular, radius_sum * paramb.typewise_cutoff_angular_factor)
+          : paramb.rc_angular;
+        float inner = zbl.flexibled ? zbl.para[10 * pair] : zbl.rc_inner;
+        float outer = zbl.flexibled ? zbl.para[10 * pair + 1] : zbl.rc_outer;
+        if (!zbl.flexibled && paramb.use_typewise_cutoff_zbl) {
+          outer = std::min(outer, radius_sum * paramb.typewise_cutoff_zbl_factor);
+          inner = 0.5f * outer;
+        }
+        if (!std::isfinite(angular_cutoff) || angular_cutoff <= 0.0f ||
+            !std::isfinite(inner) || !std::isfinite(outer) || inner < 0.0f || outer <= inner ||
+            outer > angular_cutoff) {
+          PRINT_INPUT_ERROR("ZBL cutoff exceeds this MD implementation's angular neighbor coverage, or is invalid.");
+        }
+      }
+    }
   }
 
   paramb.num_gpus = num_gpus;
@@ -451,8 +531,10 @@ void NEP_MULTIGPU::allocate_memory()
 NEP_MULTIGPU::~NEP_MULTIGPU(void)
 {
   for (int gpu = 0; gpu < paramb.num_gpus; ++gpu) {
+    CHECK(gpuSetDevice(gpu));
     CHECK(gpuStreamDestroy(nep_data[gpu].stream));
   }
+  CHECK(gpuSetDevice(0));
 }
 
 void NEP_MULTIGPU::update_potential(float* parameters, ANN& ann)

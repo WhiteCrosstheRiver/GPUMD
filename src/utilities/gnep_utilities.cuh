@@ -133,9 +133,9 @@ __constant__ float COVALENT_RADIUS[94] = {
 
 const int SIZE_BOX_AND_INVERSE_BOX = 18; // (3 * 3) * 2
 const int MAX_NUM_N = 20;                // n_max+1 = 19+1
-const int MAX_DIM = MAX_NUM_N * 7;
-const int MAX_DIM_ANGULAR = MAX_NUM_N * 6;
-const int MAX_LN = MAX_NUM_N * 8;
+const int MAX_DIM = MAX_NUM_N * 11;
+const int MAX_DIM_ANGULAR = MAX_NUM_N * 10;
+const int MAX_LN = MAX_DIM_ANGULAR;
 
 // Template specialization to replace switch statement for Z_COEFFICIENT lookup
 template <int L>

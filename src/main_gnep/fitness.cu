@@ -296,41 +296,8 @@ void Fitness::compute(Parameters& para)
       }
     } // end of step loop
   } else {
-    std::ifstream input("nep.txt");
-    if (!input.is_open()) {
-      PRINT_INPUT_ERROR("Failed to open nep.txt.");
-    }
-    std::vector<std::string> tokens;
-    std::vector<float> parameters(number_of_variables);
-    tokens = get_tokens(input);
-    int num_lines_to_be_skipped = 5;
-    if (
-      tokens[0] == "nep5_zbl") {
-      num_lines_to_be_skipped = 6;
-    }
-
-    for (int n = 0; n < num_lines_to_be_skipped; ++n) {
-      tokens = get_tokens(input);
-    }
-    for (int n = 0; n < number_of_variables_ann; ++n) {
-      tokens = get_tokens(input);
-      parameters[n] = get_double_from_token(tokens[0], __FILE__, __LINE__);
-    }
-    tokens = get_tokens(input);
-    for (int n = number_of_variables_ann; n < number_of_variables; ++n) {
-      tokens = get_tokens(input);
-      parameters[n] = get_double_from_token(tokens[0], __FILE__, __LINE__);
-    }
-    for (int d = 0; d < para.dim; ++d) {
-      tokens = get_tokens(input);
-      para.q_scaler_cpu[d] = get_double_from_token(tokens[0], __FILE__, __LINE__);
-    }
-    for (int device_id = 0; device_id < deviceCount; ++device_id) {
-      CHECK(cudaSetDevice(device_id));
-      para.q_scaler_gpu[device_id].copy_from_host(para.q_scaler_cpu.data());
-    }
     CHECK(cudaSetDevice(0));
-    predict(para, parameters.data());
+    predict(para, para.prediction_parameters.data());
   }
 }
 
@@ -465,7 +432,7 @@ void Fitness::write_gnep_txt(FILE* fid_gnep, Parameters& para, float* parameters
   }
   fprintf(fid_gnep, "n_max %d %d\n", para.n_max_radial, para.n_max_angular);
   fprintf(fid_gnep, "basis_size %d %d\n", para.basis_size_radial, para.basis_size_angular);
-  fprintf(fid_gnep, "l_max %d 0 0\n", para.L_max);
+  fprintf(fid_gnep, "l_max %d %d %d\n", para.L_max, para.L_max_4body, para.L_max_5body);
 
   fprintf(fid_gnep, "ANN %d %d\n", para.num_neurons1, 0);
   for (int m = 0; m < para.number_of_variables_ann; ++m) {

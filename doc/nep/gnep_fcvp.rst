@@ -12,12 +12,14 @@ the ``gnep`` executable. It optimizes the linear output weights and per-element
 output biases with the nonlinear parameters held fixed, then updates the
 nonlinear parameters with Adam. Forces are differentiated from all contributing
 site energies. The resulting model uses the existing NEP5 ``nep.txt`` format.
-This option does not change the ``nep`` SNES executable or MD inference.
+This option does not change the ``nep`` SNES executable or MD force kernels.
+The MD model loader has explicit capacity and ZBL-coverage checks.
 
 FCVP is disabled by default. Omitting ``fcvp``, ``loss_rmse``, and ``fcvp_check``
-retains the legacy GNEP loss and update path. It inherits this branch's GNEP descriptor architecture,
-which includes three-body angular descriptors; it does not support every model
-mode available in NEP inference.
+retains the legacy GNEP loss and update path. The supported model is a standard
+NEP5 energy model with radial two-body terms and optional three-, four-, and
+five-body angular terms under the ``l_max`` constraints below. This does not
+extend GNEP to NEP3/4, qNEP, dipole, polarizability, or other model families.
 
 Build and run
 -------------
@@ -47,6 +49,39 @@ multiple GPUs. The implementation accepts up to 16 visible devices; only one
 and two A100 GPUs are included in the native regression and benchmark setup.
 Additional device counts and heterogeneous GPUs require separate validation.
 Small workloads may be slower because of synchronization and transfer overhead.
+
+Model and prediction scope
+--------------------------
+
+The angular descriptor syntax is ``l_max L3 [L4 [L5]]``. ``L3`` accepts 0
+through 8; ``L4`` accepts 0 or 2 and cannot exceed ``L3``; ``L5`` accepts 0
+or 1 and requires ``L4 = 2`` when enabled. The original one-argument form
+retains its default ``L4 = L5 = 0``. The native GNEP limits are 19 for each
+``n_max`` and ``basis_size`` value, 200 neurons, and 220 descriptor dimensions.
+The MD inference loader in this GPUMD branch has lower capacities: 103 total
+descriptor dimensions, 90 angular dimensions, ``basis_size`` at most 16,
+angular ``n_max`` at most 16, and flexible ZBL for at most 10 element types.
+GNEP can train beyond those MD limits, so native training success alone does
+not establish safe MD inference for the exported model. GNEP warns when an
+export exceeds these limits, and this branch's MD loader rejects it. External
+GPUMD and NEP_CPU builds may impose further, different limits.
+
+Flexible ZBL coefficients use per-device storage sized to the model rather
+than a fixed 550-coefficient table. Universal ZBL is also supported. Radial
+neighbor lists include the union of the descriptor and ZBL cutoffs. Fixed ZBL
+remains an affine contribution to FCVP, not an output parameter.
+
+MD inference instead evaluates ZBL through its angular neighbor list. Its
+loader rejects a model if any effective pairwise ZBL outer cutoff exceeds the
+corresponding effective angular cutoff, for universal or flexible ZBL. Native
+GNEP training can use broader cutoff combinations; that does not make them
+MD-compatible.
+
+Training prediction uses the model's ``nep.txt`` as authoritative input and
+accepts NEP5 models only. The prediction backend restores embedded ZBL before
+evaluation and folds the serialized global bias into per-element biases.
+Malformed or unsupported model files fail explicitly. This prediction path
+does not imply support for arbitrary NEP text variants.
 
 Input syntax
 ------------
@@ -101,6 +136,14 @@ Additional controls are:
      - Omitted (disabled)
      - Run a sampled native GPU finite-difference gradient check before training.
        This also enables the consistent loss, even without ``fcvp``.
+   * - ``fcvp_check 2``
+     - Omitted (disabled)
+     - Check every parameter by native GPU finite differences before training.
+       This can be substantially more expensive than level 1.
+   * - ``fcvp_memory <MiB>``
+     - ``512`` per active GPU
+     - Positive integer budget for explicit FCVP GPU temporaries, including the
+       row-tiled basis, Gram matrices, and reconstruction buffers.
    * - ``lambda_1 <value>``
      - ``0``
      - Nonnegative normalized L1 penalty on the complete parameter vector.
@@ -113,7 +156,7 @@ Additional controls are:
      - ``0``
      - Decoupled Adam weight decay. It must remain zero when FCVP is enabled.
 
-The ``fcvp_check`` keyword accepts only ``1``; omit it to disable the check.
+The ``fcvp_check`` keyword accepts ``1`` or ``2``; omit it to disable the check.
 With multiple visible GPUs, the check verifies the summed analytical gradient.
 
 Batch behavior
@@ -170,9 +213,15 @@ per-type ranking. Use ``loss_rmse`` Adam as the objective-matched control.
 The solver accumulates Gram matrices in FP64 and uses MM with Cholesky and L1
 coordinate minimization. It retains the contribution of fixed nonlinear
 parameters to norm penalties. A small proximal shift stabilizes singular
-systems around the current output vector. The temporary basis is limited to
-512 MiB per device and 512 output parameters; reduce the batch or neuron count
-if this limit is exceeded. This limit does not bound total training memory.
+systems around the current output vector. The basis is accumulated in physical
+row tiles; there is no fixed 512-output-column limit. ``fcvp_memory`` bounds
+explicit FCVP GPU temporaries per active device, including the FP64 Grams and
+vectors. It does not bound total GPU or process memory. Residual snapshots use
+host memory proportional to the batch row count, the Grams use :math:`O(P^2)`
+memory, and the direct solve costs :math:`O(P^3)` time for :math:`P` output
+parameters. A budget too small for the Grams and one basis row fails with an
+input error. Large output dimensions are therefore not guaranteed to be
+practical even without the former column cap.
 
 Native GPU training sets the relative proximal shift to FP32 machine epsilon,
 because the basis entries originate in FP32. The host-only FP64 reference
@@ -196,7 +245,7 @@ subproblem:
      &= \beta^{\mathsf T}H_k\beta - 2g_k^{\mathsf T}\beta + c_k.
 
 The FP64 local Gram matrices, right-hand sides, and target norms are summed
-before the MM solve. Full basis matrices remain on their owning GPUs. For
+before the MM solve. Basis row tiles remain on their owning GPUs. For
 nonlinear gradients, residual squared sums are likewise combined before
 computing the global RMSE normalization factor. Local gradients then sum to
 the gradient of the same global loss. Averaging per-device RMSEs would give a
@@ -214,7 +263,8 @@ objective. Rounded FP32 parameters are then checked with the native GPU
 predictor; a worse objective triggers backtracking or rejection. The first
 projection checks native energy, force, and virial reconstruction automatically.
 ``fcvp_check 1`` adds sampled gradient checks but does not exhaustively verify
-every parameter, material, or supported input combination.
+every parameter, material, or supported input combination. ``fcvp_check 2``
+checks every parameter in the current model and batch.
 
 The ``fcvp.out`` file reports::
 
@@ -223,13 +273,22 @@ The ``fcvp.out`` file reports::
 These are projection diagnostics. A non-increasing current-batch objective
 does not guarantee validation improvement or monotonic full-dataset loss.
 ``basis_bytes`` is the sum of temporary output-basis storage across active
-devices, while the allocation limit above applies separately to each device.
+devices, while ``fcvp_memory`` applies separately to each device and also
+accounts for the explicit Gram and reconstruction allocations.
 
-Measured scope
---------------
+From the repository root, run the generality regression with a built GNEP
+executable and NEP_CPU bridge::
 
-The structure-sharded build was tested on two A100-PCIE-40GB GPUs on
-2026-10-15. A fixed-work experiment used identical saved initialization,
+  FCVP_GNEP="$PWD/src/gnep" FCVP_BRIDGE="$PWD/local/fcvp/libfcvp.so" \
+    FCVP_DEVICES=0,1 python -m pytest -q tests/fcvp/test_gpu_generality.py
+
+Historical measured scope
+-------------------------
+
+The following measurements predate the expanded descriptor, prediction, and
+row-tiled FCVP changes. They are historical results, not measurements of the
+current binary. The structure-sharded build was tested on two A100-PCIE-40GB
+GPUs on 2026-10-15. A fixed-work experiment used identical saved initialization,
 30 epochs, and a global batch of 200 configurations obtained by repeating the
 25 PbTe training frames eight times. These repeated frames increase workload,
 not the number of independent training samples. Three alternating-order paired

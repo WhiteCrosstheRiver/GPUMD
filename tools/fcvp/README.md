@@ -1,25 +1,25 @@
 # FCVP-NEP: experimental force-consistent output projection
 
-**Experimental, opt-in GNEP training path.** The implementation has passed the
-CPU test suite and sampled native GPU correctness checks, and has been linked
-and exercised on an A100. A small PbTe experiment showed a shorter time to an
-exploratory accuracy target. It does not establish a general NEP training speedup
-or production readiness; see the measured results and limitations below.
+**Experimental, opt-in GNEP training path.** Earlier revisions passed the CPU
+suite and sampled native GPU checks and were exercised on an A100. A small PbTe
+experiment showed a shorter time to an exploratory accuracy target. Those
+results predate the expanded model scope and row-tiled FCVP implementation;
+they do not establish a general training speedup or production readiness.
 
 The target branch already includes GNEP in `src/main_gnep/`. This implementation
 uses its NEP5 analytical gradients and standard `nep.txt` serialization. It does
-not change MD inference or introduce a second potential architecture.
+not change MD force kernels or introduce a second potential architecture.
+The MD model loader adds explicit capacity and ZBL-coverage checks.
 
 ## What is implemented
 
 - A cached CUDA output-basis path, using the existing radial/angular force
   kernels. Forces include derivatives of **all contributing site energies**.
   The descriptors, angular sums, and neighbors are reused across basis columns.
-- One temporary **batch-shard** matrix per active GPU, then FP64 cuBLAS Gram/RHS
-  accumulation. No dataset-wide force Jacobian is retained. The current explicit
-  limit is 512 MiB per device for this temporary matrix and 512 output columns;
-  reduce `batch` if exceeded.
-  This is a first implementation, not a fully fused/tiled production kernel.
+- A physical-row-tiled **batch-shard** basis per active GPU, with FP64 cuBLAS
+  Gram/RHS accumulation. No dataset-wide force Jacobian is retained. The
+  `fcvp_memory` setting budgets explicit FCVP GPU temporaries per device,
+  including Grams and reconstruction buffers; there is no fixed 512-column cap.
 - Host FP64 MM with Cholesky, L1 coordinate minimization, and norm-L2
   majorization. It includes fixed nonlinear parameters in the norm penalty.
   A tiny proximal term about the current iterate stabilizes null spaces without
@@ -34,6 +34,40 @@ not change MD inference or introduce a second potential architecture.
   explicit norm penalty.
 - Separate CPU oracle (upstream NEP_CPU), independent dense NumPy/SciPy SVD-MM
   reference, numerical tests, data preparation, and timed GPU benchmark runner.
+- Standard NEP5 energy models with radial two-body terms and optional three-,
+  four-, and five-body angular terms under the `l_max` constraints below.
+  Flexible ZBL coefficients use per-device storage sized to the model instead
+  of a fixed 550-coefficient table. Universal ZBL is also supported, and radial
+  neighbors cover descriptor and ZBL cutoffs.
+
+MD inference evaluates ZBL through its angular neighbor list. Its loader
+rejects universal or flexible ZBL when any effective pairwise ZBL outer cutoff
+exceeds the corresponding effective angular cutoff. Native GNEP's radial
+neighbor union supports broader training cutoff combinations, but those
+exports are not necessarily MD-compatible.
+
+## Supported models and prediction
+
+`l_max L3 [L4 [L5]]` accepts `L3` from 0 through 8, `L4` of 0 or 2 no larger
+than `L3`, and `L5` of 0 or 1; `L5 = 1` requires `L4 = 2`. The original
+one-argument form keeps `L4 = L5 = 0`. GNEP allows values through 19 for each
+`n_max` and `basis_size` entry, 200 neurons, and 220 descriptor dimensions.
+This describes native GNEP, not arbitrary NEP3/4, qNEP, dipole,
+polarizability, or other model families.
+
+The MD inference loader in this GPUMD branch has lower capacities: 103 total
+descriptor dimensions, 90 angular dimensions, `basis_size` at most 16,
+angular `n_max` at most 16, and flexible ZBL for at most 10 element types.
+GNEP can train models beyond those limits, so a successful native run alone
+does not establish safe MD inference of its export. GNEP warns when an export
+exceeds them, and this branch's MD loader rejects it. External GPUMD and
+NEP_CPU builds may have further, different limits.
+
+Prediction treats `nep.txt` as the authoritative model and accepts NEP5 only.
+It restores embedded ZBL before invoking the prediction backend and folds the
+serialized global bias into per-element biases. Malformed or unsupported models
+fail explicitly. This is distinct from the training input's optional `zbl.in`
+and does not imply support for arbitrary NEP text variants.
 
 ## Objective and model details that matter
 
@@ -98,7 +132,7 @@ MSE_k(beta) = beta.T H_k beta - 2 g_k.T beta + c_k
 ```
 
 Local FP64 Gram matrices, right-hand sides, and scalar target norms are summed
-through the host; the large basis matrices are not transferred between devices.
+through the host; basis row tiles are not transferred between devices.
 The host solves one global output subproblem. For nonlinear updates, local
 residual squared sums are combined first, then each device uses the **global**
 RMSE normalization factor. Partial gradients are summed before the single Adam
@@ -133,6 +167,7 @@ Use the architecture appropriate for the actual GPU. Add to `gnep.in`:
 seed 20261014
 weight_decay 0
 fcvp 1 40 1e-8 1e-8
+fcvp_memory 512
 lambda_1 0
 lambda_2 0
 ```
@@ -166,21 +201,32 @@ nonnegative and require the consistent loss path. They penalize the full
 parameter vector, including the nonlinear parameters held fixed during a
 projection. Do not combine `fcvp` with nonzero `weight_decay`.
 
+`fcvp_memory <MiB>` accepts a positive integer and defaults to 512 per active
+GPU. It bounds the explicit FCVP GPU basis tile, three FP64 Gram matrices and
+right-hand sides, and reconstruction buffers. A budget unable to hold the
+Grams and one basis row fails with an input error. It does not bound total GPU
+or process memory: native predictor buffers are separate, and host residual
+snapshots take memory proportional to the batch row count. With `P` output
+parameters, Gram storage grows as `O(P^2)` and the direct MM solve costs
+`O(P^3)` time. Removing the former 512-column cap does not guarantee practical
+performance for arbitrary model dimensions.
+
 ```
 CUDA_VISIBLE_DEVICES=0 /absolute/path/to/GPUMD/src/gnep
 ```
 
 `fcvp.out` records actual before/after objectives, acceptance, MM convergence,
 projection wall time, temporary basis bytes, and numerical proximal shift. The
-reported basis bytes sum all active devices; the 512 MiB basis limit is per GPU.
-This limit does not bound total training memory. The
-first native linearity check is automatic. Add `fcvp_check 1` for a separate
+reported basis bytes sum all active devices; `fcvp_memory` applies separately
+to each device and accounts for the explicit Gram and reconstruction buffers
+as well. The first native linearity check is automatic. Add `fcvp_check 1` for a separate
 finite-difference check of selected ANN, descriptor, and output derivatives. The
 benchmark runner requires this gate to pass before timed runs. This sampled GPU
 gate is necessary but not a replacement for a broader material-specific check.
-`fcvp_check 1` also selects the consistent loss even without `fcvp`; omit it to
-disable the check. With multiple GPUs the check uses the summed gradient and
-global finite-difference objective.
+Use `fcvp_check 2` to check every parameter; this may take much longer.
+Either level selects the consistent loss even without `fcvp`; omit the keyword
+to disable the check. With multiple GPUs the check uses the summed gradient
+and global finite-difference objective.
 Use `CUDA_VISIBLE_DEVICES=0,1` for two-GPU training. Training-set prediction
 traverses all shards and preserves the configuration and atom output order;
 validation uses device 0.
@@ -212,7 +258,14 @@ timed region:
 ```bash
 python tools/fcvp/audit_scaling.py --report local/fcvp/scaling/summary.json \
   --data local/fcvp/pbte_clean --bridge local/fcvp/libfcvp.so
-FCVP_GNEP="$PWD/src/gnep" FCVP_DEVICES=0,1 python -m pytest -q tests/fcvp
+```
+
+Run the native generality regression from the repository root with a built
+GNEP executable and NEP_CPU bridge:
+
+```bash
+FCVP_GNEP="$PWD/src/gnep" FCVP_BRIDGE="$PWD/local/fcvp/libfcvp.so" \
+  FCVP_DEVICES=0,1 python -m pytest -q tests/fcvp/test_gpu_generality.py
 ```
 
 The native solver damps its MM steps at FP32 basis precision using a proximal
@@ -222,8 +275,8 @@ Underdetermined unregularized fits still need validation: reducing training
 loss does not guarantee good held-out predictions. Strict single/two-GPU
 parameter regression uses well-conditioned regularized fixtures; separate
 unregularized cases test finite gradients and non-increasing projections.
-Historical exploratory convergence timings below predate this damping and
-the structure-sharded refactor and are not new measurements of this binary.
+Historical exploratory convergence timings below predate this damping, the
+structure-sharded refactor, and the expanded descriptor and FCVP memory paths.
 
 ## Reproduce the CPU verification
 
@@ -261,7 +314,7 @@ keeps 25 training frames and splits the remaining 285 unique geometries into
 142 validation and 143 test frames (seed 20261014). This removes exact coordinate
 leakage, not all possible trajectory or symmetry-related correlations.
 
-## Observed CPU results, 2026-10-14
+## Historical CPU results, 2026-10-14
 
 See `results/pbte_cpu_reference.json` and `results/pbte_split_manifest.json` for
 complete machine-readable records and hashes.
@@ -292,7 +345,7 @@ changed translation units. Subsequent testing linked the full executable with
 `nvcc -O3 -arch=sm_80`, passed the sampled native GPU gate, and ran the controlled
 experiments below on an NVIDIA A100-PCIE-40GB.
 
-## Observed GPU results, 2026-10-14
+## Historical GPU results, 2026-10-14
 
 These experiments used 25 PbTe training configurations, 142 validation
 configurations, and 143 held-out test configurations after exact-coordinate
@@ -395,5 +448,6 @@ comparable held-out quality and stability before claiming acceleration.
 
 CPU tests require ordinary fully periodic potential models. Charge, temperature,
 dipole, polarizability, and nonperiodic oracle modes are rejected. The native
-experimental path inherits this branch's GNEP descriptor architecture (3-body),
-not the complete range of model modes supported by NEP inference.
+experimental path supports the standard NEP5 energy terms described above,
+subject to the stated `l_max` and capacity limits; it does not cover every NEP
+inference mode or guarantee MD compatibility at native GNEP's maximum sizes.

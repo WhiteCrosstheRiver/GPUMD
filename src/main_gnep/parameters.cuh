@@ -26,6 +26,7 @@ public:
   // Opt-in FCVP/consistent RMSE training (legacy Adam stays the default).
   int fcvp_interval = 0;
   int fcvp_iterations = 40;
+  int fcvp_memory_mib = 512;
   int seed = 1234567;
   bool loss_rmse = false;
   int fcvp_check = 0;
@@ -33,6 +34,9 @@ public:
   double fcvp_tolerance = 1e-8;
   double lambda_1 = 0.0;
   double lambda_2 = 0.0;
+
+  std::vector<int> output_parameter_indices() const;
+  std::vector<float> prediction_parameters;
 
   // parameters to be read in
   int batch_size;         // number of configurations in one batch
@@ -45,6 +49,9 @@ public:
   int n_max_radial;       // maximum order of the radial Chebyshev polynomials
   int n_max_angular;      // maximum order of the angular Chebyshev polynomials
   int L_max;              // maximum order of the 3body spherical harmonics
+  int L_max_4body = 0;
+  int L_max_5body = 0;
+  int num_L = 0;
   float rc_radial;        // radial cutoff distance
   float rc_angular;       // angular cutoff distance
   float weight_decay;     // Adam with decoupled weight decay (AdamW)
@@ -128,12 +135,15 @@ private:
   void set_default_parameters();
   void read_gmlp_in();
   void read_zbl_in();
+  void read_prediction_model();
+  void validate_zbl_parameters();
   void calculate_parameters();
   void report_inputs();
 
   void parse_one_keyword(std::vector<std::string>& tokens);
 
   void parse_fcvp(const char** param, int num_param);
+  void parse_fcvp_memory(const char** param, int num_param);
   void parse_fcvp_check(const char** param, int num_param);
   void parse_loss_rmse(const char** param, int num_param);
   void parse_regularization(const char** param, int num_param);

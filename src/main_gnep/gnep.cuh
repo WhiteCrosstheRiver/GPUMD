@@ -39,6 +39,7 @@ struct GNEP_Data {
   GPU_Vector<float> sum_s2xyz; // Snlm_xyz
   GPU_Vector<float> sum_s2xyz123; // Snlm_xyz * xyz
   GPU_Vector<float> parameters; // parameters to be optimized
+  GPU_Vector<float> zbl_parameters; // fixed flexible-ZBL coefficients on this device
 };
 
 class GNEP : public Potential
@@ -60,6 +61,9 @@ public:
     int n_max_radial = 0;  // n_radial = 0, 1, 2, ..., n_max_radial
     int n_max_angular = 0; // n_angular = 0, 1, 2, ..., n_max_angular
     int L_max = 0;         // l = 1, 2, ..., L_max
+    int L_max_4body = 0;
+    int L_max_5body = 0;
+    int num_L = 0;
     int dim_angular;
     int num_types = 0;
     int num_types_sq = 0;
@@ -86,7 +90,7 @@ public:
     float rc_inner = 1.0f;
     float rc_outer = 2.0f;
     int num_types;
-    float para[550];
+    const float* para = nullptr;
     int atomic_numbers[NUM_ELEMENTS];
   };
 

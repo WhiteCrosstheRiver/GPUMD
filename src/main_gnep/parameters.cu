@@ -38,7 +38,10 @@ Parameters::Parameters()
 
   set_default_parameters();
   read_gmlp_in();
-  if (is_zbl_set) {
+  if (!prediction && !is_type_set) {
+    PRINT_INPUT_ERROR("type in gnep.in has not been set.");
+  }
+  if (!prediction && is_zbl_set) {
     read_zbl_in();
   }
   if (fcvp_interval && weight_decay != 0.0f) {
@@ -55,7 +58,11 @@ Parameters::Parameters()
                   fcvp_epsilon > std::numeric_limits<float>::max())) {
     PRINT_INPUT_ERROR("RMSE epsilon must be in the positive normal float range.");
   }
-  calculate_parameters();
+  if (prediction) {
+    read_prediction_model();
+  } else {
+    calculate_parameters();
+  }
   report_inputs();
 
   print_line_1();
@@ -94,7 +101,7 @@ void Parameters::set_default_parameters()
   basis_size_angular = 8;      // large enough in most cases
   n_max_radial = 4;            // a relatively small value to achieve high speed
   n_max_angular = 4;           // a relatively small value to achieve high speed
-  L_max = 4;                   // the only supported value
+  L_max = 4;                   // preserve the legacy three-body default
   num_neurons1 = 30;           // a relatively small value to achieve high speed
   weight_decay = 0.0f;         // no weight decay by default (Adam). In general, 1e-6 ~ 1e-4 for AdamW
   lr = 1e-3f;                 
@@ -125,7 +132,6 @@ void Parameters::set_default_parameters()
   
 
   type_weight_cpu.resize(NUM_ELEMENTS);
-  zbl_para.resize(550); // Maximum number of zbl parameters
   for (int n = 0; n < NUM_ELEMENTS; ++n) {
     type_weight_cpu[n] = 1.0f; // uniform weight by default
   }
@@ -166,18 +172,24 @@ void Parameters::read_zbl_in()
     flexible_zbl = false;
   } else {
     flexible_zbl = true;
+    zbl_para.resize(10 * num_types * (num_types + 1) / 2);
     for (int n = 0; n < (num_types * (num_types + 1) / 2) * 10; ++n) {
       int count = fscanf(fid_zbl, "%f", &zbl_para[n]);
       PRINT_SCANF_ERROR(count, 1, "Reading error for zbl.in.");
     }
     fclose(fid_zbl);
+    validate_zbl_parameters();
   }
 }
 
 void Parameters::calculate_parameters()
 {
+  if (!is_type_set) {
+    PRINT_INPUT_ERROR("type in gnep.in has not been set.");
+  }
   dim_radial = n_max_radial + 1;             // 2-body descriptors q^i_n
-  dim_angular = (n_max_angular + 1) * L_max; // 3-body descriptors q^i_nl
+  num_L = L_max + (L_max_4body == 2) + (L_max_5body == 1);
+  dim_angular = (n_max_angular + 1) * num_L;
   dim = dim_radial + dim_angular;
   q_scaler_cpu.resize(dim, 1.0e10f);
 #ifdef USE_FIXED_SCALER
@@ -207,6 +219,156 @@ void Parameters::calculate_parameters()
     q_scaler_gpu[device_id].copy_from_host(q_scaler_cpu.data());
     energy_shift_gpu.resize(num_types, 0.0f);
   }
+}
+
+void Parameters::validate_zbl_parameters()
+{
+  for (const float value : zbl_para) {
+    if (!std::isfinite(value)) {
+      PRINT_INPUT_ERROR("ZBL parameters must be finite.");
+    }
+  }
+  for (size_t pair = 0; pair < zbl_para.size(); pair += 10) {
+    if (!(zbl_para[pair] >= 0 && zbl_para[pair + 1] > zbl_para[pair]) ||
+        zbl_para[pair + 1] > rc_radial) {
+      PRINT_INPUT_ERROR("ZBL requires 0 <= inner < outer <= radial cutoff for each pair.");
+    }
+  }
+}
+
+void Parameters::read_prediction_model()
+{
+  std::ifstream input("nep.txt");
+  if (!input.is_open()) {
+    PRINT_INPUT_ERROR("Failed to open nep.txt.");
+  }
+  auto tokens = get_tokens(input);
+  if (tokens.size() < 3 || (tokens[0] != "nep5" && tokens[0] != "nep5_zbl")) {
+    PRINT_INPUT_ERROR("GNEP prediction requires a NEP5 or NEP5_ZBL energy model.");
+  }
+  enable_zbl = is_zbl_set = tokens[0] == "nep5_zbl";
+  elements.clear();
+  atomic_numbers.clear();
+  tokens[0] = "type";
+  parse_one_keyword(tokens);
+
+  auto header = [&](const char* name, size_t minimum, size_t maximum) {
+    auto line = get_tokens(input);
+    if (line.size() < minimum || line.size() > maximum || line[0] != name) {
+      PRINT_INPUT_ERROR("Invalid or truncated nep.txt model header.");
+    }
+    return line;
+  };
+  auto real = [&](const std::string& token) {
+    double value = 0;
+    if (!is_valid_real(token.c_str(), &value) || !std::isfinite(value) ||
+        std::abs(value) > std::numeric_limits<float>::max()) {
+      PRINT_INPUT_ERROR("nep.txt requires finite FP32 model parameters.");
+    }
+    return float(value);
+  };
+  flexible_zbl = false;
+  if (enable_zbl) {
+    tokens = header("zbl", 3, 3);
+    zbl_rc_inner = real(tokens[1]);
+    zbl_rc_outer = real(tokens[2]);
+    flexible_zbl = zbl_rc_inner == 0 && zbl_rc_outer == 0;
+    if (!flexible_zbl && !(zbl_rc_inner >= 0 && zbl_rc_outer > zbl_rc_inner)) {
+      PRINT_INPUT_ERROR("Invalid universal ZBL cutoffs in nep.txt.");
+    }
+  }
+  tokens = header("cutoff", 5, 8);
+  if (tokens.size() != 5 && tokens.size() != 8) {
+    PRINT_INPUT_ERROR("Invalid cutoff header in nep.txt.");
+  }
+  rc_radial = real(tokens[1]);
+  rc_angular = real(tokens[2]);
+  for (int field = 3; field <= 4; ++field) {
+    int maximum_neighbors = 0;
+    if (!is_valid_int(tokens[field].c_str(), &maximum_neighbors) || maximum_neighbors < 0) {
+      PRINT_INPUT_ERROR("Invalid neighbor capacity in nep.txt cutoff header.");
+    }
+  }
+  if (!(rc_radial > 0 && rc_angular > 0 && rc_angular <= rc_radial)) {
+    PRINT_INPUT_ERROR("nep.txt requires 0 < angular cutoff <= radial cutoff.");
+  }
+  use_typewise_cutoff = use_typewise_cutoff_zbl = false;
+  typewise_cutoff_radial_factor = typewise_cutoff_angular_factor =
+    typewise_cutoff_zbl_factor = -1.0f;
+  if (tokens.size() == 8) {
+    typewise_cutoff_radial_factor = real(tokens[5]);
+    typewise_cutoff_angular_factor = real(tokens[6]);
+    typewise_cutoff_zbl_factor = real(tokens[7]);
+    if ((typewise_cutoff_radial_factor > 0) != (typewise_cutoff_angular_factor > 0)) {
+      PRINT_INPUT_ERROR("nep.txt typewise radial/angular factors must be enabled together.");
+    }
+    use_typewise_cutoff = typewise_cutoff_radial_factor > 0;
+    use_typewise_cutoff_zbl = typewise_cutoff_zbl_factor > 0;
+  }
+  tokens = header("n_max", 3, 3);
+  parse_one_keyword(tokens);
+  tokens = header("basis_size", 3, 3);
+  parse_one_keyword(tokens);
+  tokens = header("l_max", 4, 4);
+  parse_one_keyword(tokens);
+  tokens = header("ANN", 3, 3);
+  if (tokens[2] != "0") {
+    PRINT_INPUT_ERROR("GNEP supports one hidden layer in nep.txt.");
+  }
+  tokens[0] = "neuron";
+  tokens.resize(2);
+  parse_one_keyword(tokens);
+  calculate_parameters();
+  auto next_value = [&]() {
+    std::string token;
+    if (!(input >> token)) {
+      PRINT_INPUT_ERROR("Truncated nep.txt parameter/scaler/ZBL data.");
+    }
+    return real(token);
+  };
+  prediction_parameters.resize(number_of_variables);
+  for (int i = 0; i < number_of_variables_ann; ++i) {
+    prediction_parameters[i] = next_value();
+  }
+  // NEP5 has per-type biases plus a shared bias in its serialized format.
+  const float common_bias = next_value();
+  const int block = (dim + 2) * num_neurons1 + 1;
+  for (int t = 0; t < num_types; ++t) {
+    prediction_parameters[(t + 1) * block - 1] += common_bias;
+    if (!std::isfinite(prediction_parameters[(t + 1) * block - 1])) {
+      PRINT_INPUT_ERROR("nep.txt shared/per-type bias sum exceeds the FP32 range.");
+    }
+  }
+  for (int i = number_of_variables_ann; i < number_of_variables; ++i) {
+    prediction_parameters[i] = next_value();
+  }
+  for (float& scale : q_scaler_cpu) {
+    scale = next_value();
+    if (!(scale > 0)) {
+      PRINT_INPUT_ERROR("nep.txt descriptor scales must be positive.");
+    }
+  }
+  zbl_para.clear();
+  if (flexible_zbl) {
+    zbl_para.resize(10 * num_types * (num_types + 1) / 2);
+    for (float& value : zbl_para) {
+      value = next_value();
+    }
+    validate_zbl_parameters();
+  } else if (enable_zbl && zbl_rc_outer > rc_radial) {
+    PRINT_INPUT_ERROR("ZBL cutoff exceeds the radial neighbor cutoff.");
+  }
+  std::string extra;
+  if (input >> extra) {
+    PRINT_INPUT_ERROR("Unexpected trailing parameters in nep.txt.");
+  }
+  int device_count = 0;
+  CHECK(cudaGetDeviceCount(&device_count));
+  for (int device = 0; device < device_count; ++device) {
+    CHECK(cudaSetDevice(device));
+    q_scaler_gpu[device].copy_from_host(q_scaler_cpu.data());
+  }
+  CHECK(cudaSetDevice(0));
 }
 
 void Parameters::report_inputs()
@@ -315,6 +477,7 @@ void Parameters::report_inputs()
   } else {
     printf("    (default) l_max_3body = %d.\n", L_max);
   }
+  printf("              l_max_4body = %d; l_max_5body = %d.\n", L_max_4body, L_max_5body);
 
   if (is_neuron_set) {
     printf("    (input)   number of neurons = %d.\n", num_neurons1);
@@ -403,6 +566,17 @@ void Parameters::report_inputs()
   printf(
     "    number of descriptor parameters to be optimized = %d.\n", number_of_variables_descriptor);
   printf("    total number of parameters to be optimized = %d.\n", number_of_variables);
+  // GNEP has larger work arrays than the separate MD inference implementation.
+  if (basis_size_radial > 16 || basis_size_angular > 16 ||
+      (L_max > 0 && n_max_angular > 16) || dim_angular > 90 || dim > 103 ||
+      (flexible_zbl && num_types > 10)) {
+    printf("WARNING: This model exceeds the current GPUMD MD inference capacity.\n"
+           "         Native GNEP training/prediction is supported; GPUMD will reject this model.\n");
+  }
+  if (enable_zbl) {
+    printf("    MD compatibility: every effective ZBL cutoff must fit the MD angular neighbor list.\n"
+           "    GNEP uses a NEP/ZBL neighbor union; MD rejects unsupported cutoff coverage.\n");
+  }
 }
 
 void Parameters::parse_one_keyword(std::vector<std::string>& tokens)
@@ -414,6 +588,8 @@ void Parameters::parse_one_keyword(std::vector<std::string>& tokens)
   }
   if (strcmp(param[0], "fcvp") == 0) {
     parse_fcvp(param, num_param);
+  } else if (strcmp(param[0], "fcvp_memory") == 0) {
+    parse_fcvp_memory(param, num_param);
   } else if (strcmp(param[0], "fcvp_check") == 0) {
     parse_fcvp_check(param, num_param);
   } else if (strcmp(param[0], "loss_rmse") == 0) {
@@ -669,8 +845,8 @@ void Parameters::parse_l_max(const char** param, int num_param)
 {
   is_l_max_set = true;
 
-  if (num_param != 2) {
-    PRINT_INPUT_ERROR("l_max should only have 1 parameter for 3-body descriptors.\n");
+  if (num_param < 2 || num_param > 4) {
+    PRINT_INPUT_ERROR("l_max requires L3 [L4 [L5]].\n");
   }
   if (!is_valid_int(param[1], &L_max)) {
     PRINT_INPUT_ERROR("l_max for 3-body descriptors should be an integer.\n");
@@ -681,6 +857,38 @@ void Parameters::parse_l_max(const char** param, int num_param)
   if (L_max > 8) {
     PRINT_INPUT_ERROR("l_max for 3-body descriptors should <= 8.");
   }
+  L_max_4body = L_max_5body = 0;
+  if (num_param >= 3 && !is_valid_int(param[2], &L_max_4body)) {
+    PRINT_INPUT_ERROR("l_max for 4-body descriptors should be an integer.");
+  }
+  if (num_param == 4 && !is_valid_int(param[3], &L_max_5body)) {
+    PRINT_INPUT_ERROR("l_max for 5-body descriptors should be an integer.");
+  }
+  if ((L_max_4body != 0 && L_max_4body != 2) || L_max_4body > L_max) {
+    PRINT_INPUT_ERROR("l_max_4body must be 0 or 2 and not exceed l_max_3body.");
+  }
+  if ((L_max_5body != 0 && L_max_5body != 1) || (L_max_5body && !L_max_4body)) {
+    PRINT_INPUT_ERROR("l_max_5body must be 0 or 1; 1 requires l_max_4body = 2.");
+  }
+}
+
+void Parameters::parse_fcvp_memory(const char** param, int num_param)
+{
+  if (num_param != 2 || !is_valid_int(param[1], &fcvp_memory_mib) || fcvp_memory_mib < 1) {
+    PRINT_INPUT_ERROR("fcvp_memory requires a positive integer number of MiB per GPU.");
+  }
+}
+
+std::vector<int> Parameters::output_parameter_indices() const
+{
+  std::vector<int> result;
+  const int block = (dim + 2) * num_neurons1 + 1;
+  for (int t = 0; t < num_types; ++t) {
+    for (int j = 0; j <= num_neurons1; ++j) {
+      result.push_back(t * block + (dim + 1) * num_neurons1 + j);
+    }
+  }
+  return result;
 }
 
 void Parameters::parse_neuron(const char** param, int num_param)
@@ -716,8 +924,8 @@ void Parameters::parse_fcvp(const char** param, int num_param)
 
 void Parameters::parse_fcvp_check(const char** param, int num_param)
 {
-  if (num_param != 2 || !is_valid_int(param[1], &fcvp_check) || fcvp_check != 1) {
-    PRINT_INPUT_ERROR("fcvp_check requires 1.");
+  if (num_param != 2 || !is_valid_int(param[1], &fcvp_check) || fcvp_check < 1 || fcvp_check > 2) {
+    PRINT_INPUT_ERROR("fcvp_check requires 1 (sampled) or 2 (all parameters).");
   }
   loss_rmse = true;
 }

@@ -31,12 +31,14 @@ heat transport, Phys. Rev. B. 104, 104309 (2021).
 #include "utilities/common.cuh"
 #include "utilities/error.cuh"
 #include "utilities/gnep_utilities.cuh"
+#include "higher_body.cuh"
 #include "utilities/gpu_vector.cuh"
 #include <cmath>
 #include <cstdint>
 
 static __global__ void gpu_find_neighbor_list(
   const GNEP::ParaMB paramb,
+  const GNEP::ZBL zbl,
   const int N,
   const int* Na,
   const int* Na_sum,
@@ -100,6 +102,21 @@ static __global__ void gpu_find_neighbor_list(
               rc_angular = min(
                 (COVALENT_RADIUS[z1] + COVALENT_RADIUS[z2]) * paramb.typewise_cutoff_angular_factor,
                 rc_angular);
+            }
+            // The radial list covers both the NEP and fixed ZBL pair cutoffs.
+            if (zbl.enabled) {
+              float rc_zbl = zbl.rc_outer;
+              if (zbl.flexibled) {
+                const int lower = min(t1, t2);
+                const int upper = max(t1, t2);
+                const int pair = lower * zbl.num_types - lower * (lower - 1) / 2 + upper - lower;
+                rc_zbl = zbl.para[10 * pair + 1];
+              } else if (paramb.use_typewise_cutoff_zbl) {
+                rc_zbl = min(rc_zbl,
+                  (COVALENT_RADIUS[paramb.atomic_numbers[t1]] +
+                   COVALENT_RADIUS[paramb.atomic_numbers[t2]]) * paramb.typewise_cutoff_zbl_factor);
+              }
+              rc_radial = max(rc_radial, rc_zbl);
             }
             if (distance_square < rc_radial * rc_radial) {
               NL_radial[count_radial * N + n1] = n2;
@@ -231,13 +248,14 @@ static __global__ void find_descriptors_angular(
         accumulate_s(paramb.L_max, d12, x12, y12, z12, gn12, s);
       }
       find_q(paramb.L_max, paramb.n_max_angular + 1, n, s, q);
+      gnep_higher_body::values(paramb, n, s, q);
       for (int abc = 0; abc < NUM_OF_ABC; ++abc) {
         g_sum_fxyz[(n * NUM_OF_ABC + abc) * N + n1] = s[abc];
       }
     }
 
     for (int n = 0; n <= paramb.n_max_angular; ++n) {
-      for (int l = 0; l < paramb.L_max; ++l) {
+      for (int l = 0; l < paramb.num_L; ++l) {
         int ln = l * (paramb.n_max_angular + 1) + n;
         g_descriptors[n1 + ((paramb.n_max_radial + 1) + ln) * N] = q[ln];
       }
@@ -266,6 +284,9 @@ GNEP::GNEP(
   paramb.n_max_radial = para.n_max_radial;
   paramb.n_max_angular = para.n_max_angular;
   paramb.L_max = para.L_max;
+  paramb.L_max_4body = para.L_max_4body;
+  paramb.L_max_5body = para.L_max_5body;
+  paramb.num_L = para.num_L;
   paramb.N_times_max_NN_radial = N_times_max_NN_radial;
   paramb.N_times_max_NN_angular = N_times_max_NN_angular;
   paramb.dim_angular = para.dim_angular;
@@ -286,10 +307,6 @@ GNEP::GNEP(
   }
   if (zbl.flexibled) {
     zbl.num_types = para.num_types;
-    int num_type_zbl = (para.num_types * (para.num_types + 1)) / 2;
-    for (int n = 0; n < num_type_zbl * 10; ++n) {
-      zbl.para[n] = para.zbl_para[n];
-    }
   }
 
   for (int device_id = 0; device_id < deviceCount; device_id++) {
@@ -313,6 +330,11 @@ GNEP::GNEP(
     gnep_data[device_id].Fp.resize(N * annmb[device_id].dim);
     gnep_data[device_id].sum_fxyz.resize(N * (paramb.n_max_angular + 1) * NUM_OF_ABC);
     gnep_data[device_id].parameters.resize(annmb[device_id].num_para);
+    if (zbl.flexibled) {
+      const int num_type_zbl = para.num_types * (para.num_types + 1) / 2;
+      gnep_data[device_id].zbl_parameters.resize(num_type_zbl * 10);
+      gnep_data[device_id].zbl_parameters.copy_from_host(para.zbl_para.data());
+    }
   }
 }
 
@@ -893,7 +915,7 @@ static __global__ void compute_grad_radial_NM(
           for (int ka = 0; ka <= paramb.basis_size_angular; ++ka) {
             float f_c_n1[3] = {0.0f};
             float v_c_n1[6] = {0.0f};
-            for (int l = 0; l < paramb.L_max; ++l) {
+            for (int l = 0; l < paramb.num_L; ++l) {
               float feat_xyz_sum[3] = {0.0f};
               float feat_123_sum[6] = {0.0f};
               ln = l * (paramb.n_max_angular + 1) + na;
@@ -913,7 +935,7 @@ static __global__ void compute_grad_radial_NM(
                 feat_123_sum[4] += feat_z_ma * r12[1] * E2;
                 feat_123_sum[5] += feat_x_ma * r12[2] * E2;
               }
-              accumulate_qc(N, l + 1, na, paramb.n_max_angular + 1, paramb.basis_size_angular+1, d12, r12_tmp, fn12[ka], &g_sum_fxyz[n1], &q_c_ang);
+              gnep_higher_body::qc(paramb, N, l, na, d12, r12_tmp, fn12[ka], &g_sum_fxyz[n1], &q_c_ang);
               q_c_scaler_ang = q_c_ang * g_q_scaler[paramb.n_max_radial + 1 + ln];
               f_c_n1[0] += feat_xyz_sum[0] * q_c_scaler_ang;
               f_c_n1[1] += feat_xyz_sum[1] * q_c_scaler_ang;
@@ -1071,6 +1093,7 @@ static __global__ void compute_grad_angular_NM(
   const float* __restrict__ g_ep_wb,
   float* g_grad_sum)
 {
+  if (paramb.dim_angular == 0) return;
   int Idx = work_begin + threadIdx.x + blockIdx.x * blockDim.x;
   const int w0_index = annmb.dim * annmb.num_neurons1;
   const int b0_index = w0_index + annmb.num_neurons1;
@@ -1191,6 +1214,8 @@ static __global__ void compute_grad_angular_NM(
       gn12[n] += fn12[k] * annmb.c[c_index];
       gnp12[n] += fnp12[k] * annmb.c[c_index];
       accumulate_ec(N, paramb.L_max, n, paramb.n_max_angular + 1, paramb.basis_size_angular+1, d12_i1, r12_i1, fn12[k], fnp12[k], &g_sum_fxyz[n1], &g_sum_s2xyz[n1], &g_sum_s2xyz123[n1], Fp, &e_c, qp_c_tmp, qp_c_tmp123);
+      e_c += gnep_higher_body::energy_derivative(
+        paramb, N, n, d12_i1, r12_i1, fn12[k], &g_sum_fxyz[n1], Fp);
       grad_c_index = c_index + annmb.num_ann;
       grad_c_sum = per_Nc * (qp_c_tmp[0] * dx_n1 + qp_c_tmp[1] * dy_n1 + qp_c_tmp[2] * dz_n1);
       grad_c_sum += per_Nc_e * e_c;
@@ -1198,6 +1223,9 @@ static __global__ void compute_grad_angular_NM(
       atomicAdd(&g_grad_sum[grad_c_index], grad_c_sum);
     }
     accumulate_dfe(N, NM, paramb.L_max, n, paramb.n_max_angular + 1, d12_i1, r12_i1, gn12[n], gnp12[n], &g_sum_fxyz[n1], &feat_x[n], &feat_y[n], &feat_z[n]);
+    gnep_higher_body::feature_derivatives(
+      paramb, N, n, d12_i1, r12_i1, gn12[n], gnp12[n], &g_sum_fxyz[n1],
+      &feat_x[n], &feat_y[n], &feat_z[n]);
   } // end of loop over n_max_ang
   float r12[3] = {0.0f};
   float d12 = 0.0f;
@@ -1243,7 +1271,7 @@ static __global__ void compute_grad_angular_NM(
       for (int k = 0; k <= paramb.basis_size_angular; ++k) {
         float f_c_n1[3] = {0.0f};
         float v_c_n1[6] = {0.0f};
-        for (int l = 0; l < paramb.L_max; ++l) {
+        for (int l = 0; l < paramb.num_L; ++l) {
           float feat_xyz_sum[3] = {0.0f};
           float feat_123_sum[6] = {0.0f};
           ln = l * (paramb.n_max_angular + 1) + n;
@@ -1263,7 +1291,7 @@ static __global__ void compute_grad_angular_NM(
             feat_123_sum[4] += feat_z_m * r12_i1[1] * E2;
             feat_123_sum[5] += feat_x_m * r12_i1[2] * E2;
           }
-          accumulate_qc(N, l + 1, n, paramb.n_max_angular + 1, paramb.basis_size_angular+1, d12, r12, fn12[k], &g_sum_fxyz[n1], &q_c_ang);
+          gnep_higher_body::qc(paramb, N, l, n, d12, r12, fn12[k], &g_sum_fxyz[n1], &q_c_ang);
           q_c_scaler = q_c_ang * g_q_scaler[paramb.n_max_radial + 1 + ln];
           f_c_n1[0] += feat_xyz_sum[0] * q_c_scaler;
           f_c_n1[1] += feat_xyz_sum[1] * q_c_scaler;
@@ -1279,6 +1307,18 @@ static __global__ void compute_grad_angular_NM(
         grad_c_sum = f_c_n1[0] * dx_diff + f_c_n1[1] * dy_diff + f_c_n1[2] * dz_diff;
         grad_c_sum -= per_Nc * (qp_c_tmp1[0] * dx_n2_tmp + qp_c_tmp1[1] * dy_n2_tmp + qp_c_tmp1[2] * dz_n2_tmp + qp_c_tmp2[0] * dx_n2 + qp_c_tmp2[1] * dy_n2 + qp_c_tmp2[2] * dz_n2);
         grad_c_sum -= v_c_n1[0] * diff[0] + v_c_n1[1] * diff[1] + v_c_n1[2] * diff[2] + v_c_n1[3] * diff[3] + v_c_n1[4] * diff[4] + v_c_n1[5] * diff[5];
+
+        float higher_mixed[3];
+        gnep_higher_body::mixed_derivative(
+          paramb, N, n, d12_i1, r12_i1, gn12[n], gnp12[n], d12, r12,
+          fn12[k], fnp12[k], i1 == j, &g_sum_fxyz[n1], Fp, higher_mixed);
+        grad_c_sum += higher_mixed[0] * dx_diff + higher_mixed[1] * dy_diff + higher_mixed[2] * dz_diff;
+        grad_c_sum -= higher_mixed[0] * r12_i1[0] * diff[0] +
+                      higher_mixed[1] * r12_i1[1] * diff[1] +
+                      higher_mixed[2] * r12_i1[2] * diff[2] +
+                      higher_mixed[1] * r12_i1[0] * diff[3] +
+                      higher_mixed[2] * r12_i1[1] * diff[4] +
+                      higher_mixed[0] * r12_i1[2] * diff[5];
 
         type_base = t1 * paramb.num_types + t2_tmp + paramb.num_c_radial;
         c_index = (n_base + k) * paramb.num_types_sq + type_base;
@@ -1573,6 +1613,8 @@ static __global__ void find_force_angular(
           gnp12 += fnp12[k] * annmb.c[c_index];
         }          
         accumulate_f12(N, requires_grad, paramb.L_max, n, paramb.n_max_angular + 1, d12, r12, gn12, gnp12, Fp, &g_sum_fxyz[n1], &g_sum_s2xyz[n1], &g_sum_s2xyz123[n1], f12);
+        gnep_higher_body::force(
+          paramb, N, n, d12, r12, gn12, gnp12, &g_sum_fxyz[n1], Fp, f12);
       } // end of loop over n_max_ang
 
       atomicAdd(&g_fx[n1], f12[0]);
@@ -1716,10 +1758,13 @@ void GNEP::find_force(
     auto& local_gradients = device_id == 0 ? gradients : device_gradients[device_id - 1];
     const int block_size = 32;
     const int grid_size = (dataset[device_id].N - 1) / block_size + 1;
+    ZBL device_zbl = zbl;
+    device_zbl.para = gnep_data[device_id].zbl_parameters.data();
 
     if (calculate_neighbor) {
       gpu_find_neighbor_list<<<dataset[device_id].Nc, 256>>>(
         paramb,
+        device_zbl,
         dataset[device_id].N,
         dataset[device_id].Na.data(),
         dataset[device_id].Na_sum.data(),
@@ -1894,13 +1939,13 @@ void GNEP::find_force(
       find_force_ZBL<<<grid_size, block_size>>>(
         dataset[device_id].N,
         paramb,
-        zbl,
-        gnep_data[device_id].NN_angular.data(),
-        gnep_data[device_id].NL_angular.data(),
+        device_zbl,
+        gnep_data[device_id].NN_radial.data(),
+        gnep_data[device_id].NL_radial.data(),
         dataset[device_id].type.data(),
-        gnep_data[device_id].x12_angular.data(),
-        gnep_data[device_id].y12_angular.data(),
-        gnep_data[device_id].z12_angular.data(),
+        gnep_data[device_id].x12_radial.data(),
+        gnep_data[device_id].y12_radial.data(),
+        gnep_data[device_id].z12_radial.data(),
         dataset[device_id].force.data(),
         dataset[device_id].force.data() + dataset[device_id].N,
         dataset[device_id].force.data() + dataset[device_id].N * 2,

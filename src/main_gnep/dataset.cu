@@ -219,6 +219,7 @@ static __global__ void gpu_find_neighbor_number(
   const int* Na,
   const int* Na_sum,
   const bool use_typewise_cutoff,
+  const bool include_zbl,
   const float typewise_cutoff_radial_factor,
   const float typewise_cutoff_angular_factor,
   const int* g_type,
@@ -270,6 +271,10 @@ static __global__ void gpu_find_neighbor_number(
               rc_radial = min((COVALENT_RADIUS[z1] + COVALENT_RADIUS[z2]) * typewise_cutoff_radial_factor, rc_radial);
               rc_angular = min((COVALENT_RADIUS[z1] + COVALENT_RADIUS[z2]) * typewise_cutoff_angular_factor, rc_angular);
             }
+            // Allocate a conservative capacity for the NEP/ZBL union list.
+            if (include_zbl) {
+              rc_radial = g_rc_radial;
+            }
             if (distance_square < rc_radial * rc_radial) {
               count_radial++;
             }
@@ -304,6 +309,7 @@ void Dataset::find_neighbor(Parameters& para)
     Na.data(),
     Na_sum.data(),
     para.use_typewise_cutoff,
+    para.enable_zbl,
     para.typewise_cutoff_radial_factor,
     para.typewise_cutoff_angular_factor,
     type.data(),
