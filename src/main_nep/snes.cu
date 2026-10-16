@@ -32,6 +32,7 @@ https://doi.org/10.1145/2001576.2001692
 #include <cmath>
 #include <iostream>
 #include <cstring>
+#include <cstdlib>
 
 static __global__ void initialize_curand_states(gpurandState* state, int N, int seed)
 {
@@ -85,6 +86,32 @@ SNES::SNES(Parameters& para, Fitness* fitness_function)
   
   calculate_utility();
   find_type_of_variable(para);
+  const char* experimental_optimizer = std::getenv("GPUMD_EXPERIMENT_OPTIMIZER");
+  if (experimental_optimizer && std::strcmp(experimental_optimizer, "snes") != 0) {
+    if (std::strcmp(experimental_optimizer, "lmma") != 0)
+      PRINT_INPUT_ERROR("Unknown GPUMD_EXPERIMENT_OPTIMIZER.");
+    if (para.prediction || para.version != 4 || para.train_mode != 0 ||
+        para.charge_mode || para.fine_tune)
+      PRINT_INPUT_ERROR("Experimental LM-MA-ES trial requires ordinary NEP4 training.");
+    for (int i = 0; i < number_of_variables; ++i) {
+      if (!std::isfinite(mu[i]) || !std::isfinite(sigma[i]) || sigma[i] <= 0 ||
+          std::abs(sigma[i] - sigma[0]) > 1e-12)
+        PRINT_INPUT_ERROR("Experimental LM-MA-ES requires finite mean and isotropic initial sigma.");
+    }
+    unsigned long long trial_seed = 0;
+    try {
+      trial_seed = ExperimentalLMMA::parse_seed(std::getenv("GPUMD_EXPERIMENT_SEED"));
+    } catch (const std::invalid_argument& error) {
+      PRINT_INPUT_ERROR(error.what());
+    }
+    experimental_lmma.reset(new ExperimentalLMMA(mu, sigma[0], population_size, trial_seed));
+    // LMMA bypasses the native SNES update that normally uploads this map.
+    gpuSetDevice(0);
+    gpu_type_of_variable.copy_from_host(type_of_variable.data());
+    printf("Experimental LM-MA-ES: global ranking; population=%d dimension=%d seed=%llu\n",
+           population_size, number_of_variables, trial_seed);
+    printf("LM-MA-ES states use *.lmma checkpoints; nep.restart remains the initial input.\n");
+  }
   compute(para, fitness_function);
 }
 
@@ -337,6 +364,11 @@ void SNES::compute(Parameters& para, Fitness* fitness_function)
 
   if (para.prediction == 0) {
     for (int n = 0; n < maximum_generation; ++n) {
+      if (experimental_lmma && n == 0) {
+        // Native generation zero calibrates descriptors; it returns no fitness.
+        fitness_function->compute(n, para, population.data(), fitness.data());
+        continue;
+      }
       create_population(para);
       fitness_function->compute(n, para, population.data(), fitness.data());
 
@@ -346,6 +378,10 @@ void SNES::compute(Parameters& para, Fitness* fitness_function)
         regularize(para);
       }
 
+      if (experimental_lmma && !ExperimentalLMMA::finite_fitness(
+            fitness.data() + 7 * para.num_types * population_size, population_size)) {
+        PRINT_INPUT_ERROR("Experimental LM-MA-ES encountered non-finite global fitness.");
+      }
       sort_population(para);
 
       int best_index = index[para.num_types * population_size];
@@ -432,6 +468,12 @@ static __global__ void gpu_create_population(
 
 void SNES::create_population(Parameters& para)
 {
+  if (experimental_lmma) {
+    population = experimental_lmma->ask();
+    gpuSetDevice(0);
+    gpu_population.copy_from_host(population.data());
+    return;
+  }
   gpuSetDevice(0); // normally use GPU-0
   const int N = population_size * number_of_variables;
   gpu_create_population<<<(N - 1) / 128 + 1, 128>>>(
@@ -638,6 +680,10 @@ static __global__ void gpu_update_mu_and_sigma(
 
 void SNES::update_mu_and_sigma(Parameters& para)
 {
+  if (experimental_lmma) {
+    experimental_lmma->tell(index.data() + para.num_types * population_size);
+    return;
+  }
   gpuSetDevice(0); // normally use GPU-0
   gpu_type_of_variable.copy_from_host(type_of_variable.data());
   gpu_index.copy_from_host(index.data());
@@ -658,6 +704,10 @@ void SNES::update_mu_and_sigma(Parameters& para)
 
 void SNES::output_mu_and_sigma(Parameters& para, const char* filename)
 {
+  if (experimental_lmma) {
+    experimental_lmma->write_checkpoint((std::string(filename) + ".lmma").c_str());
+    return;
+  }
   gpuSetDevice(0); // normally use GPU-0
   gpu_mu.copy_to_host(mu.data());
   gpu_sigma.copy_to_host(sigma.data());

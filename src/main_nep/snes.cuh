@@ -23,7 +23,8 @@
 #endif
 #include <random>
 #include <vector>
-class Fitness;
+#include <memory>
+#include "experimental_lmma.cuh"
 class Fitness;
 
 class SNES
@@ -32,6 +33,7 @@ public:
   SNES(Parameters&, Fitness*);
 
 protected:
+  std::unique_ptr<ExperimentalLMMA> experimental_lmma;
   std::mt19937 rng;
   int maximum_generation = 10000;
   int number_of_variables = 10;
