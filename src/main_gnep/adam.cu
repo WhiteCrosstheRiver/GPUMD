@@ -344,4 +344,7 @@ void Adam::output_parameters(Parameters& para) {
   fclose(fid);
 }
 
-float* Adam::get_parameters() { return parameters.data(); }
+float* Adam::get_parameters()
+{
+  return parameters.data();
+}

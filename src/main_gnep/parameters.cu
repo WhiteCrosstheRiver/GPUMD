@@ -380,9 +380,10 @@ void Parameters::report_inputs()
   printf("Input or default parameters:\n");
   printf("    seed = %d; loss_rmse = %d; fcvp interval = %d\n", seed, loss_rmse, fcvp_interval);
   printf("    gradient temporary memory = %d MiB per GPU\n", gradient_memory_mib);
-  if (loss_rmse)
+  if (loss_rmse) {
     printf(
       "    RMSE epsilon = %g; lambda_1 = %g; lambda_2 = %g\n", fcvp_epsilon, lambda_1, lambda_2);
+  }
 
   std::string train_mode_name = "potential";
   printf("model_type = %s.\n", train_mode_name.c_str());

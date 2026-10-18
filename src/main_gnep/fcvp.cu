@@ -1,4 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
+
+/*----------------------------------------------------------------------------80
+Output-layer projection using native energy, force, and virial basis columns.
+Device shards accumulate tiled Gram matrices for the host MM solver.
+------------------------------------------------------------------------------*/
+
 #include "dataset.cuh"
 #include "fcvp.cuh"
 #include "fcvp_solver.cuh"
@@ -20,21 +26,44 @@ namespace
 {
 void check_blas(cublasStatus_t status)
 {
-  if (status != CUBLAS_STATUS_SUCCESS)
+  if (status != CUBLAS_STATUS_SUCCESS) {
     PRINT_INPUT_ERROR("FCVP cuBLAS operation failed.");
+  }
 }
+
 struct Blas {
   cublasHandle_t handle;
-  Blas() { check_blas(cublasCreate(&handle)); }
-  ~Blas() { cublasDestroy(handle); }
+  Blas()
+  {
+    check_blas(cublasCreate(&handle));
+  }
+  ~Blas()
+  {
+    cublasDestroy(handle);
+  }
 };
+
 struct Shard_Basis {
-  int device, rows, tile_rows, columns;
-  GPU_Vector<double> matrix, reconstructed, device_beta, h[3], g[3], yy, dot;
+  int device;
+  int rows;
+  int tile_rows;
+  int columns;
+  GPU_Vector<double> matrix;
+  GPU_Vector<double> reconstructed;
+  GPU_Vector<double> device_beta;
+  GPU_Vector<double> h[3];
+  GPU_Vector<double> g[3];
+  GPU_Vector<double> yy;
+  GPU_Vector<double> dot;
   Blas blas;
   Shard_Basis(int device_id, int row_count, int capacity, int columns, bool check)
-    : device(device_id), rows(row_count), tile_rows(capacity), columns(columns),
-      matrix(size_t(capacity) * (columns + 1)), yy(3, 0.0), dot(1)
+    : device(device_id),
+      rows(row_count),
+      tile_rows(capacity),
+      columns(columns),
+      matrix(size_t(capacity) * (columns + 1)),
+      yy(3, 0.0),
+      dot(1)
   {
     if (check) {
       reconstructed.resize(capacity);
@@ -45,8 +74,12 @@ struct Shard_Basis {
       g[k].resize(columns, 0.0);
     }
   }
-  ~Shard_Basis() { CHECK(cudaSetDevice(device)); }
+  ~Shard_Basis()
+  {
+    CHECK(cudaSetDevice(device));
+  }
 };
+
 // Column-major row tile with E, F, V physical row coordinates.
 static __global__ void pack_column(
   int N,
@@ -72,38 +105,50 @@ static __global__ void pack_column(
   double* out)
 {
   const int local_row = blockIdx.x * blockDim.x + threadIdx.x;
-  if (local_row >= row_count)
+  if (local_row >= row_count) {
     return;
+  }
   const int row = row_start + local_row;
-  double value = 0, weight = 1;
+  double value = 0;
+  double weight = 1;
   if (row < Nc) {
-    for (int i = start[row]; i < start[row] + na[row]; ++i)
+    for (int i = start[row]; i < start[row] + na[row]; ++i) {
       value += energy[i];
+    }
     value /= na[row];
-    if (target)
+    if (target) {
       value = energy_ref[row] - value;
+    }
     weight = weights[row];
   } else if (row < Nc + 3 * N) {
-    const int f = row - Nc, i = f % N;
+    const int f = row - Nc;
+    const int i = f % N;
     value = target ? force_ref[f] - double(force[f]) : force[f];
     weight = double(weights[batch[i]]) * type_weights[types[i]];
     if (force_delta > 0) {
-      double x = force_ref[i], y = force_ref[N + i], z = force_ref[2 * N + i];
+      double x = force_ref[i];
+      double y = force_ref[N + i];
+      double z = force_ref[2 * N + i];
       weight *= sqrt(force_delta / (force_delta + sqrt(x * x + y * y + z * z)));
     }
   } else {
-    const int v = row - Nc - 3 * N, c = v % Nc, d = v / Nc;
+    const int v = row - Nc - 3 * N;
+    const int c = v % Nc;
+    const int d = v / Nc;
     if (has_virial[c]) {
-      for (int i = start[c]; i < start[c] + na[c]; ++i)
+      for (int i = start[c]; i < start[c] + na[c]; ++i) {
         value += virial[d * N + i];
+      }
       value /= na[c];
-      if (target)
+      if (target) {
         value = virial_ref[d * Nc + c] - value;
+      }
       weight = double(weights[c]) * (d >= 3 ? shear : 1.0f);
     }
   }
   out[local_row] = value * weight;
 }
+
 void pack(Parameters& p, Dataset& d, int row_start, int row_count, bool target, double* output)
 {
   pack_column<<<(row_count - 1) / 256 + 1, 256>>>(
@@ -141,7 +186,8 @@ void check_reconstruction(
 {
   const double* target = shard.matrix.data() + size_t(shard.tile_rows) * shard.columns;
   shard.reconstructed.copy_from_device(target, length);
-  const double minus_one = -1, one = 1;
+  const double minus_one = -1;
+  const double one = 1;
   check_blas(cublasDgemv(
     shard.blas.handle,
     CUBLAS_OP_N,
@@ -158,8 +204,9 @@ void check_reconstruction(
   shard.reconstructed.copy_to_host(actual.data(), length);
   for (int i = 0; i < length; ++i) {
     const double reference = expected[row + i];
-    if (!std::isfinite(actual[i]) || !std::isfinite(reference))
+    if (!std::isfinite(actual[i]) || !std::isfinite(reference)) {
       PRINT_INPUT_ERROR("FCVP nonfinite basis reconstruction.");
+    }
     worst = std::max(worst, std::abs(actual[i] - reference) / (1 + std::abs(reference)));
   }
 }
@@ -170,9 +217,11 @@ double native_objective(Parameters& p, std::vector<Dataset>& dataset, const floa
   double eps2 = p.fcvp_epsilon * p.fcvp_epsilon;
   double value =
     p.lambda_e * std::sqrt(mse.energy + eps2) + p.lambda_f * std::sqrt(mse.force + eps2);
-  if (mse.virial_configurations)
+  if (mse.virial_configurations) {
     value += p.lambda_v * std::sqrt(mse.virial + eps2);
-  double l1 = 0, l2 = 0;
+  }
+  double l1 = 0;
+  double l2 = 0;
   for (int i = 0; i < p.number_of_variables; ++i) {
     l1 += std::abs(parameters[i]);
     l2 += double(parameters[i]) * parameters[i];
@@ -180,6 +229,7 @@ double native_objective(Parameters& p, std::vector<Dataset>& dataset, const floa
   return value + p.lambda_1 * l1 / p.number_of_variables +
          p.lambda_2 * std::sqrt(l2 / p.number_of_variables + eps2);
 }
+
 } // namespace
 
 void fcvp_project(
@@ -188,45 +238,50 @@ void fcvp_project(
   CHECK(cudaSetDevice(0));
   auto start_time = std::chrono::steady_clock::now();
   const std::vector<int> indices = para.output_parameter_indices();
-  if (indices.empty() || indices.size() > size_t(std::numeric_limits<int>::max()))
+  if (indices.empty() || indices.size() > size_t(std::numeric_limits<int>::max())) {
     PRINT_INPUT_ERROR("FCVP output parameter count is invalid.");
+  }
   const int p = int(indices.size());
-  if (p > std::numeric_limits<int>::max() / p)
+  if (p > std::numeric_limits<int>::max() / p) {
     PRINT_INPUT_ERROR("FCVP Gram dimension exceeds the solver's 32-bit indexing range.");
+  }
   const int devices = dataset.size();
   uint64_t counts[3] = {0, 0, 0};
   size_t entries = 0;
-  if (para.fcvp_memory_mib <= 0 ||
-      uint64_t(para.fcvp_memory_mib) > std::numeric_limits<size_t>::max() / (1024 * 1024))
+  if (
+    para.fcvp_memory_mib <= 0 ||
+    uint64_t(para.fcvp_memory_mib) > std::numeric_limits<size_t>::max() / (1024 * 1024)) {
     PRINT_INPUT_ERROR("FCVP memory budget must be a positive number of MiB.");
-  const size_t budget_elements =
-    size_t(para.fcvp_memory_mib) * 1024 * 1024 / sizeof(double);
+  }
+  const size_t budget_elements = size_t(para.fcvp_memory_mib) * 1024 * 1024 / sizeof(double);
   const size_t columns = size_t(p);
-  const size_t fixed_elements = 3 * columns * columns + 3 * columns + 4 +
-                                (step == 0 ? columns : 0);
+  const size_t fixed_elements = 3 * columns * columns + 3 * columns + 4 + (step == 0 ? columns : 0);
   const size_t elements_per_row = columns + 1 + (step == 0 ? 1 : 0);
-  if (fixed_elements >= budget_elements ||
-      budget_elements - fixed_elements < elements_per_row)
-    PRINT_INPUT_ERROR(
-      "FCVP memory budget cannot hold its three Grams and one basis row; increase "
-      "fcvp_memory or reduce output parameters.");
+  if (fixed_elements >= budget_elements || budget_elements - fixed_elements < elements_per_row) {
+    PRINT_INPUT_ERROR("FCVP memory budget cannot hold its three Grams and one basis row; increase "
+                      "fcvp_memory or reduce output parameters.");
+  }
   std::vector<std::unique_ptr<Shard_Basis>> shards;
   std::vector<std::vector<double>> original_residuals;
-  if (step == 0)
+  if (step == 0) {
     original_residuals.resize(devices);
+  }
   for (int device = 0; device < devices; ++device) {
     const auto& data = dataset[device];
     const int64_t physical_rows = int64_t(7) * data.Nc + int64_t(3) * data.N;
-    if (physical_rows <= 0 || physical_rows > std::numeric_limits<int>::max() ||
-        int64_t(3) * data.N > std::numeric_limits<int>::max())
+    if (
+      physical_rows <= 0 || physical_rows > std::numeric_limits<int>::max() ||
+      int64_t(3) * data.N > std::numeric_limits<int>::max()) {
       PRINT_INPUT_ERROR("FCVP batch row count exceeds cuBLAS limits.");
+    }
     const int rows = int(physical_rows);
-    const int capacity = int(std::min(
-      size_t(rows), (budget_elements - fixed_elements) / elements_per_row));
+    const int capacity =
+      int(std::min(size_t(rows), (budget_elements - fixed_elements) / elements_per_row));
     CHECK(cudaSetDevice(device));
     shards.emplace_back(new Shard_Basis(device, rows, capacity, p, step == 0));
-    if (step == 0)
+    if (step == 0) {
       original_residuals[device].resize(rows);
+    }
     entries += size_t(capacity) * (p + 1);
     counts[0] += data.Nc;
     counts[1] += uint64_t(3) * data.N;
@@ -303,29 +358,26 @@ void fcvp_project(
     auto& shard = *shards[device];
     const int offsets[3] = {0, data.Nc, data.Nc + 3 * data.N};
     const int lengths[3] = {data.Nc, 3 * data.N, 6 * data.Nc};
-    if (step == 0)
+    if (step == 0) {
       shard.device_beta.copy_from_host(beta.data());
+    }
     double* target = shard.matrix.data() + size_t(shard.tile_rows) * p;
     std::vector<double> actual;
-    if (step == 0)
+    if (step == 0) {
       actual.resize(shard.tile_rows);
+    }
     for (int row = 0; row < shard.rows; row += shard.tile_rows) {
       const int length = std::min(shard.tile_rows, shard.rows - row);
-      if (shard.tile_rows != shard.rows)
+      if (shard.tile_rows != shard.rows) {
         CHECK(cudaMemcpy(
           target,
           zero_residuals[device].data() + row,
           size_t(length) * sizeof(double),
           cudaMemcpyHostToDevice));
+      }
       for (int j = 0; j < p; ++j) {
         potential.find_output_basis(para, data, j, device);
-        pack(
-          para,
-          data,
-          row,
-          length,
-          false,
-          shard.matrix.data() + size_t(shard.tile_rows) * j);
+        pack(para, data, row, length, false, shard.matrix.data() + size_t(shard.tile_rows) * j);
       }
       for (int k = 0; k < 3; ++k) {
         const int first = std::max(row, offsets[k]);
@@ -333,7 +385,8 @@ void fcvp_project(
         if (first < last && counts[k] && lambdas[k]) {
           const int group_rows = last - first;
           const int local_offset = first - row;
-          const double alpha = 1.0 / double(counts[k]), one = 1.0;
+          const double alpha = 1.0 / double(counts[k]);
+          const double one = 1.0;
           const double* a = shard.matrix.data() + local_offset;
           const double* y = target + local_offset;
           check_blas(cublasDgemm(
@@ -367,62 +420,59 @@ void fcvp_project(
           check_blas(cublasSetPointerMode(shard.blas.handle, CUBLAS_POINTER_MODE_DEVICE));
           check_blas(cublasDdot(shard.blas.handle, group_rows, y, 1, y, 1, shard.dot.data()));
           check_blas(cublasSetPointerMode(shard.blas.handle, CUBLAS_POINTER_MODE_HOST));
-          check_blas(cublasDaxpy(
-            shard.blas.handle,
-            1,
-            &one,
-            shard.dot.data(),
-            1,
-            shard.yy.data() + k,
-            1));
+          check_blas(
+            cublasDaxpy(shard.blas.handle, 1, &one, shard.dot.data(), 1, shard.yy.data() + k, 1));
         }
       }
-      if (step == 0 && shard.tile_rows != shard.rows)
+      if (step == 0 && shard.tile_rows != shard.rows) {
         check_reconstruction(
           shard, original_residuals[device], row, length, actual, reconstruction_worst);
+      }
     }
   }
   if (step == 0) {
     for (int device = 0; device < devices; ++device) {
       CHECK(cudaSetDevice(device));
       auto& shard = *shards[device];
-      if (shard.tile_rows != shard.rows)
+      if (shard.tile_rows != shard.rows) {
         continue;
+      }
       std::vector<double> actual(shard.rows);
       check_reconstruction(
-        shard,
-        original_residuals[device],
-        0,
-        shard.rows,
-        actual,
-        reconstruction_worst);
+        shard, original_residuals[device], 0, shard.rows, actual, reconstruction_worst);
     }
     printf(
-      "FCVP native E/F/V basis reconstruction normalized max error: %.9g\n",
-      reconstruction_worst);
-    if (reconstruction_worst > 5e-4)
+      "FCVP native E/F/V basis reconstruction normalized max error: %.9g\n", reconstruction_worst);
+    if (reconstruction_worst > 5e-4) {
       PRINT_INPUT_ERROR("FCVP native linearity check failed.");
+    }
   }
   original_residuals.clear();
   zero_residuals.clear();
+  // Reduce the device Grams into globally normalized energy, force, and virial groups.
   std::vector<fcvp::Group> groups;
   for (int k = 0; k < 3; ++k) {
-    if (!counts[k] || !lambdas[k])
+    if (!counts[k] || !lambdas[k]) {
       continue;
+    }
     fcvp::Group group;
     group.lambda = lambdas[k];
     group.h.resize(size_t(p) * p);
     group.g.resize(p);
     for (int device = 0; device < devices; ++device) {
       CHECK(cudaSetDevice(device));
-      std::vector<double> h(size_t(p) * p), g(p), yy(3);
+      std::vector<double> h(size_t(p) * p);
+      std::vector<double> g(p);
+      std::vector<double> yy(3);
       shards[device]->h[k].copy_to_host(h.data());
       shards[device]->g[k].copy_to_host(g.data());
       shards[device]->yy.copy_to_host(yy.data());
-      for (size_t j = 0; j < size_t(p) * p; ++j)
+      for (size_t j = 0; j < size_t(p) * p; ++j) {
         group.h[j] += h[j];
-      for (int j = 0; j < p; ++j)
+      }
+      for (int j = 0; j < p; ++j) {
         group.g[j] += g[j];
+      }
       group.yy += yy[k] / double(counts[k]);
     }
     groups.push_back(std::move(group));
@@ -438,20 +488,23 @@ void fcvp_project(
   double after = before;
   bool accepted = false;
   for (int attempt = 0; attempt < 12; ++attempt) {
-    for (int j = 0; j < p; ++j)
+    for (int j = 0; j < p; ++j) {
       parameters[indices[j]] = float(result.beta[j]);
+    }
     potential.find_force(para, parameters, false, dataset, false, false, devices);
     after = native_objective(para, dataset, parameters);
     if (std::isfinite(after) && after <= before) {
       accepted = true;
       break;
     }
-    for (int j = 0; j < p; ++j)
+    for (int j = 0; j < p; ++j) {
       result.beta[j] = 0.5 * (result.beta[j] + beta[j]);
+    }
   }
   if (!accepted) {
-    for (int j = 0; j < p; ++j)
+    for (int j = 0; j < p; ++j) {
       parameters[indices[j]] = float(beta[j]);
+    }
     after = before;
   }
   shards.clear();
@@ -460,11 +513,12 @@ void fcvp_project(
   double seconds =
     std::chrono::duration<double>(std::chrono::steady_clock::now() - start_time).count();
   FILE* log = my_fopen("fcvp.out", step == 0 ? "w" : "a");
-  if (step == 0)
+  if (step == 0) {
     fprintf(
       log,
       "# step before after accepted mm_iterations inner_converged seconds basis_bytes "
       "proximal_shift\n");
+  }
   fprintf(
     log,
     "%d %.12g %.12g %d %d %d %.9g %zu %.9g\n",
@@ -489,15 +543,17 @@ void fcvp_verify_gradient(
   std::vector<float> analytical(para.number_of_variables);
   potential.gradients.grad_sum.copy_to_host(analytical.data());
   double norm2 = 0;
-  for (int i = 0; i < para.number_of_variables; ++i)
+  for (int i = 0; i < para.number_of_variables; ++i) {
     norm2 += double(parameters[i]) * parameters[i];
+  }
   const double norm =
     std::sqrt(norm2 / para.number_of_variables + para.fcvp_epsilon * para.fcvp_epsilon);
   std::vector<int> indices;
   if (para.fcvp_check == 2) {
     indices.reserve(para.number_of_variables);
-    for (int i = 0; i < para.number_of_variables; ++i)
+    for (int i = 0; i < para.number_of_variables; ++i) {
       indices.push_back(i);
+    }
   } else {
     indices = {
       0,
@@ -506,12 +562,14 @@ void fcvp_verify_gradient(
       para.number_of_variables_ann - 1,
       para.number_of_variables_ann,
       para.number_of_variables - 1};
-    for (int i = 0; i < 8; ++i)
+    for (int i = 0; i < 8; ++i) {
       indices.push_back((uint64_t(i) * 7919 + para.seed) % para.number_of_variables);
+    }
   }
   double worst = 0;
   for (int i : indices) {
-    float x = parameters[i], delta = 1e-3f * std::max(1.0f, std::abs(x));
+    float x = parameters[i];
+    float delta = 1e-3f * std::max(1.0f, std::abs(x));
     parameters[i] = x + delta;
     const double plus_x = parameters[i];
     potential.find_force(para, parameters, false, dataset, false, false, dataset.size());
@@ -532,11 +590,13 @@ void fcvp_verify_gradient(
       derivative,
       finite_difference,
       error);
-    if (!std::isfinite(error))
+    if (!std::isfinite(error)) {
       PRINT_INPUT_ERROR("Nonfinite FCVP gradient check.");
+    }
     worst = std::max(worst, error);
   }
-  if (worst > 5e-3)
+  if (worst > 5e-3) {
     PRINT_INPUT_ERROR("FCVP analytical gradient gate failed; do not benchmark.");
+  }
   printf("FCVP analytical gradient gate passed (normalized max error %.9g).\n", worst);
 }

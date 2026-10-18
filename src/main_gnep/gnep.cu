@@ -114,9 +114,11 @@ static __global__ void gpu_find_neighbor_list(
                 const int pair = lower * zbl.num_types - lower * (lower - 1) / 2 + upper - lower;
                 rc_zbl = zbl.para[10 * pair + 1];
               } else if (paramb.use_typewise_cutoff_zbl) {
-                rc_zbl = min(rc_zbl,
+                rc_zbl = min(
+                  rc_zbl,
                   (COVALENT_RADIUS[paramb.atomic_numbers[t1]] +
-                   COVALENT_RADIUS[paramb.atomic_numbers[t2]]) * paramb.typewise_cutoff_zbl_factor);
+                   COVALENT_RADIUS[paramb.atomic_numbers[t2]]) *
+                    paramb.typewise_cutoff_zbl_factor);
               }
               rc_radial = max(rc_radial, rc_zbl);
             }
@@ -272,11 +274,13 @@ GNEP::GNEP(
   int N_times_max_NN_angular,
   int deviceCount)
 {
-  if (N <= 0 || N_times_max_NN_radial < 0 || N_times_max_NN_angular < 0 ||
-      uint64_t(N) * para.dim > std::numeric_limits<int>::max() ||
-      uint64_t(N) * (para.n_max_angular + 1) * NUM_OF_ABC * 6 >
-        std::numeric_limits<int>::max())
-    PRINT_INPUT_ERROR("GNEP global buffer exceeds 32-bit kernel indexing; reduce batch size or use more GPUs.");
+  if (
+    N <= 0 || N_times_max_NN_radial < 0 || N_times_max_NN_angular < 0 ||
+    uint64_t(N) * para.dim > std::numeric_limits<int>::max() ||
+    uint64_t(N) * (para.n_max_angular + 1) * NUM_OF_ABC * 6 > std::numeric_limits<int>::max()) {
+    PRINT_INPUT_ERROR(
+      "GNEP global buffer exceeds 32-bit kernel indexing; reduce batch size or use more GPUs.");
+  }
   paramb.consistent_loss = para.loss_rmse;
   paramb.rc_radial = para.rc_radial;
   paramb.rcinv_radial = 1.0f / paramb.rc_radial;
@@ -366,37 +370,46 @@ void GNEP::initialize_gradients(Parameters& para, const int N, int device_id)
   local_gradients.resize(N, para.number_of_variables, para.number_of_variables_ann, para.dim);
 }
 
-static int gradient_tile_atoms(const Parameters& para, int atoms, size_t& tile_bytes, long double& full_bytes)
+static int
+gradient_tile_atoms(const Parameters& para, int atoms, size_t& tile_bytes, long double& full_bytes)
 {
-  if (para.gradient_memory_mib <= 0 || atoms <= 0 || para.number_of_variables <= 0 ||
-      para.number_of_variables_ann <= 0 || para.dim <= 0)
+  if (
+    para.gradient_memory_mib <= 0 || atoms <= 0 || para.number_of_variables <= 0 ||
+    para.number_of_variables_ann <= 0 || para.dim <= 0) {
     PRINT_INPUT_ERROR("Invalid GNEP gradient tile dimensions or memory budget.");
+  }
   const size_t max_elements = std::numeric_limits<size_t>::max() / sizeof(float);
   const size_t ann = size_t(para.number_of_variables_ann);
   const size_t dim = size_t(para.dim);
   const size_t fixed = size_t(para.number_of_variables);
-  if (ann > max_elements / (dim + 1) || dim > max_elements / dim)
+  if (ann > max_elements / (dim + 1) || dim > max_elements / dim) {
     PRINT_INPUT_ERROR("GNEP gradient derivative dimensions overflow size_t.");
+  }
   const size_t linear = ann * (dim + 1);
   const size_t second = dim * dim;
-  if (linear > max_elements - second || fixed > max_elements - linear - second)
+  if (linear > max_elements - second || fixed > max_elements - linear - second) {
     PRINT_INPUT_ERROR("GNEP gradient derivative dimensions overflow size_t.");
+  }
   const size_t per_atom = linear + second;
-  if (per_atom > size_t(std::numeric_limits<int>::max()))
+  if (per_atom > size_t(std::numeric_limits<int>::max())) {
     PRINT_INPUT_ERROR("One GNEP gradient atom exceeds 32-bit kernel indexing.");
-  if (size_t(para.gradient_memory_mib) > std::numeric_limits<size_t>::max() / (1024 * 1024))
+  }
+  if (size_t(para.gradient_memory_mib) > std::numeric_limits<size_t>::max() / (1024 * 1024)) {
     PRINT_INPUT_ERROR("GNEP gradient memory budget overflows size_t.");
+  }
   const size_t budget = size_t(para.gradient_memory_mib) * 1024 * 1024 / sizeof(float);
-  if (fixed >= budget || per_atom > budget - fixed)
+  if (fixed >= budget || per_atom > budget - fixed) {
     PRINT_INPUT_ERROR("gradient_memory cannot hold one atom of GNEP derivatives.");
+  }
   const size_t capacity = std::min(
     size_t(atoms),
     std::min((budget - fixed) / per_atom, size_t(std::numeric_limits<int>::max()) / per_atom));
-  if (!capacity)
+  if (!capacity) {
     PRINT_INPUT_ERROR("GNEP gradient tile exceeds 32-bit kernel indexing.");
+  }
   tile_bytes = (fixed + capacity * per_atom) * sizeof(float);
-  full_bytes = (static_cast<long double>(fixed) +
-                static_cast<long double>(atoms) * per_atom) * sizeof(float);
+  full_bytes =
+    (static_cast<long double>(fixed) + static_cast<long double>(atoms) * per_atom) * sizeof(float);
   return int(capacity);
 }
 
@@ -473,8 +486,10 @@ static __global__ void apply_ann(
     float F = 0.0f, Fp[MAX_DIM] = {0.0f};
     
     if (IsTraining) {
-      int type_offset = local_atom * annmb.num_ann + type * ((annmb.dim + 2) * annmb.num_neurons1 + 1);
-      int type_offset_2 = local_atom * annmb.num_ann * annmb.dim + type * ((annmb.dim + 2) * annmb.num_neurons1 + 1) * annmb.dim;
+      int type_offset =
+        local_atom * annmb.num_ann + type * ((annmb.dim + 2) * annmb.num_neurons1 + 1);
+      int type_offset_2 = local_atom * annmb.num_ann * annmb.dim +
+                          type * ((annmb.dim + 2) * annmb.num_neurons1 + 1) * annmb.dim;
       apply_ann_one_layer_w2nd(
         annmb.dim,
         annmb.num_neurons1,
@@ -482,7 +497,7 @@ static __global__ void apply_ann(
         annmb.b0[type],
         annmb.w1[type],
         tile_stride,
-        q,  
+        q,
         F,
         Fp,
         &g_Fp2[local_atom],
@@ -506,8 +521,9 @@ static __global__ void apply_ann(
     }
     if (!IsTraining) {
       g_pe[n1] = F;
-      for (int d = 0; d < annmb.dim; ++d)
+      for (int d = 0; d < annmb.dim; ++d) {
         g_Fp[n1 + d * N] = Fp[d] * g_q_scaler[d];
+      }
     }
   }
 }
@@ -643,16 +659,19 @@ static __global__ void compute_grad_e_without_neighbor(
   int n1 = work_begin + threadIdx.x + blockIdx.x * blockDim.x;
   const int w0_index = annmb.dim * annmb.num_neurons1;
   const int b0_index = w0_index + annmb.num_neurons1;
-  if (n1 >= work_end)
+  if (n1 >= work_end) {
     return;
+  }
   int batch_idx = g_batch_idx[n1];
   // Preserve the legacy whole-batch branch when sharding isolates a structure.
-  if (!paramb.consistent_loss && batch_has_neighbors && g_Na[batch_idx] != 1)
+  if (!paramb.consistent_loss && batch_has_neighbors && g_Na[batch_idx] != 1) {
     return;
+  }
   int t1 = g_type[n1];
   float weight = g_weight[batch_idx];
-  if (paramb.consistent_loss)
+  if (paramb.consistent_loss) {
     weight *= weight;
+  }
   const float per_Nc_e = g_diff_gpu_e[batch_idx] * weight * 2.0f * lambda_e / Nc /
                          (paramb.consistent_loss ? g_Na[batch_idx] : 1);
 
@@ -723,8 +742,9 @@ static __global__ void compute_grad_radial_NM(
   int Idx = work_begin + threadIdx.x + blockIdx.x * blockDim.x;
   const int w0_index = annmb.dim * annmb.num_neurons1;
   const int b0_index = w0_index + annmb.num_neurons1;
-  if (Idx >= work_end)
+  if (Idx >= work_end) {
     return;
+  }
   int n1 = Idx / M;
   int i1 = Idx % M;
   const int tile_begin = work_begin / M;
@@ -738,8 +758,9 @@ static __global__ void compute_grad_radial_NM(
   if (i1 >= neighbor_number && !no_neighbor_isolated_atom) return;
   int t1 = g_type[n1];
   float weight = g_weight[batch_idx];
-  if (paramb.consistent_loss)
+  if (paramb.consistent_loss) {
     weight *= weight;
+  }
   const float per_Nc_e = g_diff_gpu_e[batch_idx] * weight * 2.0f * lambda_e / Nc /
                          (paramb.consistent_loss ? g_Na[batch_idx] : 1);
 
@@ -787,8 +808,9 @@ static __global__ void compute_grad_radial_NM(
       float force_magnitude = sqrt(fx_ref_n1 * fx_ref_n1 + fy_ref_n1 * fy_ref_n1 + fz_ref_n1 * fz_ref_n1);
       type_weight *= sqrt(force_delta / (force_delta + force_magnitude));
     }
-    if (paramb.consistent_loss)
+    if (paramb.consistent_loss) {
       type_weight *= type_weight;
+    }
     dx_n1 *= type_weight;
     dy_n1 *= type_weight;
     dz_n1 *= type_weight;
@@ -817,8 +839,9 @@ static __global__ void compute_grad_radial_NM(
       float force_magnitude = sqrt(fx_ref_n2 * fx_ref_n2 + fy_ref_n2 * fy_ref_n2 + fz_ref_n2 * fz_ref_n2);
       type_weight_n2 *= sqrt(force_delta / (force_delta + force_magnitude));
     }
-    if (paramb.consistent_loss)
+    if (paramb.consistent_loss) {
       type_weight_n2 *= type_weight_n2;
+    }
     dx_n2 *= type_weight_n2;
     dy_n2 *= type_weight_n2;
     dz_n2 *= type_weight_n2;
@@ -968,7 +991,8 @@ static __global__ void compute_grad_radial_NM(
               float feat_123_sum[6] = {0.0f};
               ln = l * (paramb.n_max_angular + 1) + na;
               for (int ma = 0; ma <= paramb.n_max_radial; ++ma) {
-                E2 = g_Fp2[local_atom + (ma + (paramb.n_max_radial + 1 + ln) * annmb.dim) * tile_stride];
+                E2 = g_Fp2
+                  [local_atom + (ma + (paramb.n_max_radial + 1 + ln) * annmb.dim) * tile_stride];
                 // Compute feat_* on-the-fly using cached gnp12
                 float feat_x_ma = gnp12_cache[ma] * tmp_xyz[0];
                 float feat_y_ma = gnp12_cache[ma] * tmp_xyz[1];
@@ -983,7 +1007,8 @@ static __global__ void compute_grad_radial_NM(
                 feat_123_sum[4] += feat_z_ma * r12[1] * E2;
                 feat_123_sum[5] += feat_x_ma * r12[2] * E2;
               }
-              gnep_higher_body::qc(paramb, N, l, na, d12, r12_tmp, fn12[ka], &g_sum_fxyz[n1], &q_c_ang);
+              gnep_higher_body::qc(
+                paramb, N, l, na, d12, r12_tmp, fn12[ka], &g_sum_fxyz[n1], &q_c_ang);
               q_c_scaler_ang = q_c_ang * g_q_scaler[paramb.n_max_radial + 1 + ln];
               f_c_n1[0] += feat_xyz_sum[0] * q_c_scaler_ang;
               f_c_n1[1] += feat_xyz_sum[1] * q_c_scaler_ang;
@@ -1145,8 +1170,9 @@ static __global__ void compute_grad_angular_NM(
   int Idx = work_begin + threadIdx.x + blockIdx.x * blockDim.x;
   const int w0_index = annmb.dim * annmb.num_neurons1;
   const int b0_index = w0_index + annmb.num_neurons1;
-  if (Idx >= work_end)
+  if (Idx >= work_end) {
     return;
+  }
   int n1 = Idx / M;
   int i1 = Idx % M;
   const int tile_begin = work_begin / M;
@@ -1164,8 +1190,9 @@ static __global__ void compute_grad_angular_NM(
   int batch_idx = g_batch_idx[n1];
   int Na = g_Na[batch_idx];
   float weight = g_weight[batch_idx];
-  if (paramb.consistent_loss)
+  if (paramb.consistent_loss) {
     weight *= weight;
+  }
   float per_Nc_e = g_diff_gpu_e[batch_idx] * weight * 2.0f * lambda_e / Nc /
                    (paramb.consistent_loss ? g_Na[batch_idx] : 1);
   float per_Nc = weight * 2.0f * lambda_f / (paramb.consistent_loss ? N : Na * Nc) / 3;
@@ -1184,8 +1211,9 @@ static __global__ void compute_grad_angular_NM(
     float force_magnitude = sqrt(fx_ref_n1 * fx_ref_n1 + fy_ref_n1 * fy_ref_n1 + fz_ref_n1 * fz_ref_n1);
     type_weight *= sqrt(force_delta / (force_delta + force_magnitude));
   }
-  if (paramb.consistent_loss)
+  if (paramb.consistent_loss) {
     type_weight *= type_weight;
+  }
   dx_n1 *= type_weight;
   dy_n1 *= type_weight;
   dz_n1 *= type_weight;
@@ -1198,7 +1226,7 @@ static __global__ void compute_grad_angular_NM(
 
   int t1_net_index = t1 * ((annmb.dim + 2) * annmb.num_neurons1 + 1);
   int n1_net_index_wb = local_atom * annmb.num_ann * annmb.dim + t1_net_index * annmb.dim;
-  
+
   float diff[6] = {
     g_diff_gpu_v[batch_idx * 6 + 0] * per_Nc_v,
     g_diff_gpu_v[batch_idx * 6 + 1] * per_Nc_v,
@@ -1223,8 +1251,9 @@ static __global__ void compute_grad_angular_NM(
     float force_magnitude = sqrt(fx_ref_n2 * fx_ref_n2 + fy_ref_n2 * fy_ref_n2 + fz_ref_n2 * fz_ref_n2);
     type_weight_n2 *= sqrt(force_delta / (force_delta + force_magnitude));
   }
-  if (paramb.consistent_loss)
+  if (paramb.consistent_loss) {
     type_weight_n2 *= type_weight_n2;
+  }
   dx_n2 *= type_weight_n2;
   dy_n2 *= type_weight_n2;
   dz_n2 *= type_weight_n2;
@@ -1275,8 +1304,17 @@ static __global__ void compute_grad_angular_NM(
     }
     accumulate_dfe(N, NM, paramb.L_max, n, paramb.n_max_angular + 1, d12_i1, r12_i1, gn12[n], gnp12[n], &g_sum_fxyz[n1], &feat_x[n], &feat_y[n], &feat_z[n]);
     gnep_higher_body::feature_derivatives(
-      paramb, N, n, d12_i1, r12_i1, gn12[n], gnp12[n], &g_sum_fxyz[n1],
-      &feat_x[n], &feat_y[n], &feat_z[n]);
+      paramb,
+      N,
+      n,
+      d12_i1,
+      r12_i1,
+      gn12[n],
+      gnp12[n],
+      &g_sum_fxyz[n1],
+      &feat_x[n],
+      &feat_y[n],
+      &feat_z[n]);
   } // end of loop over n_max_ang
   float r12[3] = {0.0f};
   float d12 = 0.0f;
@@ -1301,8 +1339,9 @@ static __global__ void compute_grad_angular_NM(
         float force_magnitude = sqrt(fx_ref_n2 * fx_ref_n2 + fy_ref_n2 * fy_ref_n2 + fz_ref_n2 * fz_ref_n2);
         type_weight_n2 *= sqrt(force_delta / (force_delta + force_magnitude));
       }
-      if (paramb.consistent_loss)
+      if (paramb.consistent_loss) {
         type_weight_n2 *= type_weight_n2;
+      }
       dx_n2_tmp *= type_weight_n2;
       dy_n2_tmp *= type_weight_n2;
       dz_n2_tmp *= type_weight_n2;
@@ -1327,7 +1366,9 @@ static __global__ void compute_grad_angular_NM(
           float feat_123_sum[6] = {0.0f};
           ln = l * (paramb.n_max_angular + 1) + n;
           for (int m = 0; m < paramb.dim_angular; ++m) {
-            feat_offset = local_atom + ((paramb.n_max_radial + 1 + m) + (paramb.n_max_radial + 1 + ln) * annmb.dim) * tile_stride;
+            feat_offset = local_atom + ((paramb.n_max_radial + 1 + m) +
+                                        (paramb.n_max_radial + 1 + ln) * annmb.dim) *
+                                         tile_stride;
             E2 = g_Fp2[feat_offset];
             float feat_x_m = feat_x[m];
             float feat_y_m = feat_y[m];
@@ -1361,15 +1402,27 @@ static __global__ void compute_grad_angular_NM(
 
         float higher_mixed[3];
         gnep_higher_body::mixed_derivative(
-          paramb, N, n, d12_i1, r12_i1, gn12[n], gnp12[n], d12, r12,
-          fn12[k], fnp12[k], i1 == j, &g_sum_fxyz[n1], Fp, higher_mixed);
-        grad_c_sum += higher_mixed[0] * dx_diff + higher_mixed[1] * dy_diff + higher_mixed[2] * dz_diff;
-        grad_c_sum -= higher_mixed[0] * r12_i1[0] * diff[0] +
-                      higher_mixed[1] * r12_i1[1] * diff[1] +
-                      higher_mixed[2] * r12_i1[2] * diff[2] +
-                      higher_mixed[1] * r12_i1[0] * diff[3] +
-                      higher_mixed[2] * r12_i1[1] * diff[4] +
-                      higher_mixed[0] * r12_i1[2] * diff[5];
+          paramb,
+          N,
+          n,
+          d12_i1,
+          r12_i1,
+          gn12[n],
+          gnp12[n],
+          d12,
+          r12,
+          fn12[k],
+          fnp12[k],
+          i1 == j,
+          &g_sum_fxyz[n1],
+          Fp,
+          higher_mixed);
+        grad_c_sum +=
+          higher_mixed[0] * dx_diff + higher_mixed[1] * dy_diff + higher_mixed[2] * dz_diff;
+        grad_c_sum -=
+          higher_mixed[0] * r12_i1[0] * diff[0] + higher_mixed[1] * r12_i1[1] * diff[1] +
+          higher_mixed[2] * r12_i1[2] * diff[2] + higher_mixed[1] * r12_i1[0] * diff[3] +
+          higher_mixed[2] * r12_i1[1] * diff[4] + higher_mixed[0] * r12_i1[2] * diff[5];
 
         type_base = t1 * paramb.num_types + t2_tmp + paramb.num_c_radial;
         c_index = (n_base + k) * paramb.num_types_sq + type_base;
@@ -1664,8 +1717,7 @@ static __global__ void find_force_angular(
           gnp12 += fnp12[k] * annmb.c[c_index];
         }          
         accumulate_f12(N, requires_grad, paramb.L_max, n, paramb.n_max_angular + 1, d12, r12, gn12, gnp12, Fp, &g_sum_fxyz[n1], &g_sum_s2xyz[n1], &g_sum_s2xyz123[n1], f12);
-        gnep_higher_body::force(
-          paramb, N, n, d12, r12, gn12, gnp12, &g_sum_fxyz[n1], Fp, f12);
+        gnep_higher_body::force(paramb, N, n, d12, r12, gn12, gnp12, &g_sum_fxyz[n1], Fp, f12);
       } // end of loop over n_max_ang
 
       atomicAdd(&g_fx[n1], f12[0]);
@@ -1797,13 +1849,15 @@ void GNEP::find_force(
 
   for (int device_id = 0; device_id < device_in_this_iter; ++device_id) {
     CHECK(cudaSetDevice(device_id));
-    const uint64_t harmonic_limit = uint64_t(std::numeric_limits<int>::max()) /
-                                    uint64_t(NUM_OF_ABC) / 6;
-    if (paramb.n_max_angular < 0 ||
-        uint64_t(dataset[device_id].N) > harmonic_limit / (uint64_t(paramb.n_max_angular) + 1))
+    const uint64_t harmonic_limit =
+      uint64_t(std::numeric_limits<int>::max()) / uint64_t(NUM_OF_ABC) / 6;
+    if (
+      paramb.n_max_angular < 0 ||
+      uint64_t(dataset[device_id].N) > harmonic_limit / (uint64_t(paramb.n_max_angular) + 1)) {
       PRINT_INPUT_ERROR("GNEP angular harmonic index exceeds 32-bit range.");
-    const size_t harmonic_count = size_t(dataset[device_id].N) *
-                                  (size_t(paramb.n_max_angular) + 1) * NUM_OF_ABC;
+    }
+    const size_t harmonic_count =
+      size_t(dataset[device_id].N) * (size_t(paramb.n_max_angular) + 1) * NUM_OF_ABC;
     gnep_data[device_id].sum_s2xyz.resize(harmonic_count * 3, 0.0f);
     gnep_data[device_id].sum_s2xyz123.resize(harmonic_count * 6, 0.0f);
     gnep_data[device_id].parameters.copy_from_host(parameters);
@@ -2034,8 +2088,9 @@ void GNEP::find_force(
     // Averaging independently normalized local RMSE gradients is not equivalent.
     Batch_MSE mse;
     bool batch_has_neighbors = false;
-    for (const auto& data : dataset)
+    for (const auto& data : dataset) {
       batch_has_neighbors = batch_has_neighbors || data.max_NN_radial > 0;
+    }
     if (para.loss_rmse) {
       mse = get_batch_mse(para, dataset, true);
     } else {
@@ -2060,8 +2115,9 @@ void GNEP::find_force(
     for (int device_id = 0; device_id < device_in_this_iter; ++device_id) {
       CHECK(cudaSetDevice(device_id));
       const int virial_nums = 6 * dataset[device_id].sum_virial_Nc;
-      float grad_lambda_e = para.lambda_e, grad_lambda_f = para.lambda_f,
-            grad_lambda_v = para.lambda_v;
+      float grad_lambda_e = para.lambda_e;
+      float grad_lambda_f = para.lambda_f;
+      float grad_lambda_v = para.lambda_v;
       if (para.loss_rmse) {
         const double eps2 = para.fcvp_epsilon * para.fcvp_epsilon;
         grad_lambda_e /= 2.0 * std::sqrt(mse.energy + eps2);
@@ -2077,18 +2133,26 @@ void GNEP::find_force(
       const int N = dataset[device_id].N;
       const int radial_neighbors = dataset[device_id].max_NN_radial;
       const int angular_neighbors = dataset[device_id].max_NN_angular;
-      if (radial_neighbors < 0 || angular_neighbors < 0 ||
-          uint64_t(N) * radial_neighbors > std::numeric_limits<int>::max() ||
-          uint64_t(N) * angular_neighbors > std::numeric_limits<int>::max())
+      if (
+        radial_neighbors < 0 || angular_neighbors < 0 ||
+        uint64_t(N) * radial_neighbors > std::numeric_limits<int>::max() ||
+        uint64_t(N) * angular_neighbors > std::numeric_limits<int>::max()) {
         PRINT_INPUT_ERROR("GNEP gradient neighbor index exceeds 32-bit range.");
+      }
       size_t tile_bytes = 0;
       long double full_bytes = 0;
       const int tile_atoms = gradient_tile_atoms(para, N, tile_bytes, full_bytes);
       initialize_gradients(para, tile_atoms, device_id);
       gnep_data[device_id].Fp2.resize(size_t(tile_atoms) * para.dim * para.dim, 0.0f);
       tile_states[device_id] = {
-        N, radial_neighbors, angular_neighbors, virial_nums, tile_atoms,
-        grad_lambda_e, grad_lambda_f, grad_lambda_v};
+        N,
+        radial_neighbors,
+        angular_neighbors,
+        virial_nums,
+        tile_atoms,
+        grad_lambda_e,
+        grad_lambda_f,
+        grad_lambda_v};
       max_tile_rounds = std::max(max_tile_rounds, (N - 1) / tile_atoms + 1);
       if (!gradient_tile_reported[device_id]) {
         printf(
@@ -2106,8 +2170,9 @@ void GNEP::find_force(
       for (int device_id = 0; device_id < device_in_this_iter; ++device_id) {
         const auto& state = tile_states[device_id];
         const size_t begin = size_t(round) * state.tile_atoms;
-        if (begin >= size_t(state.N))
+        if (begin >= size_t(state.N)) {
           continue;
+        }
         CHECK(cudaSetDevice(device_id));
         auto& local_gradients = device_id == 0 ? gradients : device_gradients[device_id - 1];
         const int N = state.N;
@@ -2142,8 +2207,7 @@ void GNEP::find_force(
         const int radial_begin = atom_begin * radial_neighbors;
         const int radial_end = atom_end * radial_neighbors;
         if (radial_neighbors > 0) {
-          const int blocks_per_grid =
-            (radial_end - radial_begin - 1) / threads_per_block + 1;
+          const int blocks_per_grid = (radial_end - radial_begin - 1) / threads_per_block + 1;
           if (blocks_per_grid > 0) {
             compute_grad_radial_NM<<<blocks_per_grid, threads_per_block>>>(
               dataset[device_id].N,
@@ -2192,8 +2256,7 @@ void GNEP::find_force(
             GPU_CHECK_KERNEL
           }
         } else {
-          const int blocks_per_grid =
-            (tile_length - 1) / threads_per_block + 1;
+          const int blocks_per_grid = (tile_length - 1) / threads_per_block + 1;
           if (blocks_per_grid > 0) {
             compute_grad_e_without_neighbor<<<blocks_per_grid, threads_per_block>>>(
               dataset[device_id].N,
@@ -2303,29 +2366,33 @@ static __global__ void apply_output_basis(
   float* fp)
 {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i >= N)
+  if (i >= N) {
     return;
+  }
   const int t = column / (ann.num_neurons1 + 1);
   const int h = column % (ann.num_neurons1 + 1);
   float phi = 0.0f;
   const bool active = type[i] == t;
   if (active && h < ann.num_neurons1) {
     float z = -ann.b0[t][h];
-    for (int d = 0; d < ann.dim; ++d)
+    for (int d = 0; d < ann.dim; ++d) {
       z += ann.w0[t][h * ann.dim + d] * q[d * N + i] * scaler[d];
+    }
     phi = tanhf(z);
   }
   energy[i] = active ? (h == ann.num_neurons1 ? -1.0f : phi) : 0.0f;
-  for (int d = 0; d < ann.dim; ++d)
+  for (int d = 0; d < ann.dim; ++d) {
     fp[d * N + i] = active && h < ann.num_neurons1
                       ? (1.0f - phi * phi) * ann.w0[t][h * ann.dim + d] * scaler[d]
                       : 0.0f;
+  }
 }
 
 void GNEP::find_output_basis(Parameters& para, Dataset& data, int column, int device_id)
 {
   CHECK(cudaSetDevice(device_id));
-  const int block_size = 32, grid_size = (data.N + block_size - 1) / block_size;
+  const int block_size = 32;
+  const int grid_size = (data.N + block_size - 1) / block_size;
   auto& cached = gnep_data[device_id];
   data.force.fill(0.0f);
   data.virial.fill(0.0f);
@@ -2340,8 +2407,9 @@ void GNEP::find_output_basis(Parameters& para, Dataset& data, int column, int de
     cached.Fp.data());
   GPU_CHECK_KERNEL
   // Bias columns have identically zero coordinate derivatives.
-  if (column % (para.num_neurons1 + 1) == para.num_neurons1)
+  if (column % (para.num_neurons1 + 1) == para.num_neurons1) {
     return;
+  }
   find_force_radial<<<grid_size, block_size>>>(
     data.N,
     cached.NN_radial.data(),

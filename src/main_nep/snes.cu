@@ -88,15 +88,18 @@ SNES::SNES(Parameters& para, Fitness* fitness_function)
   find_type_of_variable(para);
   const char* experimental_optimizer = std::getenv("GPUMD_EXPERIMENT_OPTIMIZER");
   if (experimental_optimizer && std::strcmp(experimental_optimizer, "snes") != 0) {
-    if (std::strcmp(experimental_optimizer, "lmma") != 0)
+    if (std::strcmp(experimental_optimizer, "lmma") != 0) {
       PRINT_INPUT_ERROR("Unknown GPUMD_EXPERIMENT_OPTIMIZER.");
+    }
     if (para.prediction || para.version != 4 || para.train_mode != 0 ||
-        para.charge_mode || para.fine_tune)
+        para.charge_mode || para.fine_tune) {
       PRINT_INPUT_ERROR("Experimental LM-MA-ES trial requires ordinary NEP4 training.");
+    }
     for (int i = 0; i < number_of_variables; ++i) {
       if (!std::isfinite(mu[i]) || !std::isfinite(sigma[i]) || sigma[i] <= 0 ||
-          std::abs(sigma[i] - sigma[0]) > 1e-12)
+          std::abs(sigma[i] - sigma[0]) > 1e-12) {
         PRINT_INPUT_ERROR("Experimental LM-MA-ES requires finite mean and isotropic initial sigma.");
+      }
     }
     unsigned long long trial_seed = 0;
     try {
