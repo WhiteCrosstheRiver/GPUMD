@@ -36,6 +36,15 @@ public:
   double lambda_1 = 0.0;
   double lambda_2 = 0.0;
 
+  bool use_lm = false;
+  int lm_probes = 16;
+  int lm_candidates = 8;
+  int lm_check = 0;
+  double lm_force_ema = 0.2;
+  double lm_lambda0 = 0.01;
+  double lm_guard_ratio = 1.1;
+  std::string lm_guard_filename;
+
   std::vector<int> output_parameter_indices() const;
   std::vector<float> prediction_parameters;
 
@@ -133,6 +142,9 @@ public:
   GPU_Vector<float> energy_shift_gpu; // Energy shift for biased initialization of neural networks (GPU)
 
 private:
+  bool is_lm_set = false;
+  bool is_lm_guard_set = false;
+  bool is_lm_check_set = false;
   void set_default_parameters();
   void read_gmlp_in();
   void read_zbl_in();
@@ -143,6 +155,10 @@ private:
 
   void parse_one_keyword(std::vector<std::string>& tokens);
 
+  void parse_optimizer(const char** param, int num_param);
+  void parse_lm(const char** param, int num_param);
+  void parse_lm_guard(const char** param, int num_param);
+  void parse_lm_check(const char** param, int num_param);
   void parse_fcvp(const char** param, int num_param);
   void parse_fcvp_memory(const char** param, int num_param);
   void parse_gradient_memory(const char** param, int num_param);

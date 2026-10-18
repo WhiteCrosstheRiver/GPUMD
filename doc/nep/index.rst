@@ -13,4 +13,5 @@ nep executable
    input_parameters/index
    output_files/index
    gnep_fcvp
+   gnep_lm
    experimental_lmma

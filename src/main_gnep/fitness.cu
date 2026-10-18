@@ -16,6 +16,7 @@
 #include "fcvp.cuh"
 #include "fitness.cuh"
 #include "gnep.cuh"
+#include "nep_lm.cuh"
 #include "parameters.cuh"
 #include "structure.cuh"
 #include "utilities/error.cuh"
@@ -27,6 +28,7 @@
 #include <iostream>
 #include <random>
 #include <sstream>
+#include <sys/stat.h>
 #include <vector>
 
 Fitness::Fitness(Parameters& para, Adam* adam)
@@ -88,6 +90,36 @@ Fitness::Fitness(Parameters& para, Adam* adam)
     print_line_2();
   }
 
+  if (para.use_lm) {
+    struct stat guard_info;
+    const bool guard_exists = stat(para.lm_guard_filename.c_str(), &guard_info) == 0;
+    std::string guard_path = para.lm_guard_filename;
+    while (guard_path.compare(0, 2, "./") == 0) {
+      guard_path.erase(0, 2);
+    }
+    for (const char* filename : {
+           "train.xyz", "test.xyz", "lm.out", "loss.out", "nep.txt", "gnep.restart",
+           "energy_train.out", "force_train.out", "virial_train.out", "stress_train.out",
+           "energy_test.out", "force_test.out", "virial_test.out", "stress_test.out",
+           "descriptor.out", "fcvp.out"}) {
+      struct stat info;
+      const bool same_file =
+        guard_exists && stat(filename, &info) == 0 && guard_info.st_ino != 0 &&
+        guard_info.st_ino == info.st_ino && guard_info.st_dev == info.st_dev;
+      if (guard_path == filename || same_file) {
+        PRINT_INPUT_ERROR("LM guard must not alias train.xyz, test.xyz, or native output files.");
+      }
+    }
+    std::vector<Structure> structures_guard;
+    read_structures(para.lm_guard_filename.c_str(), para, structures_guard);
+    guard_set.resize(1);
+    print_line_1();
+    printf("Constructing LM guard_set in device 0.\n");
+    CHECK(cudaSetDevice(0));
+    guard_set[0].construct(para, structures_guard, false, 0, structures_guard.size(), 0);
+    print_line_2();
+  }
+
   N = -1;
   int N_times_max_NN_radial = -1;
   int N_times_max_NN_angular = -1;
@@ -103,6 +135,14 @@ Fitness::Fitness(Parameters& para, Adam* adam)
     N_times_max_NN_angular = test_set[0].N * test_set[0].max_NN_angular;
     max_NN_radial = test_set[0].max_NN_radial;
     max_NN_angular = test_set[0].max_NN_angular;
+  }
+  if (!guard_set.empty()) {
+    const auto& data = guard_set[0];
+    N = std::max(N, data.N);
+    N_times_max_NN_radial = std::max(N_times_max_NN_radial, data.N * data.max_NN_radial);
+    N_times_max_NN_angular = std::max(N_times_max_NN_angular, data.N * data.max_NN_angular);
+    max_NN_radial = std::max(max_NN_radial, data.max_NN_radial);
+    max_NN_angular = std::max(max_NN_angular, data.max_NN_angular);
   }
   for (int n = 0; n < num_batches; ++n) {
     batch_indices[n] = n;
@@ -229,6 +269,10 @@ void Fitness::compute(Parameters& para)
     if (para.fcvp_check) {
       fcvp_verify_gradient(para, *static_cast<GNEP*>(potential.get()), train_set[0], parameters);
     }
+    std::unique_ptr<NEP_LM> lm_optimizer;
+    if (para.use_lm) {
+      lm_optimizer.reset(new NEP_LM(para, *static_cast<GNEP*>(potential.get())));
+    }
     float mse_energy;
     float mse_force;
     float mse_virial;
@@ -260,9 +304,17 @@ void Fitness::compute(Parameters& para)
           para, *static_cast<GNEP*>(potential.get()), train_set[batch_id], parameters, step);
         optimizer->sync_parameters();
       }
-      potential->find_force(
-        para, parameters, true, train_set[batch_id], false, true, train_set[batch_id].size());
-      const auto batch_mse = get_batch_mse(para, train_set[batch_id], true);
+      Batch_MSE batch_mse;
+      if (lm_optimizer) {
+        batch_mse = lm_optimizer->update(
+          para, *static_cast<GNEP*>(potential.get()), train_set[batch_id], guard_set,
+          parameters, step);
+        optimizer->sync_parameters();
+      } else {
+        potential->find_force(
+          para, parameters, true, train_set[batch_id], false, true, train_set[batch_id].size());
+        batch_mse = get_batch_mse(para, train_set[batch_id], true);
+      }
       const int force_count = para.loss_rmse ? batch_mse.atoms : batch_mse.configurations;
       mse_energy += batch_mse.energy * batch_mse.configurations;
       mse_force += batch_mse.force * force_count;
@@ -270,8 +322,10 @@ void Fitness::compute(Parameters& para)
       count += batch_mse.configurations;
       count_force += force_count;
       count_virial += batch_mse.virial_configurations;
-      auto& grad = potential->getGradients();
-      optimizer->update(lr, grad.grad_sum.data());
+      if (!lm_optimizer) {
+        auto& grad = potential->getGradients();
+        optimizer->update(lr, grad.grad_sum.data());
+      }
 
       if ((step + 1) % num_batches == 0) {
         CHECK(cudaDeviceSynchronize());

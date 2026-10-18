@@ -469,29 +469,46 @@ static void reorder(const int num_batches, std::vector<Structure>& structures)
   }
 }
 
+static bool read_structure_file(
+  const char* filename, bool required, Parameters& para, std::vector<Structure>& structures)
+{
+  std::ifstream input(filename);
+  if (!input.is_open()) {
+    if (required) {
+      const std::string message = std::string("Failed to open ") + filename + ".";
+      PRINT_INPUT_ERROR(message.c_str());
+    }
+    return false;
+  }
+  print_line_1();
+  std::string xyz_filename = filename;
+  std::cout << "Started reading " << xyz_filename << std::endl;
+  print_line_2();
+  read_exyz(para, input, structures, xyz_filename);
+  input.close();
+  return true;
+}
+
 bool read_structures(bool is_train, Parameters& para, std::vector<Structure>& structures)
 {
-  std::ifstream input(is_train ? "train.xyz" : "test.xyz");
-  bool has_test_set = true;
-  if (!input.is_open()) {
-    if (is_train) {
-      PRINT_INPUT_ERROR("Failed to open train.xyz.");
-    } else {
-      has_test_set = false;
-    }
-  } else {
-    print_line_1();
-    std::string xyz_filename = is_train ? "train.xyz" : "test.xyz";
-    std::cout << "Started reading " << xyz_filename << std::endl;
-    print_line_2();
-    read_exyz(para, input, structures, xyz_filename);
-    input.close();
-  }
-
+  const bool found =
+    read_structure_file(is_train ? "train.xyz" : "test.xyz", is_train, para, structures);
   if ((para.prediction == 0) && is_train && (para.batch_size < structures.size())) {
     int num_batches = (structures.size() - 1) / para.batch_size + 1;
     reorder(num_batches, structures);
   }
 
-  return has_test_set;
+  return found;
+}
+
+bool read_structures(const char* filename, Parameters& para, std::vector<Structure>& structures)
+{
+  if (filename == nullptr || filename[0] == '\0') {
+    PRINT_INPUT_ERROR("A structure filename is required.");
+  }
+  const bool found = read_structure_file(filename, true, para, structures);
+  if (structures.empty()) {
+    PRINT_INPUT_ERROR("The requested structure file contains no structures.");
+  }
+  return found;
 }

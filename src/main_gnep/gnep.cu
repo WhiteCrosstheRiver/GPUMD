@@ -2447,3 +2447,5 @@ void GNEP::find_output_basis(Parameters& para, Dataset& data, int column, int de
     data.virial.data());
   GPU_CHECK_KERNEL
 }
+
+#include "nep_lm_impl.cuh"

@@ -38,6 +38,26 @@ Parameters::Parameters()
 
   set_default_parameters();
   read_gmlp_in();
+  if (!use_lm && (is_lm_set || is_lm_guard_set || is_lm_check_set)) {
+    PRINT_INPUT_ERROR("lm, lm_guard, and lm_check require optimizer lm.");
+  }
+  if (use_lm) {
+    if (prediction) {
+      PRINT_INPUT_ERROR("optimizer lm is a training option; omit it for prediction.");
+    }
+    if (!loss_rmse || lambda_1 != 0.0 || weight_decay != 0.0f || use_full_batch || fcvp_interval) {
+      PRINT_INPUT_ERROR(
+        "optimizer lm requires loss_rmse, lambda_1 0, weight_decay 0, batch <size> 0, and no fcvp.");
+    }
+    if (!is_lm_guard_set || lm_guard_filename.empty()) {
+      PRINT_INPUT_ERROR("optimizer lm requires an explicit nonempty lm_guard file and ratio.");
+    }
+    int device_count = 0;
+    CHECK(cudaGetDeviceCount(&device_count));
+    if (device_count != 1) {
+      PRINT_INPUT_ERROR("optimizer lm currently requires exactly one visible GPU.");
+    }
+  }
   if (!prediction && !is_type_set) {
     PRINT_INPUT_ERROR("type in gnep.in has not been set.");
   }
@@ -378,6 +398,20 @@ void Parameters::report_inputs()
   }
 
   printf("Input or default parameters:\n");
+  if (use_lm) {
+    printf("    optimizer = lm\n");
+    printf(
+      "    LM probes = %d; candidates = %d; force EMA = %g; initial damping = %g\n",
+      lm_probes,
+      lm_candidates,
+      lm_force_ema,
+      lm_lambda0);
+    printf(
+      "    LM guard = %s; global best guard ratio = %g; check = %d\n",
+      lm_guard_filename.c_str(),
+      lm_guard_ratio,
+      lm_check);
+  }
   printf("    seed = %d; loss_rmse = %d; fcvp interval = %d\n", seed, loss_rmse, fcvp_interval);
   printf("    gradient temporary memory = %d MiB per GPU\n", gradient_memory_mib);
   if (loss_rmse) {
@@ -588,7 +622,15 @@ void Parameters::parse_one_keyword(std::vector<std::string>& tokens)
   for (int n = 0; n < num_param; ++n) {
     param[n] = tokens[n].c_str();
   }
-  if (strcmp(param[0], "fcvp") == 0) {
+  if (strcmp(param[0], "optimizer") == 0) {
+    parse_optimizer(param, num_param);
+  } else if (strcmp(param[0], "lm") == 0) {
+    parse_lm(param, num_param);
+  } else if (strcmp(param[0], "lm_guard") == 0) {
+    parse_lm_guard(param, num_param);
+  } else if (strcmp(param[0], "lm_check") == 0) {
+    parse_lm_check(param, num_param);
+  } else if (strcmp(param[0], "fcvp") == 0) {
     parse_fcvp(param, num_param);
   } else if (strcmp(param[0], "fcvp_memory") == 0) {
     parse_fcvp_memory(param, num_param);
@@ -874,6 +916,51 @@ void Parameters::parse_l_max(const char** param, int num_param)
   if ((L_max_5body != 0 && L_max_5body != 1) || (L_max_5body && !L_max_4body)) {
     PRINT_INPUT_ERROR("l_max_5body must be 0 or 1; 1 requires l_max_4body = 2.");
   }
+}
+
+void Parameters::parse_optimizer(const char** param, int num_param)
+{
+  if (num_param != 2 || (strcmp(param[1], "adam") != 0 && strcmp(param[1], "lm") != 0)) {
+    PRINT_INPUT_ERROR("optimizer requires adam or lm.");
+  }
+  use_lm = strcmp(param[1], "lm") == 0;
+}
+
+void Parameters::parse_lm(const char** param, int num_param)
+{
+  if (
+    num_param != 5 || !is_valid_int(param[1], &lm_probes) ||
+    !is_valid_int(param[2], &lm_candidates) || !is_valid_real(param[3], &lm_force_ema) ||
+    !is_valid_real(param[4], &lm_lambda0) || lm_probes < 1 || lm_probes > 1024 ||
+    lm_candidates < 1 || lm_candidates > 64 || !std::isfinite(lm_force_ema) ||
+    lm_force_ema <= 0.0 || lm_force_ema > 1.0 || !std::isfinite(lm_lambda0) ||
+    lm_lambda0 < 1e-9 || lm_lambda0 > 1e9) {
+    PRINT_INPUT_ERROR(
+      "lm requires probes in [1,1024], candidates in [1,64], force EMA in (0,1], and damping in [1e-9,1e9].");
+  }
+  is_lm_set = true;
+}
+
+void Parameters::parse_lm_guard(const char** param, int num_param)
+{
+  if (
+    num_param != 3 || param[1][0] == '\0' || !is_valid_real(param[2], &lm_guard_ratio) ||
+    !std::isfinite(lm_guard_ratio) || lm_guard_ratio < 1.0) {
+    PRINT_INPUT_ERROR("lm_guard requires a guard filename and a finite ratio >= 1.");
+  }
+  lm_guard_filename = param[1];
+  if (lm_guard_filename == "train.xyz" || lm_guard_filename == "test.xyz") {
+    PRINT_INPUT_ERROR("lm_guard must name a dedicated file distinct from train.xyz and test.xyz.");
+  }
+  is_lm_guard_set = true;
+}
+
+void Parameters::parse_lm_check(const char** param, int num_param)
+{
+  if (num_param != 2 || !is_valid_int(param[1], &lm_check) || (lm_check != 0 && lm_check != 1)) {
+    PRINT_INPUT_ERROR("lm_check requires 0 or 1.");
+  }
+  is_lm_check_set = true;
 }
 
 void Parameters::parse_fcvp_memory(const char** param, int num_param)

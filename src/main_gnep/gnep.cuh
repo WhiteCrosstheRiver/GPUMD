@@ -113,6 +113,11 @@ public:
   // Produces one local E/F/V basis column on the selected device, excluding ZBL.
   void find_output_basis(Parameters& para, Dataset& dataset, int column, int device_id = 0);
 
+  GNEP_Data& cached_data(int device_id = 0)
+  {
+    return gnep_data[device_id];
+  }
+
   Gradients gradients;
   virtual Gradients& getGradients() override {return gradients;}
 
