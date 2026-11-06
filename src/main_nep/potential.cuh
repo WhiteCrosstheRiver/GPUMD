@@ -46,6 +46,7 @@ public:
   virtual int prepare_data() = 0;
   virtual void prepare_training() = 0;
   virtual void set_population_mean(const float* gpu_mean) {}
+  virtual bool supports_experimental_lmma() const { return false; }
   // Evaluate candidate parameter vectors stored contiguously on the host. The model
   // owns intermediate losses; accumulate_fitness adds them after common regularization.
   virtual void evaluate(int batch, const float* population) = 0;

@@ -48,6 +48,11 @@ public:
   void report_error(const TrainingReport& report) override;
   void predict(float* parameters) override;
   Parameters& get_parameters() override { return *model_parameters; }
+  bool supports_experimental_lmma() const override
+  {
+    return model_parameters->version == 4 && model_parameters->model_type == 0 &&
+           !model_parameters->fine_tune;
+  }
 
   void initialize_parameters(
     std::mt19937& rng,

@@ -25,6 +25,8 @@ https://doi.org/10.1145/2001576.2001692
 
 #include "fitness.cuh"
 #include "potential.cuh"
+#include <cstdlib>
+#include <cstring>
 #include "parameters.cuh"
 #include "snes.cuh"
 #include "utilities/error.cuh"
@@ -45,6 +47,7 @@ SNES::SNES(Parameters& para, Potential& potential) : potential(potential)
   maximum_generation = para.maximum_generation;
   number_of_variables = para.number_of_variables;
   population_size = para.population_size;
+  num_types = para.num_types;
   const int N = population_size * number_of_variables;
   int num = number_of_variables / para.num_types;
   eta_sigma = (3.0f + std::log(num * 1.0f)) / (5.0f * sqrt(num * 1.0f)) / 2.0f;
@@ -78,6 +81,36 @@ SNES::SNES(Parameters& para, Potential& potential) : potential(potential)
   gpu_utility.copy_from_host(utility.data());
   potential.parameter_groups(type_of_variable);
   gpu_type_of_variable.copy_from_host(type_of_variable.data());
+
+  const char* experimental_optimizer = std::getenv("GPUMD_EXPERIMENT_OPTIMIZER");
+  if (experimental_optimizer && std::strcmp(experimental_optimizer, "snes") != 0) {
+    if (std::strcmp(experimental_optimizer, "lmma") != 0) {
+      PRINT_INPUT_ERROR("Unknown GPUMD_EXPERIMENT_OPTIMIZER.");
+    }
+    if (para.prediction || !potential.supports_experimental_lmma()) {
+      PRINT_INPUT_ERROR("Experimental LM-MA-ES trial requires ordinary NEP4 training.");
+    }
+    for (int i = 0; i < number_of_variables; ++i) {
+      if (
+        !std::isfinite(mu[i]) || !std::isfinite(sigma[i]) || sigma[i] <= 0 ||
+        std::abs(sigma[i] - sigma[0]) > 1e-12) {
+        PRINT_INPUT_ERROR("Experimental LM-MA-ES requires finite mean and isotropic initial sigma.");
+      }
+    }
+    unsigned long long trial_seed = 0;
+    try {
+      trial_seed = ExperimentalLMMA::parse_seed(std::getenv("GPUMD_EXPERIMENT_SEED"));
+      experimental_lmma.reset(new ExperimentalLMMA(mu, sigma[0], population_size, trial_seed));
+    } catch (const std::invalid_argument& error) {
+      PRINT_INPUT_ERROR(error.what());
+    }
+    printf(
+      "Experimental LM-MA-ES: global ranking; population=%d dimension=%d seed=%llu\n",
+      population_size,
+      number_of_variables,
+      trial_seed);
+    printf("LM-MA-ES states use *.lmma checkpoints; nep.restart remains the initial input.\n");
+  }
 }
 
 void SNES::initialize_rng(const int seed)
@@ -114,7 +147,8 @@ void SNES::run(Parameters& para, Fitness* fitness_function)
   fitness_function->print_training_header();
 
   for (int n = 0; n < maximum_generation; ++n) {
-    create_population();
+    // Generation zero prepares the training data; it ranks no LM-MA-ES candidates.
+    create_population(experimental_lmma && n == 0);
     potential.set_population_mean(gpu_mu.data());
     fitness_function->compute(
       n,
@@ -124,6 +158,15 @@ void SNES::run(Parameters& para, Fitness* fitness_function)
       gpu_type_of_variable.data(),
       fitness_total.data());
 
+    if (experimental_lmma && n == 0) {
+      continue;
+    }
+    if (
+      experimental_lmma &&
+      !ExperimentalLMMA::finite_fitness(
+        fitness_total.data() + para.num_types * population_size, population_size)) {
+      PRINT_INPUT_ERROR("Experimental LM-MA-ES encountered non-finite global fitness.");
+    }
     sort_population(para);
 
     std::string checkpoint_base;
@@ -173,9 +216,14 @@ static __global__ void gpu_create_population(
   }
 }
 
-void SNES::create_population()
+void SNES::create_population(bool native)
 {
   gpuSetDevice(0); // normally use GPU-0
+  if (experimental_lmma && !native) {
+    population = experimental_lmma->ask();
+    gpu_population.copy_from_host(population.data());
+    return;
+  }
   const int N = population_size * number_of_variables;
   gpu_create_population<<<(N - 1) / 128 + 1, 128>>>(
     N,
@@ -248,6 +296,10 @@ static __global__ void gpu_update_mu_and_sigma(
 
 void SNES::update_mu_and_sigma()
 {
+  if (experimental_lmma) {
+    experimental_lmma->tell(index.data() + num_types * population_size);
+    return;
+  }
   gpuSetDevice(0); // normally use GPU-0
   gpu_index.copy_from_host(index.data());
   gpu_update_mu_and_sigma<<<(number_of_variables - 1) / 128 + 1, 128>>>(
@@ -265,6 +317,10 @@ void SNES::update_mu_and_sigma()
 
 void SNES::output_mu_and_sigma(Parameters& para, const char* filename)
 {
+  if (experimental_lmma) {
+    experimental_lmma->write_checkpoint((std::string(filename) + ".lmma").c_str());
+    return;
+  }
   gpuSetDevice(0); // normally use GPU-0
   gpu_mu.copy_to_host(mu.data());
   gpu_sigma.copy_to_host(sigma.data());

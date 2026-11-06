@@ -27,6 +27,9 @@ class Fitness;
 class Potential;
 class Parameters;
 
+#include "experimental_lmma.cuh"
+#include <memory>
+
 class SNES
 {
 public:
@@ -35,6 +38,8 @@ public:
 
 protected:
   Potential& potential;
+  std::unique_ptr<ExperimentalLMMA> experimental_lmma;
+  int num_types = 1;
   std::mt19937 rng;
   int maximum_generation = 10000;
   int number_of_variables = 10;
@@ -60,7 +65,7 @@ protected:
 
   void initialize_rng(const int seed);
   void calculate_utility();
-  void create_population();
+  void create_population(bool native = false);
   void sort_population(Parameters& para);
   void update_mu_and_sigma();
   void output_mu_and_sigma(Parameters& para, const char* filename);
