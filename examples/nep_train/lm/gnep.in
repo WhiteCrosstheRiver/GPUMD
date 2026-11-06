@@ -1,0 +1,26 @@
+# Si/Ge benchmark template. Provide separate train.xyz and guard.xyz.
+type 2 Si Ge
+cutoff 4 4
+n_max 6 6
+basis_size 8 8
+l_max 4 2 0
+neuron 40
+
+lambda_e 1
+lambda_f 2
+lambda_v 0.1
+weight_decay 0
+lambda_1 0
+lambda_2 0
+batch 1000 0
+epoch 10
+seed 20261015
+
+optimizer lm
+loss_rmse 1e-7
+lm_guard guard.xyz 1.1
+
+# Optional: probes, candidates, force-curvature EMA, initial damping.
+# lm 16 8 0.2 0.01
+# Optional first-update comparison with the native analytical gradient.
+# lm_check 1

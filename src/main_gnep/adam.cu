@@ -252,6 +252,12 @@ void Adam::initialize_parameters(Parameters& para)
   }
 }
 
+void Adam::sync_parameters()
+{
+  DeviceGuard guard(0);
+  gpu_parameters.copy_from_host(parameters.data());
+}
+
 void Adam::update(float lr, const std::vector<float>& gradients) {
   DeviceGuard guard(0);
   if (static_cast<int>(gradients.size()) != number_of_variables) {

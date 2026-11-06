@@ -38,6 +38,19 @@ public:
 
   // parameters to be read in
   int batch_size;         // number of configurations in one batch
+  bool loss_rmse = false; // use lambda*sqrt(MSE + epsilon^2) as the objective
+  double fcvp_epsilon = 1e-8; // smoothing epsilon of the RMSE objective
+  double lambda_1 = 0.0;
+  double lambda_2 = 0.0;
+  bool use_lm = false;
+  int lm_probes = 16;
+  int lm_candidates = 8;
+  int lm_check = 0;
+  int lm_fast = 0;
+  double lm_force_ema = 0.2;
+  double lm_lambda0 = 0.01;
+  double lm_guard_ratio = 1.1;
+  std::string lm_guard_filename;
   int use_full_batch;     // 1 for effective full-batch even though batch_size is not full-batch
   int num_types;          // number of atom types
   int epoch;              // maximum number of epochs for training
@@ -46,6 +59,9 @@ public:
   int basis_size_angular; 
   int n_max_radial;       // maximum order of the radial Chebyshev polynomials
   int n_max_angular;      // maximum order of the angular Chebyshev polynomials
+  int L_max_4body = 0;    // 0 or 2
+  int L_max_5body = 0;    // 0 or 1
+  int num_L = 0;          // number of angular descriptor channels
   int L_max;              // maximum order of the 3body spherical harmonics
   float weight_decay;     // Adam with decoupled weight decay (AdamW)
   float lr;               // current learning rate
@@ -99,6 +115,10 @@ public:
   bool is_energy_shift_set;
   bool is_lr_cos_restart_set;
   bool is_seed_set;
+  bool is_lm_set = false;
+  bool is_lm_guard_set = false;
+  bool is_lm_check_set = false;
+  bool is_lm_fast_set = false;
 
   // other parameters
   int dim;                            // dimension of the descriptor vector
@@ -153,6 +173,13 @@ private:
   void parse_l_max(const char** param, int num_param);
   void parse_neuron(const char** param, int num_param);
   void parse_weight_decay(const char** param, int num_param);
+  void parse_optimizer(const char** param, int num_param);
+  void parse_lm(const char** param, int num_param);
+  void parse_lm_guard(const char** param, int num_param);
+  void parse_lm_check(const char** param, int num_param);
+  void parse_lm_fast(const char** param, int num_param);
+  void parse_loss_rmse(const char** param, int num_param);
+  void parse_regularization(const char** param, int num_param);
   void parse_start_lr(const char** param, int num_param);
   void parse_stop_lr(const char** param, int num_param);
   void parse_lambda_e(const char** param, int num_param);

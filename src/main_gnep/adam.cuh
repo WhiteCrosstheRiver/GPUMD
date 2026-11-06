@@ -30,6 +30,7 @@ public:
 
   // void zero_gradients();
   void update(float lr, const std::vector<float>& gradients); // Update moments and parameters
+  void sync_parameters(); // upload host parameters changed by another optimizer
   float* get_parameters(); // get current parameters pointer
   void output_parameters(Parameters& para); // Output parameters
   void initialize_parameters(Parameters& para); // Initialize optimizer parameters
