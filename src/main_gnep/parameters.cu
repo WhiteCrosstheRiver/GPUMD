@@ -18,6 +18,7 @@
 #include "utilities/common.cuh"
 #include "utilities/error.cuh"
 #include "utilities/read_file.cuh"
+#include <limits>
 #include <algorithm>
 #include <cmath>
 #include <cstring>
@@ -42,6 +43,34 @@ Parameters::Parameters()
   read_gmlp_in();
   if (is_zbl_set) {
     read_zbl_in();
+  }
+  if (!use_lm && (is_lm_set || is_lm_guard_set || is_lm_check_set || is_lm_fast_set)) {
+    PRINT_INPUT_ERROR("lm, lm_guard, lm_check, and lm_fast require optimizer lm.");
+  }
+  if (use_lm) {
+    if (prediction) {
+      PRINT_INPUT_ERROR("optimizer lm is a training option; omit it for prediction.");
+    }
+    if (!loss_rmse || lambda_1 != 0.0 || weight_decay != 0.0f || use_full_batch) {
+      PRINT_INPUT_ERROR(
+        "optimizer lm requires loss_rmse, lambda_1 0, weight_decay 0, and batch <size> 0.");
+    }
+    if (!is_lm_guard_set || lm_guard_filename.empty()) {
+      PRINT_INPUT_ERROR("optimizer lm requires an explicit nonempty lm_guard file and ratio.");
+    }
+    int device_count = 0;
+    CHECK(cudaGetDeviceCount(&device_count));
+    if (device_count != 1) {
+      PRINT_INPUT_ERROR("optimizer lm currently requires exactly one visible GPU.");
+    }
+  }
+  if (!use_lm && (loss_rmse || lambda_1 > 0 || lambda_2 > 0)) {
+    PRINT_INPUT_ERROR("loss_rmse, lambda_1, and lambda_2 currently require optimizer lm.");
+  }
+  if (
+    loss_rmse && (fcvp_epsilon < std::numeric_limits<float>::min() ||
+                  fcvp_epsilon > std::numeric_limits<float>::max())) {
+    PRINT_INPUT_ERROR("RMSE epsilon must be in the positive normal float range.");
   }
   calculate_parameters();
   report_inputs();
@@ -171,7 +200,8 @@ void Parameters::read_zbl_in()
 void Parameters::calculate_parameters()
 {
   dim_radial = n_max_radial + 1;             // 2-body descriptors q^i_n
-  dim_angular = (n_max_angular + 1) * L_max; // 3-body descriptors q^i_nl
+  num_L = L_max + (L_max_4body == 2) + (L_max_5body == 1);
+  dim_angular = (n_max_angular + 1) * num_L; // 3-, 4- and 5-body descriptors
   dim = dim_radial + dim_angular;
   q_scaler_cpu.resize(dim, 1.0e10f);
 #ifdef USE_FIXED_SCALER
@@ -433,7 +463,21 @@ void Parameters::parse_one_keyword(std::vector<std::string>& tokens)
   for (int n = 0; n < num_param; ++n) {
     param[n] = tokens[n].c_str();
   }
-  if (strcmp(param[0], "prediction") == 0) {
+  if (strcmp(param[0], "optimizer") == 0) {
+    parse_optimizer(param, num_param);
+  } else if (strcmp(param[0], "lm") == 0) {
+    parse_lm(param, num_param);
+  } else if (strcmp(param[0], "lm_guard") == 0) {
+    parse_lm_guard(param, num_param);
+  } else if (strcmp(param[0], "lm_check") == 0) {
+    parse_lm_check(param, num_param);
+  } else if (strcmp(param[0], "lm_fast") == 0) {
+    parse_lm_fast(param, num_param);
+  } else if (strcmp(param[0], "loss_rmse") == 0) {
+    parse_loss_rmse(param, num_param);
+  } else if (strcmp(param[0], "lambda_1") == 0 || strcmp(param[0], "lambda_2") == 0) {
+    parse_regularization(param, num_param);
+  } else if (strcmp(param[0], "prediction") == 0) {
     parse_prediction(param, num_param);
   } else if (strcmp(param[0], "type") == 0) {
     parse_type(param, num_param);
@@ -727,8 +771,8 @@ void Parameters::parse_l_max(const char** param, int num_param)
 {
   is_l_max_set = true;
 
-  if (num_param != 2) {
-    PRINT_INPUT_ERROR("l_max should only have 1 parameter for 3-body descriptors.\n");
+  if (num_param < 2 || num_param > 4) {
+    PRINT_INPUT_ERROR("l_max requires L3 [L4 [L5]].\n");
   }
   if (!is_valid_int(param[1], &L_max)) {
     PRINT_INPUT_ERROR("l_max for 3-body descriptors should be an integer.\n");
@@ -739,6 +783,95 @@ void Parameters::parse_l_max(const char** param, int num_param)
   if (L_max > 8) {
     PRINT_INPUT_ERROR("l_max for 3-body descriptors should <= 8.");
   }
+  L_max_4body = L_max_5body = 0;
+  if (num_param >= 3 && !is_valid_int(param[2], &L_max_4body)) {
+    PRINT_INPUT_ERROR("l_max for 4-body descriptors should be an integer.");
+  }
+  if (num_param == 4 && !is_valid_int(param[3], &L_max_5body)) {
+    PRINT_INPUT_ERROR("l_max for 5-body descriptors should be an integer.");
+  }
+  if ((L_max_4body != 0 && L_max_4body != 2) || L_max_4body > L_max) {
+    PRINT_INPUT_ERROR("l_max_4body must be 0 or 2 and not exceed l_max_3body.");
+  }
+  if ((L_max_5body != 0 && L_max_5body != 1) || (L_max_5body && !L_max_4body)) {
+    PRINT_INPUT_ERROR("l_max_5body must be 0 or 1; 1 requires l_max_4body = 2.");
+  }
+}
+
+void Parameters::parse_optimizer(const char** param, int num_param)
+{
+  if (num_param != 2 || (strcmp(param[1], "adam") != 0 && strcmp(param[1], "lm") != 0)) {
+    PRINT_INPUT_ERROR("optimizer requires adam or lm.");
+  }
+  use_lm = strcmp(param[1], "lm") == 0;
+}
+
+void Parameters::parse_lm(const char** param, int num_param)
+{
+  if (
+    num_param != 5 || !is_valid_int(param[1], &lm_probes) ||
+    !is_valid_int(param[2], &lm_candidates) || !is_valid_real(param[3], &lm_force_ema) ||
+    !is_valid_real(param[4], &lm_lambda0) || lm_probes < 1 || lm_probes > 1024 ||
+    lm_candidates < 1 || lm_candidates > 64 || !std::isfinite(lm_force_ema) ||
+    lm_force_ema <= 0.0 || lm_force_ema > 1.0 || !std::isfinite(lm_lambda0) ||
+    lm_lambda0 < 1e-9 || lm_lambda0 > 1e9) {
+    PRINT_INPUT_ERROR(
+      "lm requires probes in [1,1024], candidates in [1,64], force EMA in (0,1], and damping in [1e-9,1e9].");
+  }
+  is_lm_set = true;
+}
+
+void Parameters::parse_lm_guard(const char** param, int num_param)
+{
+  if (
+    num_param != 3 || param[1][0] == '\0' || !is_valid_real(param[2], &lm_guard_ratio) ||
+    !std::isfinite(lm_guard_ratio) || lm_guard_ratio < 1.0) {
+    PRINT_INPUT_ERROR("lm_guard requires a guard filename and a finite ratio >= 1.");
+  }
+  lm_guard_filename = param[1];
+  if (lm_guard_filename == "train.xyz" || lm_guard_filename == "test.xyz") {
+    PRINT_INPUT_ERROR("lm_guard must name a dedicated file distinct from train.xyz and test.xyz.");
+  }
+  is_lm_guard_set = true;
+}
+
+void Parameters::parse_lm_check(const char** param, int num_param)
+{
+  if (num_param != 2 || !is_valid_int(param[1], &lm_check) || (lm_check != 0 && lm_check != 1)) {
+    PRINT_INPUT_ERROR("lm_check requires 0 or 1.");
+  }
+  is_lm_check_set = true;
+}
+
+void Parameters::parse_lm_fast(const char** param, int num_param)
+{
+  if (num_param != 2 || !is_valid_int(param[1], &lm_fast) || (lm_fast != 0 && lm_fast != 1)) {
+    PRINT_INPUT_ERROR("lm_fast requires 0 or 1.");
+  }
+  is_lm_fast_set = true;
+}
+
+void Parameters::parse_regularization(const char** param, int num_param)
+{
+  double value;
+  if (num_param != 2 || !is_valid_real(param[1], &value) || value < 0 || !std::isfinite(value)) {
+    PRINT_INPUT_ERROR("Regularization weight must be finite and nonnegative.");
+  }
+  if (strcmp(param[0], "lambda_1") == 0) {
+    lambda_1 = value;
+  } else {
+    lambda_2 = value;
+  }
+}
+
+void Parameters::parse_loss_rmse(const char** param, int num_param)
+{
+  if (
+    num_param != 2 || !is_valid_real(param[1], &fcvp_epsilon) || !(fcvp_epsilon > 0) ||
+    !std::isfinite(fcvp_epsilon)) {
+    PRINT_INPUT_ERROR("loss_rmse requires a positive finite smoothing epsilon.");
+  }
+  loss_rmse = true;
 }
 
 void Parameters::parse_neuron(const char** param, int num_param)

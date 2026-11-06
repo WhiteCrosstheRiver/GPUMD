@@ -64,6 +64,9 @@ public:
     int n_max_radial = 0;  // n_radial = 0, 1, 2, ..., n_max_radial
     int n_max_angular = 0; // n_angular = 0, 1, 2, ..., n_max_angular
     int L_max = 0;         // l = 1, 2, ..., L_max
+    int L_max_4body = 0;
+    int L_max_5body = 0;
+    int num_L = 0;
     int dim_angular;
     int num_types = 0;
     int num_types_sq = 0;
@@ -117,6 +120,12 @@ public:
     int global_num_configurations,
     int global_num_atoms,
     int global_virial_components);
+
+  // Neighbor and descriptor data of the immediately preceding find_force.
+  GNEP_Data& cached_data(int device_id = 0)
+  {
+    return contexts.at(device_id)->data;
+  }
 
   virtual Gradients& getGradients(int device_id) override
   {

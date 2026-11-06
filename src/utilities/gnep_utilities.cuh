@@ -135,7 +135,7 @@ const int SIZE_BOX_AND_INVERSE_BOX = 18; // (3 * 3) * 2
 const int MAX_NUM_N = 17;                // basis_size_radial+1 = 16+1
 const int MAX_DIM = 103;                 // 13 + 9 * 10
 const int MAX_DIM_ANGULAR = 90;          // 9 * 10
-const int MAX_LN = 72;                   // 9 * 8
+const int MAX_LN = MAX_DIM_ANGULAR;      // includes 4- and 5-body channels
 
 // Template specialization to replace switch statement for Z_COEFFICIENT lookup
 template <int L>

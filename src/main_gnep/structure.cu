@@ -495,3 +495,25 @@ bool read_structures(bool is_train, Parameters& para, std::vector<Structure>& st
 
   return has_test_set;
 }
+
+bool read_structures(const char* filename, Parameters& para, std::vector<Structure>& structures)
+{
+  if (filename == nullptr || filename[0] == '\0') {
+    PRINT_INPUT_ERROR("A structure filename is required.");
+  }
+  std::ifstream input(filename);
+  if (!input.is_open()) {
+    const std::string message = std::string("Failed to open ") + filename + ".";
+    PRINT_INPUT_ERROR(message.c_str());
+  }
+  print_line_1();
+  std::cout << "Started reading " << filename << std::endl;
+  print_line_2();
+  std::string xyz_filename = filename;
+  read_exyz(para, input, structures, xyz_filename);
+  input.close();
+  if (structures.empty()) {
+    PRINT_INPUT_ERROR("The requested structure file contains no structures.");
+  }
+  return true;
+}

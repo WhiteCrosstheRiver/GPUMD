@@ -15,6 +15,7 @@
 
 #include "fitness.cuh"
 #include "gnep.cuh"
+#include "nep_lm.cuh"
 #include "parameters.cuh"
 #include "structure.cuh"
 #include "utilities/error.cuh"
@@ -23,6 +24,7 @@
 #include <algorithm>
 #include <chrono>
 #include <ctime>
+#include <sys/stat.h>
 #include <iostream>
 #include <random>
 #include <sstream>
@@ -242,6 +244,42 @@ Fitness::Fitness(Parameters& para, Adam* adam)
     print_line_2();
   }
 
+  if (para.use_lm) {
+    struct stat guard_info;
+    const bool guard_exists = stat(para.lm_guard_filename.c_str(), &guard_info) == 0;
+    std::string guard_path = para.lm_guard_filename;
+    while (guard_path.compare(0, 2, "./") == 0) {
+      guard_path.erase(0, 2);
+    }
+    for (const char* filename : {
+           "train.xyz", "test.xyz", "lm.out", "loss.out", "nep.txt", "gnep.restart",
+           "energy_train.out", "force_train.out", "virial_train.out", "stress_train.out",
+           "energy_test.out", "force_test.out", "virial_test.out", "stress_test.out",
+           "descriptor.out", "fcvp.out"}) {
+      struct stat info;
+      const bool same_file =
+        guard_exists && stat(filename, &info) == 0 && guard_info.st_ino != 0 &&
+        guard_info.st_ino == info.st_ino && guard_info.st_dev == info.st_dev;
+      if (guard_path == filename || same_file) {
+        PRINT_INPUT_ERROR("LM guard must not alias train.xyz, test.xyz, or native output files.");
+      }
+    }
+    std::vector<Structure> structures_guard;
+    read_structures(para.lm_guard_filename.c_str(), para, structures_guard);
+    guard_set.resize(1);
+    print_line_1();
+    printf("Constructing LM guard_set in device 0.\n");
+    CHECK(cudaSetDevice(0));
+    guard_set[0].construct(para, structures_guard, false, 0, structures_guard.size(), 0);
+    const Dataset& guard_data = guard_set[0];
+    capacities[0].max_atoms = std::max(capacities[0].max_atoms, guard_data.N);
+    capacities[0].max_radial_pairs =
+      std::max(capacities[0].max_radial_pairs, guard_data.N * guard_data.max_NN_radial);
+    capacities[0].max_angular_pairs =
+      std::max(capacities[0].max_angular_pairs, guard_data.N * guard_data.max_NN_angular);
+    print_line_2();
+  }
+
   N = -1;
   int N_times_max_NN_radial = -1;
   int N_times_max_NN_angular = -1;
@@ -281,6 +319,15 @@ Fitness::Fitness(Parameters& para, Adam* adam)
     if (batch_max_angular_neighbors > max_NN_angular) {
       max_NN_angular = batch_max_angular_neighbors;
     }
+  }
+
+  if (!guard_set.empty()) {
+    const Dataset& data = guard_set[0];
+    N = std::max(N, data.N);
+    N_times_max_NN_radial = std::max(N_times_max_NN_radial, data.N * data.max_NN_radial);
+    N_times_max_NN_angular = std::max(N_times_max_NN_angular, data.N * data.max_NN_angular);
+    max_NN_radial = std::max(max_NN_radial, data.max_NN_radial);
+    max_NN_angular = std::max(max_NN_angular, data.max_NN_angular);
   }
 
   potential.reset(new GNEP(para, capacities));
@@ -395,6 +442,10 @@ void Fitness::compute(Parameters& para)
       std::random_device rd;
       shuffle_rng.seed(rd());
     }
+    std::unique_ptr<NEP_LM> lm_optimizer;
+    if (para.use_lm) {
+      lm_optimizer.reset(new NEP_LM(para, *static_cast<GNEP*>(potential.get())));
+    }
     for (int step = 0; step < maximum_steps; ++step) {
       int batch_id = step % num_batches;
       if (batch_id == 0) {
@@ -416,8 +467,15 @@ void Fitness::compute(Parameters& para)
         update_learning_rate_cos(lr, step, num_batches, para);
       }
       const auto step_begin = std::chrono::steady_clock::now();
+      Batch_MSE lm_mse;
+      if (lm_optimizer) {
+        lm_mse = lm_optimizer->update(
+          para, *static_cast<GNEP*>(potential.get()), batch.shards, guard_set, parameters, step);
+        optimizer->sync_parameters();
+      }
       std::vector<std::thread> workers;
-      for (int device_id = 0; device_id < static_cast<int>(batch.shards.size()); ++device_id) {
+      for (int device_id = 0; !lm_optimizer && device_id < static_cast<int>(batch.shards.size());
+           ++device_id) {
         workers.emplace_back([&, device_id]() {
           potential->find_force(
             para,
@@ -441,7 +499,8 @@ void Fitness::compute(Parameters& para)
       double force_error_sum = 0.0;
       double virial_error_sum = 0.0;
       std::vector<double> reduced_gradient(number_of_variables, 0.0);
-      for (int device_id = 0; device_id < static_cast<int>(batch.shards.size()); ++device_id) {
+      for (int device_id = 0; !lm_optimizer && device_id < static_cast<int>(batch.shards.size());
+           ++device_id) {
         Dataset& shard = batch.shards[device_id];
         const auto mse_energy_array = shard.get_mse_energy(para, true, device_id);
         shard.get_mse_force(para, true, device_id);
@@ -479,6 +538,11 @@ void Fitness::compute(Parameters& para)
         for (int variable = 0; variable < number_of_variables; ++variable) {
           reduced_gradient[variable] += local_gradient[variable];
         }
+      }
+      if (lm_optimizer) {
+        energy_error_sum = lm_mse.energy * batch.num_configurations;
+        force_error_sum = lm_mse.force * batch.num_atoms * 3.0;
+        virial_error_sum = lm_mse.virial * batch.virial_components;
       }
       std::vector<float> global_gradient(number_of_variables);
       for (int variable = 0; variable < number_of_variables; ++variable) {
@@ -527,7 +591,9 @@ void Fitness::compute(Parameters& para)
       count += Nc;
       count_force += batch.num_atoms * 3;
       count_virial += batch.virial_components;
-      optimizer->update(lr, global_gradient);
+      if (!lm_optimizer) {
+        optimizer->update(lr, global_gradient);
+      }
 #ifdef GNEP_TEST_DIAGNOSTICS
       if (step == 0) {
         write_diagnostic_values(
@@ -732,7 +798,7 @@ void Fitness::write_gnep_txt(FILE* fid_gnep, Parameters& para, float* parameters
 
   fprintf(fid_gnep, "n_max %d %d\n", para.n_max_radial, para.n_max_angular);
   fprintf(fid_gnep, "basis_size %d %d\n", para.basis_size_radial, para.basis_size_angular);
-  fprintf(fid_gnep, "l_max %d 0 0\n", para.L_max);
+  fprintf(fid_gnep, "l_max %d %d %d\n", para.L_max, para.L_max_4body, para.L_max_5body);
 
   fprintf(fid_gnep, "ANN %d %d\n", para.num_neurons1, 0);
   for (int m = 0; m < para.number_of_variables_ann; ++m) {

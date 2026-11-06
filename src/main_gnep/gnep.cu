@@ -33,6 +33,7 @@ heat transport, Phys. Rev. B. 104, 104309 (2021).
 #include "utilities/error.cuh"
 #include "utilities/gpu_vector.cuh"
 #include "utilities/gnep_utilities.cuh"
+#include "higher_body.cuh"
 #include <algorithm>
 
 static __global__ void gpu_find_neighbor_list(
@@ -204,13 +205,14 @@ static __global__ void find_descriptors_angular(
         accumulate_s(paramb.L_max, d12, x12, y12, z12, gn12, s);
       }
       find_q(paramb.L_max, paramb.n_max_angular + 1, n, s, q);
+      gnep_higher_body::values(paramb, n, s, q);
       for (int abc = 0; abc < NUM_OF_ABC; ++abc) {
         g_sum_fxyz[(n * NUM_OF_ABC + abc) * N + n1] = s[abc];
       }
     }
 
     for (int n = 0; n <= paramb.n_max_angular; ++n) {
-      for (int l = 0; l < paramb.L_max; ++l) {
+      for (int l = 0; l < paramb.num_L; ++l) {
         int ln = l * (paramb.n_max_angular + 1) + n;
         g_descriptors[n1 + ((paramb.n_max_radial + 1) + ln) * N] = q[ln];
       }
@@ -232,6 +234,9 @@ GNEP::GNEP(
   paramb.n_max_radial = para.n_max_radial;
   paramb.n_max_angular = para.n_max_angular;
   paramb.L_max = para.L_max;
+  paramb.L_max_4body = para.L_max_4body;
+  paramb.L_max_5body = para.L_max_5body;
+  paramb.num_L = para.num_L;
   paramb.dim_angular = para.dim_angular;
 
   paramb.basis_size_radial = para.basis_size_radial;
@@ -501,7 +506,8 @@ static __global__ void gpu_sum_virial_error(
   float* g_virial,
   float* g_virial_ref,
   float* diff_gpu,
-  float* error_gpu)
+  float* error_gpu,
+  float* error_unweighted_gpu)
 {
   int tid = threadIdx.x;
   int bid = blockIdx.x;
@@ -540,12 +546,15 @@ static __global__ void gpu_sum_virial_error(
 
   if (tid == 0) {
     float error_sum = 0.0f;
+    float error_unweighted_sum = 0.0f;
     for (int d = 0; d < 6; ++d) {
       float diff = (s_virial[d * blockDim.x + 0] / Na - g_virial_ref[d * gridDim.x + bid]);
       error_sum += (d >= 3) ? (shear_weight * diff * diff) : (diff * diff);
+      error_unweighted_sum += diff * diff;
       diff_gpu[bid * 6 + d] = (d >= 3) ? shear_weight * diff : diff;
     }
     error_gpu[bid] = error_sum;
+    error_unweighted_gpu[bid] = error_unweighted_sum;
   }
 }
 
@@ -873,7 +882,7 @@ static __global__ void compute_grad_radial_NM(
           for (int ka = 0; ka <= paramb.basis_size_angular; ++ka) {
             float f_c_n1[3] = {0.0f};
             float v_c_n1[6] = {0.0f};
-            for (int l = 0; l < paramb.L_max; ++l) {
+            for (int l = 0; l < paramb.num_L; ++l) {
               float feat_xyz_sum[3] = {0.0f};
               float feat_123_sum[6] = {0.0f};
               ln = l * (paramb.n_max_angular + 1) + na;
@@ -893,7 +902,7 @@ static __global__ void compute_grad_radial_NM(
                 feat_123_sum[4] += feat_z_ma * r12[1] * E2;
                 feat_123_sum[5] += feat_x_ma * r12[2] * E2;
               }
-              accumulate_qc(N, l + 1, na, paramb.n_max_angular + 1, paramb.basis_size_angular+1, d12, r12_tmp, fn12[ka], &g_sum_fxyz[n1], &q_c_ang);
+              gnep_higher_body::qc(paramb, N, l, na, d12, r12_tmp, fn12[ka], &g_sum_fxyz[n1], &q_c_ang);
               q_c_scaler_ang = q_c_ang * g_q_scaler[paramb.n_max_radial + 1 + ln];
               f_c_n1[0] += feat_xyz_sum[0] * q_c_scaler_ang;
               f_c_n1[1] += feat_xyz_sum[1] * q_c_scaler_ang;
@@ -1163,6 +1172,8 @@ static __global__ void compute_grad_angular_NM(
       gn12[n] += fn12[k] * annmb.c[c_index];
       gnp12[n] += fnp12[k] * annmb.c[c_index];
       accumulate_ec(N, paramb.L_max, n, paramb.n_max_angular + 1, paramb.basis_size_angular+1, d12_i1, r12_i1, fn12[k], fnp12[k], &g_sum_fxyz[n1], &g_sum_s2xyz[n1], &g_sum_s2xyz123[n1], Fp, &e_c, qp_c_tmp, qp_c_tmp123);
+      e_c += gnep_higher_body::energy_derivative(
+        paramb, N, n, d12_i1, r12_i1, fn12[k], &g_sum_fxyz[n1], Fp);
       grad_c_index = c_index + annmb.num_ann;
       grad_c_sum = force_factor * (qp_c_tmp[0] * dx_n1 + qp_c_tmp[1] * dy_n1 + qp_c_tmp[2] * dz_n1);
       grad_c_sum += per_Nc_e * e_c;
@@ -1170,6 +1181,18 @@ static __global__ void compute_grad_angular_NM(
       atomicAdd(&g_grad_sum[grad_c_index], grad_c_sum);
     }
     accumulate_dfe(N, NM, paramb.L_max, n, paramb.n_max_angular + 1, d12_i1, r12_i1, gn12[n], gnp12[n], &g_sum_fxyz[n1], &feat_x[n], &feat_y[n], &feat_z[n]);
+    gnep_higher_body::feature_derivatives(
+      paramb,
+      N,
+      n,
+      d12_i1,
+      r12_i1,
+      gn12[n],
+      gnp12[n],
+      &g_sum_fxyz[n1],
+      &feat_x[n],
+      &feat_y[n],
+      &feat_z[n]);
   } // end of loop over n_max_ang
   float r12[3] = {0.0f};
   float d12 = 0.0f;
@@ -1210,7 +1233,7 @@ static __global__ void compute_grad_angular_NM(
       for (int k = 0; k <= paramb.basis_size_angular; ++k) {
         float f_c_n1[3] = {0.0f};
         float v_c_n1[6] = {0.0f};
-        for (int l = 0; l < paramb.L_max; ++l) {
+        for (int l = 0; l < paramb.num_L; ++l) {
           float feat_xyz_sum[3] = {0.0f};
           float feat_123_sum[6] = {0.0f};
           ln = l * (paramb.n_max_angular + 1) + n;
@@ -1230,7 +1253,7 @@ static __global__ void compute_grad_angular_NM(
             feat_123_sum[4] += feat_z_m * r12_i1[1] * E2;
             feat_123_sum[5] += feat_x_m * r12_i1[2] * E2;
           }
-          accumulate_qc(N, l + 1, n, paramb.n_max_angular + 1, paramb.basis_size_angular+1, d12, r12, fn12[k], &g_sum_fxyz[n1], &q_c_ang);
+          gnep_higher_body::qc(paramb, N, l, n, d12, r12, fn12[k], &g_sum_fxyz[n1], &q_c_ang);
           q_c_scaler = q_c_ang * g_q_scaler[paramb.n_max_radial + 1 + ln];
           f_c_n1[0] += feat_xyz_sum[0] * q_c_scaler;
           f_c_n1[1] += feat_xyz_sum[1] * q_c_scaler;
@@ -1246,6 +1269,30 @@ static __global__ void compute_grad_angular_NM(
         grad_c_sum = f_c_n1[0] * dx_diff + f_c_n1[1] * dy_diff + f_c_n1[2] * dz_diff;
         grad_c_sum -= force_factor * (qp_c_tmp1[0] * dx_n2_tmp + qp_c_tmp1[1] * dy_n2_tmp + qp_c_tmp1[2] * dz_n2_tmp + qp_c_tmp2[0] * dx_n2 + qp_c_tmp2[1] * dy_n2 + qp_c_tmp2[2] * dz_n2);
         grad_c_sum -= v_c_n1[0] * diff[0] + v_c_n1[1] * diff[1] + v_c_n1[2] * diff[2] + v_c_n1[3] * diff[3] + v_c_n1[4] * diff[4] + v_c_n1[5] * diff[5];
+
+        float higher_mixed[3];
+        gnep_higher_body::mixed_derivative(
+          paramb,
+          N,
+          n,
+          d12_i1,
+          r12_i1,
+          gn12[n],
+          gnp12[n],
+          d12,
+          r12,
+          fn12[k],
+          fnp12[k],
+          i1 == j,
+          &g_sum_fxyz[n1],
+          Fp,
+          higher_mixed);
+        grad_c_sum +=
+          higher_mixed[0] * dx_diff + higher_mixed[1] * dy_diff + higher_mixed[2] * dz_diff;
+        grad_c_sum -=
+          higher_mixed[0] * r12_i1[0] * diff[0] + higher_mixed[1] * r12_i1[1] * diff[1] +
+          higher_mixed[2] * r12_i1[2] * diff[2] + higher_mixed[1] * r12_i1[0] * diff[3] +
+          higher_mixed[2] * r12_i1[1] * diff[4] + higher_mixed[0] * r12_i1[2] * diff[5];
 
         type_base = t1 * paramb.num_types + t2_tmp + paramb.num_c_radial;
         c_index = (n_base + k) * paramb.num_types_sq + type_base;
@@ -1523,6 +1570,7 @@ static __global__ void find_force_angular(
           gnp12 += fnp12[k] * annmb.c[c_index];
         }          
         accumulate_f12(N, requires_grad, paramb.L_max, n, paramb.n_max_angular + 1, d12, r12, gn12, gnp12, Fp, &g_sum_fxyz[n1], &g_sum_s2xyz[n1], &g_sum_s2xyz123[n1], f12);
+        gnep_higher_body::force(paramb, N, n, d12, r12, gn12, gnp12, &g_sum_fxyz[n1], Fp, f12);
       } // end of loop over n_max_ang
 
       atomicAdd(&g_fx[n1], f12[0]);
@@ -1870,7 +1918,8 @@ void GNEP::find_force(
       dataset[device_id].error_gpu.data());
     CHECK(cudaMemcpy(dataset[device_id].error_cpu_e.data(), dataset[device_id].error_gpu.data(), dataset[device_id].Nc * sizeof(float), cudaMemcpyDeviceToHost));
 
-    float shear_weight = require_grad ? para.lambda_shear * para.lambda_shear : 1.0f;
+    float shear_weight =
+      (require_grad || para.loss_rmse) ? para.lambda_shear * para.lambda_shear : 1.0f;
     gpu_sum_virial_error<<<dataset[device_id].Nc, 256, sizeof(float) * 256 * 6>>>(
       dataset[device_id].N,
       shear_weight,
@@ -1879,9 +1928,12 @@ void GNEP::find_force(
       dataset[device_id].virial.data(),
       dataset[device_id].virial_ref_gpu.data(),
       dataset[device_id].diff_gpu_v.data(),
-      dataset[device_id].error_gpu.data());
+      dataset[device_id].error_gpu.data(),
+      dataset[device_id].error_gpu_v_unweighted.data());
     CHECK(cudaMemcpy(dataset[device_id].error_cpu_v.data(), dataset[device_id].error_gpu.data(), dataset[device_id].Nc * sizeof(float), cudaMemcpyDeviceToHost));
     const int virial_nums = global_virial_components;
+    dataset[device_id].error_gpu_v_unweighted.copy_to_host(
+      dataset[device_id].error_cpu_v_unweighted.data());
 
     if (require_grad) {
       const int NM_radial = dataset[device_id].N * dataset[device_id].max_NN_radial;
@@ -2001,3 +2053,5 @@ void GNEP::find_force(
     }
   }
 }
+
+#include "nep_lm_impl.cuh"

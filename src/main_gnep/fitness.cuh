@@ -72,6 +72,7 @@ protected:
   std::unique_ptr<Potential> potential;
   std::vector<GNEPTrainingBatch> train_set;
   std::vector<Dataset> test_set;
+  std::vector<Dataset> guard_set;
   std::vector<int> batch_indices;
   std::vector<std::vector<int>> batch_type_sums;
   std::vector<float> batch_energies;
