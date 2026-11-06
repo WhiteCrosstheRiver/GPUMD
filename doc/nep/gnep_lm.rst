@@ -69,6 +69,9 @@ existing file-alias collisions are rejected before those files are opened.
 ``lm_check 1`` compares the new gradient against the native analytic gradient
 on the first update. ``lm_check 0`` is the default. Moment descriptors are
 always checked against the native predictor when a batch cache is created.
+The gradient check allocates the native gradient arrays for the whole batch, so
+it needs a batch that fits in GPU memory; a larger batch stops with an error.
+With ``lm_check 0`` these arrays are not allocated.
 LM-specific options with Adam, and LM with prediction mode, are rejected.
 
 ``lm_fast 1`` enables a faster row and candidate path; ``lm_fast 0`` is the

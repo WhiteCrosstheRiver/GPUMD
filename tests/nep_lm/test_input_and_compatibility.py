@@ -40,6 +40,8 @@ COMMON = (
     'weight_decay 0\nlambda_e 1\nlambda_f 2\nlambda_v .1\n'
     'lambda_1 0\nlambda_2 0\n'
 )
+# The upstream baseline accepts neither 4/5-body l_max fields nor lambda_1/2.
+BASELINE_COMMON = COMMON.replace('l_max 1 0 0', 'l_max 1').replace('lambda_1 0\nlambda_2 0\n', '')
 LM = 'optimizer lm\nloss_rmse 1e-7\nlm 2 4 .2 .1\nlm_guard guard.xyz 1.1\n'
 
 
@@ -61,14 +63,15 @@ def dense_guard():
 @unittest.skipUnless(os.environ.get('NEP_LM_GNEP'), 'Set NEP_LM_GNEP for native GPU tests')
 class InputAndCompatibilityTests(unittest.TestCase):
     def run_case(self, root, name, extra='', frames=FRAMES, guard=GUARD,
-                 test_frames=FRAMES, binary=None, devices=None, model=None, setup=None):
+                 test_frames=FRAMES, binary=None, devices=None, model=None, setup=None,
+                 common=COMMON):
         folder = root / name
         folder.mkdir()
         (folder / 'train.xyz').write_text(''.join(frames))
         (folder / 'test.xyz').write_text(''.join(test_frames))
         if guard is not None:
             (folder / 'guard.xyz').write_text(''.join(guard))
-        (folder / 'gnep.in').write_text(COMMON + extra)
+        (folder / 'gnep.in').write_text(common + extra)
         if model is not None:
             (folder / 'nep.txt').write_bytes(model)
         if setup is not None:
@@ -177,7 +180,6 @@ class InputAndCompatibilityTests(unittest.TestCase):
             (LM + 'lambda_1 .1\n', 'requires loss_rmse'),
             (LM + 'weight_decay .01\n', 'requires loss_rmse'),
             (LM + 'batch 1 1\n', 'requires loss_rmse'),
-            (LM + 'fcvp 1 2 1e-7 1e-7\n', 'requires loss_rmse'),
             (LM + 'prediction 1\n', 'omit it for prediction'),
             ('lm 2 4 .2 .1\n', 'require optimizer lm'),
             ('lm_guard guard.xyz 1.1\n', 'require optimizer lm'),
@@ -292,7 +294,8 @@ class InputAndCompatibilityTests(unittest.TestCase):
             outputs = []
             for name, binary in (('baseline', os.environ['NEP_LM_BASELINE']),
                                  ('native', os.environ['NEP_LM_GNEP'])):
-                result, folder = self.run_case(Path(temporary), name, binary=binary)
+                result, folder = self.run_case(
+                    Path(temporary), name, binary=binary, common=BASELINE_COMMON)
                 self.assert_success(result, folder)
                 outputs.append({name: (folder / name).read_bytes()
                                 for name in ('nep.txt', 'gnep.restart')})

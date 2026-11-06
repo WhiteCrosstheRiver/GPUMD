@@ -303,12 +303,29 @@ GNEP::GNEP(
       static_cast<size_t>(max_atoms) * static_cast<size_t>(paramb.n_max_angular + 1) *
       NUM_OF_ABC * 6);
     data.parameters.resize(context->ann.num_para);
-    context->gradients.allocate(
-      max_training_atoms,
-      max_configurations,
-      para.number_of_variables,
-      para.number_of_variables_ann,
-      para.dim);
+    // LM builds its own rows; only its lm_check gate needs the native gradient arrays.
+    if (!para.use_lm || para.lm_check) {
+      if (para.use_lm) {
+        size_t free_bytes = 0;
+        size_t total_bytes = 0;
+        CHECK(cudaMemGetInfo(&free_bytes, &total_bytes));
+        const double needed = sizeof(float) * double(max_training_atoms) *
+                              para.number_of_variables_ann * (para.dim + 1.0);
+        if (needed > free_bytes) {
+          printf(
+            "lm_check needs %.1f GB of GPU memory; %.1f GB is free.\n",
+            needed / 1e9,
+            free_bytes / 1e9);
+          PRINT_INPUT_ERROR("lm_check exceeds GPU memory; use a smaller batch or lm_check 0.");
+        }
+      }
+      context->gradients.allocate(
+        max_training_atoms,
+        max_configurations,
+        para.number_of_variables,
+        para.number_of_variables_ann,
+        para.dim);
+    }
     contexts.emplace_back(std::move(context));
   }
 }
