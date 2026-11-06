@@ -25,7 +25,7 @@ SHARED_BIAS = 2 * NETWORK_PARAMETERS
 PARAMETERS = SHARED_BIAS + 1 + 2 * 4 * 3 * 5
 BASE_CONFIG = (
     "type 2 Si Ge\nversion 4\ncutoff 4 4\nn_max 2 2\nbasis_size 4 4\n"
-    "l_max 4 2 0\nneuron 8\nbatch 1000 0\npopulation 10\n"
+    "l_max 4 2 0\nneuron 8\nbatch 1000\npopulation 10\n"
     "generation 100\nlambda_e 1\nlambda_f 1\nlambda_v 0.1\n"
 )
 
@@ -83,10 +83,12 @@ def read_loss(folder):
 
 def read_parameters(path):
     lines = path.read_text().splitlines()
-    require(lines[0].split() == ["nep4", "2", "Si", "Ge"],
+    require(lines[0].split() == ["nep", "2", "Si", "Ge"],
             "Unexpected model element order/version")
-    end = next(i for i, line in enumerate(lines) if line.startswith("ANN ")) + 1
-    values = np.array([float(line) for line in lines[end:]])
+    end = next(i for i, line in enumerate(lines) if line.startswith("ann ")) + 1
+    numeric = [line for line in lines[end:] if len(line.split()) == 1
+               and not line.split()[0][0].isalpha()]
+    values = np.array([float(line) for line in numeric])
     require(len(values) == PARAMETERS + DIMENSION, "Unexpected model length")
     require(np.isfinite(values).all(), "Non-finite exported model")
     return values[:PARAMETERS]
@@ -103,7 +105,9 @@ def run_case(args, name, mean, sigma, *, optimizer="lmma", seed="42016",
             shutil.copyfile(source, folder / filename)
         else:
             (folder / filename).write_text(synthetic_xyz(), encoding="ascii")
-    np.savetxt(folder / "nep.restart", np.column_stack((mean, sigma)), fmt="%.9e")
+    np.savetxt(folder / "nep.restart", np.column_stack((mean, sigma)), fmt="%.9e",
+               header=f"nep_restart\nenergy_reference 2 0 0\nparameters {len(mean)}",
+               comments="")
     initial_hash = sha256(folder / "nep.restart")
     (folder / "nep.in").write_text(
         config + f"lambda_1 {regularization[0]}\nlambda_2 {regularization[1]}\n",
@@ -216,7 +220,7 @@ def main():
             ("whitespace_seed", {"seed": " 1"}, "decimal digits only"),
             ("overflow_seed", {"seed": "18446744073709551616"}, "outside the uint64 range"),
             ("unsupported_nep3", {"config": BASE_CONFIG.replace("version 4", "version 3")},
-             "requires ordinary NEP4 training"),
+             "version should = 4"),
         ]
         for name, changes, message in cases:
             report["tests"][name] = run_case(args, name, mean, sigma,
@@ -230,7 +234,7 @@ def main():
         invalid_mean[0] = np.nan
         report["tests"]["nonfinite_mean"] = run_case(
             args, "nonfinite_mean", invalid_mean, sigma,
-            expect_error="finite mean and isotropic initial sigma")
+            expect_error="invalid mu/sigma value")
         report["status"] = "PASS"
     except Exception as error:
         report.update(status="FAIL", error=repr(error))
