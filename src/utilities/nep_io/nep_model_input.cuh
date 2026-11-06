@@ -40,5 +40,7 @@ private:
   std::ifstream file;
   std::istringstream converted;
   bool new_format = false;
+  bool translated_nep5 = false;
+  void translate_nep5();
   std::vector<double> reference;
 };

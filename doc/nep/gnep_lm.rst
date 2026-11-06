@@ -140,6 +140,12 @@ aggregating batches evaluated at successive parameter states.
 EMA, damping history, or historical guard minimum. Restarted training is not
 an exact continuation of the previous optimizer state.
 
+Using Models In MD
+------------------
+
+``gnep`` writes ``nep5`` model files. ``gpumd`` loads them by mapping each per-element
+output bias onto ``energy_reference``, so energies and forces match native NEP5.
+
 Scope And Resources
 -------------------
 

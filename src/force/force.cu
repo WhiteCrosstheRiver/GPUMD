@@ -137,6 +137,7 @@ std::unique_ptr<Potential> Force::create_potential(
     is_nep = true;
   } else if (
     strcmp(potential_name, "nep4") == 0 || strcmp(potential_name, "nep4_zbl") == 0 ||
+    strcmp(potential_name, "nep5") == 0 || strcmp(potential_name, "nep5_zbl") == 0 ||
     strcmp(potential_name, "nep4_temperature") == 0 ||
     strcmp(potential_name, "nep4_zbl_temperature") == 0) {
     int num_gpus;
