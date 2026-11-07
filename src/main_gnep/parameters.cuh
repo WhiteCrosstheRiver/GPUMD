@@ -42,6 +42,12 @@ public:
   double fcvp_epsilon = 1e-8; // smoothing epsilon of the RMSE objective
   double lambda_1 = 0.0;
   double lambda_2 = 0.0;
+  int fcvp_interval = 0;   // projection every this many steps; 0 is off
+  int fcvp_iterations = 40;
+  double fcvp_tolerance = 1e-8;
+  int fcvp_memory_mib = 512;
+  int fcvp_check = 0;      // 1: sampled finite-difference gradient gate, 2: all parameters
+  std::vector<int> output_parameter_indices() const;
   bool use_lm = false;
   int lm_probes = 16;
   int lm_candidates = 8;
@@ -179,6 +185,9 @@ private:
   void parse_lm_check(const char** param, int num_param);
   void parse_lm_fast(const char** param, int num_param);
   void parse_loss_rmse(const char** param, int num_param);
+  void parse_fcvp(const char** param, int num_param);
+  void parse_fcvp_memory(const char** param, int num_param);
+  void parse_fcvp_check(const char** param, int num_param);
   void parse_regularization(const char** param, int num_param);
   void parse_start_lr(const char** param, int num_param);
   void parse_stop_lr(const char** param, int num_param);

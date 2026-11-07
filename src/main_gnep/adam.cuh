@@ -30,7 +30,7 @@ public:
 
   // void zero_gradients();
   void update(float lr, const std::vector<float>& gradients); // Update moments and parameters
-  void sync_parameters(); // upload host parameters changed by another optimizer
+  void sync_parameters(); // upload host parameters changed by another optimizer or FCVP
   float* get_parameters(); // get current parameters pointer
   void output_parameters(Parameters& para); // Output parameters
   void initialize_parameters(Parameters& para); // Initialize optimizer parameters
@@ -62,6 +62,11 @@ protected:
   GPU_Vector<float> gpu_m; // First moment m
   GPU_Vector<float> gpu_v; // Second moment v
   GPU_Vector<float> gpu_gradient; // Host-reduced global gradient
+  GPU_Vector<int> update_mask;     // FCVP: output weights are set by projection, not Adam
+  bool project_output = false;
+  double lambda1 = 0.0;
+  double lambda2 = 0.0;
+  double loss_epsilon = 1e-8;
   GPU_Vector<float> gpu_gradient_norm; // Clipping workspace
 
 };

@@ -51,9 +51,10 @@ Parameters::Parameters()
     if (prediction) {
       PRINT_INPUT_ERROR("optimizer lm is a training option; omit it for prediction.");
     }
-    if (!loss_rmse || lambda_1 != 0.0 || weight_decay != 0.0f || use_full_batch) {
+    if (!loss_rmse || lambda_1 != 0.0 || weight_decay != 0.0f || use_full_batch || fcvp_interval ||
+        fcvp_check) {
       PRINT_INPUT_ERROR(
-        "optimizer lm requires loss_rmse, lambda_1 0, weight_decay 0, and batch <size> 0.");
+        "optimizer lm requires loss_rmse, lambda_1 0, weight_decay 0, batch <size> 0, and no fcvp.");
     }
     if (!is_lm_guard_set || lm_guard_filename.empty()) {
       PRINT_INPUT_ERROR("optimizer lm requires an explicit nonempty lm_guard file and ratio.");
@@ -64,8 +65,14 @@ Parameters::Parameters()
       PRINT_INPUT_ERROR("optimizer lm currently requires exactly one visible GPU.");
     }
   }
-  if (!use_lm && (loss_rmse || lambda_1 > 0 || lambda_2 > 0)) {
-    PRINT_INPUT_ERROR("loss_rmse, lambda_1, and lambda_2 currently require optimizer lm.");
+  if (fcvp_interval && weight_decay != 0.0f) {
+    PRINT_INPUT_ERROR("FCVP requires weight_decay 0; use lambda_2 for norm regularization.");
+  }
+  if ((lambda_1 > 0 || lambda_2 > 0) && !loss_rmse) {
+    PRINT_INPUT_ERROR("lambda_1/lambda_2 require loss_rmse or fcvp.");
+  }
+  if (loss_rmse && use_full_batch) {
+    PRINT_INPUT_ERROR("loss_rmse/FCVP does not support batch accumulation; use batch <size> 0.");
   }
   if (
     loss_rmse && (fcvp_epsilon < std::numeric_limits<float>::min() ||
@@ -273,7 +280,8 @@ void Parameters::reduce_and_broadcast_scaler()
   }
 
   for (int d = 0; d < dim; ++d) {
-    q_scaler_cpu[d] = 1.0f / (global_max[d] - global_min[d]);
+    const float span = global_max[d] - global_min[d];
+    q_scaler_cpu[d] = span > 0.0f ? 1.0f / span : 1.0f;
   }
 #endif
 
@@ -475,6 +483,12 @@ void Parameters::parse_one_keyword(std::vector<std::string>& tokens)
     parse_lm_fast(param, num_param);
   } else if (strcmp(param[0], "loss_rmse") == 0) {
     parse_loss_rmse(param, num_param);
+  } else if (strcmp(param[0], "fcvp") == 0) {
+    parse_fcvp(param, num_param);
+  } else if (strcmp(param[0], "fcvp_memory") == 0) {
+    parse_fcvp_memory(param, num_param);
+  } else if (strcmp(param[0], "fcvp_check") == 0) {
+    parse_fcvp_check(param, num_param);
   } else if (strcmp(param[0], "lambda_1") == 0 || strcmp(param[0], "lambda_2") == 0) {
     parse_regularization(param, num_param);
   } else if (strcmp(param[0], "prediction") == 0) {
@@ -862,6 +876,47 @@ void Parameters::parse_regularization(const char** param, int num_param)
   } else {
     lambda_2 = value;
   }
+}
+
+// Output weights w1 and the type bias of every element, in parameter order.
+std::vector<int> Parameters::output_parameter_indices() const
+{
+  std::vector<int> result;
+  const int block = (dim + 2) * num_neurons1 + 1;
+  for (int t = 0; t < num_types; ++t) {
+    for (int j = 0; j <= num_neurons1; ++j) {
+      result.push_back(t * block + (dim + 1) * num_neurons1 + j);
+    }
+  }
+  return result;
+}
+
+void Parameters::parse_fcvp(const char** param, int num_param)
+{
+  if (
+    num_param != 5 || !is_valid_int(param[1], &fcvp_interval) ||
+    !is_valid_int(param[2], &fcvp_iterations) || !is_valid_real(param[3], &fcvp_epsilon) ||
+    !is_valid_real(param[4], &fcvp_tolerance) || fcvp_interval < 1 || fcvp_iterations < 1 ||
+    !(fcvp_epsilon > 0) || !(fcvp_tolerance > 0) || !std::isfinite(fcvp_epsilon) ||
+    !std::isfinite(fcvp_tolerance)) {
+    PRINT_INPUT_ERROR("fcvp requires: interval>=1 iterations>=1 epsilon>0 tolerance>0.");
+  }
+  loss_rmse = true;
+}
+
+void Parameters::parse_fcvp_memory(const char** param, int num_param)
+{
+  if (num_param != 2 || !is_valid_int(param[1], &fcvp_memory_mib) || fcvp_memory_mib < 1) {
+    PRINT_INPUT_ERROR("fcvp_memory requires a positive integer number of MiB per GPU.");
+  }
+}
+
+void Parameters::parse_fcvp_check(const char** param, int num_param)
+{
+  if (num_param != 2 || !is_valid_int(param[1], &fcvp_check) || fcvp_check < 1 || fcvp_check > 2) {
+    PRINT_INPUT_ERROR("fcvp_check requires 1 (sampled) or 2 (all parameters).");
+  }
+  loss_rmse = true;
 }
 
 void Parameters::parse_loss_rmse(const char** param, int num_param)

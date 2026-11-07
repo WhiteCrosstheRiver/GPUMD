@@ -51,8 +51,20 @@ static __global__ void update_moments(
   }
 }
 
+static __global__ void prepare_gradients(
+  int n, const int* mask, const float* parameters, float l1, float l2, float* gradient)
+{
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < n) {
+    float x = parameters[i];
+    gradient[i] =
+      (mask == nullptr || mask[i]) ? gradient[i] + l1 * ((x > 0) - (x < 0)) + l2 * x : 0.0f;
+  }
+}
+
 static __global__ void apply_updates(
   const int N,
+  const int* mask,
   const float lr,
   const float beta1_t,
   const float beta2_t,
@@ -63,7 +75,7 @@ static __global__ void apply_updates(
   float* __restrict__ parameters)
 {
   const int i = blockIdx.x * blockDim.x + threadIdx.x;
-  if (i < N) {
+  if (i < N && (mask == nullptr || mask[i])) {
     // calculate bias correction
     const float m_hat = m[i] / (1.0f - beta1_t);
     const float v_hat = v[i] / (1.0f - beta2_t);
@@ -167,6 +179,10 @@ Adam::Adam(Parameters& para)
   // initialize the parameters
   number_of_variables = para.number_of_variables;
   weight_decay = para.weight_decay;
+  lambda1 = para.lambda_1;
+  lambda2 = para.lambda_2;
+  loss_epsilon = para.fcvp_epsilon;
+  project_output = para.fcvp_interval > 0;
 
   // initialize the CPU vectors
   parameters.resize(number_of_variables);
@@ -178,6 +194,14 @@ Adam::Adam(Parameters& para)
   gpu_m.resize(number_of_variables, 0.0f);
   gpu_v.resize(number_of_variables, 0.0f);
   gpu_gradient.resize(number_of_variables);
+  if (project_output) {
+    std::vector<int> mask(number_of_variables, 1);
+    for (const int index : para.output_parameter_indices()) {
+      mask[index] = 0;
+    }
+    update_mask.resize(number_of_variables);
+    update_mask.copy_from_host(mask.data());
+  }
   gpu_gradient_norm.resize(1);
   curand_states.resize(number_of_variables);
   initialize_curand_states<<<(number_of_variables - 1) / 128 + 1, 128>>>(
@@ -267,6 +291,24 @@ void Adam::update(float lr, const std::vector<float>& gradients) {
   const int grid_size = (number_of_variables + block_size - 1) / block_size + 1;
 
   gpu_gradient.copy_from_host(gradients.data());
+  const int* mask = project_output ? update_mask.data() : nullptr;
+  if (project_output || lambda1 > 0 || lambda2 > 0) {
+    double norm2 = 0.0;
+    if (lambda2 > 0) {
+      for (const float x : parameters) {
+        norm2 += double(x) * x;
+      }
+    }
+    const double norm = std::sqrt(norm2 / number_of_variables + loss_epsilon * loss_epsilon);
+    prepare_gradients<<<(number_of_variables - 1) / 256 + 1, 256>>>(
+      number_of_variables,
+      mask,
+      gpu_parameters.data(),
+      lambda1 / number_of_variables,
+      lambda2 / (number_of_variables * norm),
+      gpu_gradient.data());
+    GPU_CHECK_KERNEL
+  }
   clip_gradients(gpu_gradient.data(), number_of_variables, gpu_gradient_norm.data());
   update_moments<<<grid_size, block_size>>>(
     number_of_variables,
@@ -285,6 +327,7 @@ void Adam::update(float lr, const std::vector<float>& gradients) {
   // apply parameter updates
   apply_updates<<<grid_size, block_size>>>(
     number_of_variables,
+    mask,
     lr,
     beta1_t,
     beta2_t,

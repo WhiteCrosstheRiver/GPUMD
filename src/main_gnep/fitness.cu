@@ -13,6 +13,7 @@
     along with GPUMD.  If not, see <https://www.gnu.org/licenses/>.
 */
 
+#include "fcvp.cuh"
 #include "fitness.cuh"
 #include "gnep.cuh"
 #include "nep_lm.cuh"
@@ -423,6 +424,9 @@ void Fitness::compute(Parameters& para)
       }
     }
     para.reduce_and_broadcast_scaler();
+    if (para.fcvp_check) {
+      fcvp_verify_gradient(para, *static_cast<GNEP*>(potential.get()), train_set[0], parameters);
+    }
 #ifdef GNEP_TEST_DIAGNOSTICS
     write_diagnostic_values("gnep_diagnostic_scaler.txt", para.q_scaler_cpu);
 #endif
@@ -467,6 +471,10 @@ void Fitness::compute(Parameters& para)
         update_learning_rate_cos(lr, step, num_batches, para);
       }
       const auto step_begin = std::chrono::steady_clock::now();
+      if (para.fcvp_interval && step % para.fcvp_interval == 0) {
+        fcvp_project(para, *static_cast<GNEP*>(potential.get()), batch, parameters, step);
+        optimizer->sync_parameters();
+      }
       Batch_MSE lm_mse;
       if (lm_optimizer) {
         lm_mse = lm_optimizer->update(
@@ -493,6 +501,10 @@ void Fitness::compute(Parameters& para)
       }
       for (std::thread& worker : workers) {
         worker.join();
+      }
+      if (!lm_optimizer && para.loss_rmse) {
+        static_cast<GNEP*>(potential.get())->accumulate_rmse_gradients(
+          para, batch.shards, batch.num_configurations, batch.num_atoms, batch.virial_components);
       }
 
       double energy_error_sum = 0.0;
