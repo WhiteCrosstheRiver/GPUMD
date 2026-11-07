@@ -227,6 +227,7 @@ GNEP::GNEP(
   paramb.use_typewise_cutoff_zbl = para.use_typewise_cutoff_zbl;
   paramb.typewise_cutoff_zbl_factor = para.typewise_cutoff_zbl_factor;
   paramb.num_types = para.num_types;
+  paramb.consistent_loss = para.loss_rmse && !para.use_lm;
   for (int t = 0; t < paramb.num_types; ++t) {
     paramb.rc_radial[t] = para.rc_radial[t];
     paramb.rc_angular[t] = para.rc_angular[t];
@@ -388,7 +389,8 @@ static void __global__ find_max_min(const int N, const float* g_q, float* g_s_ma
   if (tid == 0) {
     g_s_max[bid] = max(g_s_max[bid], s_max[0]);
     g_s_min[bid] = min(g_s_min[bid], s_min[0]);
-    g_q_scaler[bid] = 1.0f / (g_s_max[bid] - g_s_min[bid]);
+    const float span = g_s_max[bid] - g_s_min[bid];
+    g_q_scaler[bid] = span > 0.0f ? 1.0f / span : 1.0f;
   }
 }
 
@@ -577,6 +579,7 @@ static __global__ void gpu_sum_virial_error(
 
 static __global__ void compute_grad_e_without_neighbor(
   const int N,
+  const bool batch_has_neighbors,
   const GNEP::ParaMB paramb,
   const GNEP::ANN annmb,
   const int* __restrict__ g_Na,
@@ -596,6 +599,11 @@ static __global__ void compute_grad_e_without_neighbor(
   int batch_idx = g_batch_idx[n1];
   g_grad_sum += batch_idx * annmb.num_para;
   const int Na = g_Na[batch_idx];
+  // When another shard of the batch has neighbors, the single-device run takes
+  // compute_grad_radial_NM, which gives isolated atoms of multi-atom structures
+  // no energy gradient outside the consistent loss. Match it here so the
+  // gradient does not depend on how the batch is sharded.
+  if (!paramb.consistent_loss && batch_has_neighbors && Na != 1) return;
   int t1 = g_type[n1];
   float weight = g_weight[batch_idx];
   const float squared_weight = weight * weight;
@@ -679,7 +687,8 @@ static __global__ void compute_grad_radial_NM(
   int batch_idx = g_batch_idx[n1];
   g_grad_sum += batch_idx * annmb.num_para;
   int Na = g_Na[batch_idx];
-  bool no_neighbor_isolated_atom = ((Na == 1) && neighbor_number == 0);
+  bool no_neighbor_isolated_atom =
+    neighbor_number == 0 && (paramb.consistent_loss || Na == 1);
   if (i1 >= neighbor_number && !no_neighbor_isolated_atom) return;
   int t1 = g_type[n1];
   float weight = g_weight[batch_idx];
@@ -1948,127 +1957,280 @@ void GNEP::find_force(
       dataset[device_id].error_gpu.data(),
       dataset[device_id].error_gpu_v_unweighted.data());
     CHECK(cudaMemcpy(dataset[device_id].error_cpu_v.data(), dataset[device_id].error_gpu.data(), dataset[device_id].Nc * sizeof(float), cudaMemcpyDeviceToHost));
-    const int virial_nums = global_virial_components;
     dataset[device_id].error_gpu_v_unweighted.copy_to_host(
       dataset[device_id].error_cpu_v_unweighted.data());
 
-    if (require_grad) {
-      const int NM_radial = dataset[device_id].N * dataset[device_id].max_NN_radial;
-      const int threads_per_block = 32;
-      if (NM_radial > 0) {
-        const int blocks_per_grid = (NM_radial + threads_per_block - 1) / threads_per_block;
-        compute_grad_radial_NM<<<blocks_per_grid, threads_per_block>>>(
-          dataset[device_id].N,
-          dataset[device_id].max_NN_radial,
-          contexts[device_id]->data.NN_radial.data(),
-          contexts[device_id]->data.NL_radial.data(),
-          contexts[device_id]->data.NN_angular.data(),
-          contexts[device_id]->data.NL_angular.data(),
-          paramb,
-          contexts[device_id]->ann,
-          dataset[device_id].Na.data(),
-          global_num_configurations,
-          global_num_atoms,
-          para.lambda_e,
-          para.lambda_f,
-          para.lambda_v,
-          virial_nums,
-          dataset[device_id].has_virial_gpu.data(),
-          dataset[device_id].type_weight_gpu.data(),
-          para.force_delta,
-          dataset[device_id].batch_idx.data(),
-          dataset[device_id].type.data(),
-          contexts[device_id]->data.x12_radial.data(),
-          contexts[device_id]->data.y12_radial.data(),
-          contexts[device_id]->data.z12_radial.data(),
-          contexts[device_id]->data.x12_angular.data(),
-          contexts[device_id]->data.y12_angular.data(),
-          contexts[device_id]->data.z12_angular.data(),
-          contexts[device_id]->data.Fp.data(),
-          contexts[device_id]->data.Fp2.data(),
-          contexts[device_id]->data.sum_fxyz.data(),
-          contexts[device_id]->gradients.E_wb_grad.data(),
-          dataset[device_id].diff_gpu_e.data(),
-          dataset[device_id].diff_gpu_v.data(),
-          dataset[device_id].force_ref_gpu.data(),
-          dataset[device_id].force_ref_gpu.data() + dataset[device_id].N,
-          dataset[device_id].force_ref_gpu.data() + dataset[device_id].N * 2,
-          dataset[device_id].weight_gpu.data(),
-          dataset[device_id].force.data(),
-          dataset[device_id].force.data() + dataset[device_id].N,
-          dataset[device_id].force.data() + dataset[device_id].N * 2,
-          para.q_scaler_gpu(device_id).data(),
-          contexts[device_id]->gradients.Fp_wb.data(),
-          contexts[device_id]->gradients.grad_sum.data());
-        GPU_CHECK_KERNEL
-      } else {
-        const int blocks_per_grid = (dataset[device_id].N + threads_per_block - 1) / threads_per_block;
-        compute_grad_e_without_neighbor<<<blocks_per_grid, threads_per_block>>>(
-          dataset[device_id].N,
-          paramb,
-          contexts[device_id]->ann,
-          dataset[device_id].Na.data(),
-          global_num_configurations,
-          para.lambda_e,
-          dataset[device_id].batch_idx.data(),
-          dataset[device_id].type.data(),
-          contexts[device_id]->gradients.E_wb_grad.data(),
-          dataset[device_id].diff_gpu_e.data(),
-          dataset[device_id].weight_gpu.data(),
-          contexts[device_id]->gradients.grad_sum.data());
-        GPU_CHECK_KERNEL
-      }
-      const int NM_angular = dataset[device_id].N * dataset[device_id].max_NN_angular;
-      if (NM_angular > 0) {
-        const int blocks_per_grid_angular = (NM_angular + threads_per_block - 1) / threads_per_block;
-        compute_grad_angular_NM<<<blocks_per_grid_angular, threads_per_block>>>(
-          dataset[device_id].N,
-          dataset[device_id].max_NN_angular,
-          contexts[device_id]->data.NN_angular.data(),
-          contexts[device_id]->data.NL_angular.data(),
-          contexts[device_id]->data.NN_radial.data(),
-          contexts[device_id]->data.NL_radial.data(),
-          paramb,
-          contexts[device_id]->ann,
-          dataset[device_id].Na.data(),
-          global_num_configurations,
-          global_num_atoms,
-          para.lambda_e,
-          para.lambda_f,
-          para.lambda_v,
-          virial_nums,
-          dataset[device_id].has_virial_gpu.data(),
-          dataset[device_id].type_weight_gpu.data(),
-          para.force_delta,
-          dataset[device_id].batch_idx.data(),
-          dataset[device_id].type.data(),
-          contexts[device_id]->data.x12_angular.data(),
-          contexts[device_id]->data.y12_angular.data(),
-          contexts[device_id]->data.z12_angular.data(),
-          contexts[device_id]->data.x12_radial.data(),
-          contexts[device_id]->data.y12_radial.data(),
-          contexts[device_id]->data.z12_radial.data(),
-          contexts[device_id]->data.Fp.data(),
-          contexts[device_id]->data.Fp2.data(),
-          contexts[device_id]->data.sum_fxyz.data(),
-          contexts[device_id]->data.sum_s2xyz.data(),
-          contexts[device_id]->data.sum_s2xyz123.data(),
-          dataset[device_id].diff_gpu_e.data(),
-          dataset[device_id].diff_gpu_v.data(),
-          dataset[device_id].force_ref_gpu.data(),
-          dataset[device_id].force_ref_gpu.data() + dataset[device_id].N,
-          dataset[device_id].force_ref_gpu.data() + dataset[device_id].N * 2,
-          dataset[device_id].weight_gpu.data(),
-          dataset[device_id].force.data(),
-          dataset[device_id].force.data() + dataset[device_id].N,
-          dataset[device_id].force.data() + dataset[device_id].N * 2,
-          para.q_scaler_gpu(device_id).data(),
-          contexts[device_id]->gradients.Fp_wb.data(),
-          contexts[device_id]->gradients.grad_sum.data());
-        GPU_CHECK_KERNEL
-      }
+    if (require_grad && !paramb.consistent_loss) {
+      accumulate_gradients(
+        para,
+        dataset,
+        device_id,
+        global_num_configurations,
+        global_num_atoms,
+        global_virial_components,
+        para.lambda_e,
+        para.lambda_f,
+        para.lambda_v);
     }
   }
+}
+
+void GNEP::accumulate_gradients(
+  Parameters& para,
+  std::vector<Dataset>& dataset,
+  int device_id,
+  int global_num_configurations,
+  int global_num_atoms,
+  int global_virial_components,
+  float lambda_e,
+  float lambda_f,
+  float lambda_v)
+{
+  CHECK(cudaSetDevice(device_id));
+  const int virial_nums = global_virial_components;
+    const int NM_radial = dataset[device_id].N * dataset[device_id].max_NN_radial;
+    const int threads_per_block = 32;
+    if (NM_radial > 0) {
+      const int blocks_per_grid = (NM_radial + threads_per_block - 1) / threads_per_block;
+      compute_grad_radial_NM<<<blocks_per_grid, threads_per_block>>>(
+        dataset[device_id].N,
+        dataset[device_id].max_NN_radial,
+        contexts[device_id]->data.NN_radial.data(),
+        contexts[device_id]->data.NL_radial.data(),
+        contexts[device_id]->data.NN_angular.data(),
+        contexts[device_id]->data.NL_angular.data(),
+        paramb,
+        contexts[device_id]->ann,
+        dataset[device_id].Na.data(),
+        global_num_configurations,
+        global_num_atoms,
+        lambda_e,
+        lambda_f,
+        lambda_v,
+        virial_nums,
+        dataset[device_id].has_virial_gpu.data(),
+        dataset[device_id].type_weight_gpu.data(),
+        para.force_delta,
+        dataset[device_id].batch_idx.data(),
+        dataset[device_id].type.data(),
+        contexts[device_id]->data.x12_radial.data(),
+        contexts[device_id]->data.y12_radial.data(),
+        contexts[device_id]->data.z12_radial.data(),
+        contexts[device_id]->data.x12_angular.data(),
+        contexts[device_id]->data.y12_angular.data(),
+        contexts[device_id]->data.z12_angular.data(),
+        contexts[device_id]->data.Fp.data(),
+        contexts[device_id]->data.Fp2.data(),
+        contexts[device_id]->data.sum_fxyz.data(),
+        contexts[device_id]->gradients.E_wb_grad.data(),
+        dataset[device_id].diff_gpu_e.data(),
+        dataset[device_id].diff_gpu_v.data(),
+        dataset[device_id].force_ref_gpu.data(),
+        dataset[device_id].force_ref_gpu.data() + dataset[device_id].N,
+        dataset[device_id].force_ref_gpu.data() + dataset[device_id].N * 2,
+        dataset[device_id].weight_gpu.data(),
+        dataset[device_id].force.data(),
+        dataset[device_id].force.data() + dataset[device_id].N,
+        dataset[device_id].force.data() + dataset[device_id].N * 2,
+        para.q_scaler_gpu(device_id).data(),
+        contexts[device_id]->gradients.Fp_wb.data(),
+        contexts[device_id]->gradients.grad_sum.data());
+      GPU_CHECK_KERNEL
+    } else {
+      const int blocks_per_grid = (dataset[device_id].N + threads_per_block - 1) / threads_per_block;
+      bool batch_has_neighbors = false;
+      for (const auto& shard : dataset) {
+        batch_has_neighbors = batch_has_neighbors || shard.max_NN_radial > 0;
+      }
+      compute_grad_e_without_neighbor<<<blocks_per_grid, threads_per_block>>>(
+        dataset[device_id].N,
+        batch_has_neighbors,
+        paramb,
+        contexts[device_id]->ann,
+        dataset[device_id].Na.data(),
+        global_num_configurations,
+        lambda_e,
+        dataset[device_id].batch_idx.data(),
+        dataset[device_id].type.data(),
+        contexts[device_id]->gradients.E_wb_grad.data(),
+        dataset[device_id].diff_gpu_e.data(),
+        dataset[device_id].weight_gpu.data(),
+        contexts[device_id]->gradients.grad_sum.data());
+      GPU_CHECK_KERNEL
+    }
+    const int NM_angular = dataset[device_id].N * dataset[device_id].max_NN_angular;
+    if (NM_angular > 0) {
+      const int blocks_per_grid_angular = (NM_angular + threads_per_block - 1) / threads_per_block;
+      compute_grad_angular_NM<<<blocks_per_grid_angular, threads_per_block>>>(
+        dataset[device_id].N,
+        dataset[device_id].max_NN_angular,
+        contexts[device_id]->data.NN_angular.data(),
+        contexts[device_id]->data.NL_angular.data(),
+        contexts[device_id]->data.NN_radial.data(),
+        contexts[device_id]->data.NL_radial.data(),
+        paramb,
+        contexts[device_id]->ann,
+        dataset[device_id].Na.data(),
+        global_num_configurations,
+        global_num_atoms,
+        lambda_e,
+        lambda_f,
+        lambda_v,
+        virial_nums,
+        dataset[device_id].has_virial_gpu.data(),
+        dataset[device_id].type_weight_gpu.data(),
+        para.force_delta,
+        dataset[device_id].batch_idx.data(),
+        dataset[device_id].type.data(),
+        contexts[device_id]->data.x12_angular.data(),
+        contexts[device_id]->data.y12_angular.data(),
+        contexts[device_id]->data.z12_angular.data(),
+        contexts[device_id]->data.x12_radial.data(),
+        contexts[device_id]->data.y12_radial.data(),
+        contexts[device_id]->data.z12_radial.data(),
+        contexts[device_id]->data.Fp.data(),
+        contexts[device_id]->data.Fp2.data(),
+        contexts[device_id]->data.sum_fxyz.data(),
+        contexts[device_id]->data.sum_s2xyz.data(),
+        contexts[device_id]->data.sum_s2xyz123.data(),
+        dataset[device_id].diff_gpu_e.data(),
+        dataset[device_id].diff_gpu_v.data(),
+        dataset[device_id].force_ref_gpu.data(),
+        dataset[device_id].force_ref_gpu.data() + dataset[device_id].N,
+        dataset[device_id].force_ref_gpu.data() + dataset[device_id].N * 2,
+        dataset[device_id].weight_gpu.data(),
+        dataset[device_id].force.data(),
+        dataset[device_id].force.data() + dataset[device_id].N,
+        dataset[device_id].force.data() + dataset[device_id].N * 2,
+        para.q_scaler_gpu(device_id).data(),
+        contexts[device_id]->gradients.Fp_wb.data(),
+        contexts[device_id]->gradients.grad_sum.data());
+      GPU_CHECK_KERNEL
+    }
+}
+
+void GNEP::accumulate_rmse_gradients(
+  Parameters& para,
+  std::vector<Dataset>& dataset,
+  int global_num_configurations,
+  int global_num_atoms,
+  int global_virial_components)
+{
+  const Batch_MSE mse = get_batch_mse(para, dataset, true);
+  const double eps2 = para.fcvp_epsilon * para.fcvp_epsilon;
+  const float lambda_e = para.lambda_e / (2.0 * std::sqrt(mse.energy + eps2));
+  const float lambda_f = para.lambda_f / (2.0 * std::sqrt(mse.force + eps2));
+  const float lambda_v =
+    mse.virial_configurations ? para.lambda_v / (2.0 * std::sqrt(mse.virial + eps2)) : 0.0f;
+  for (int device_id = 0; device_id < static_cast<int>(dataset.size()); ++device_id) {
+    accumulate_gradients(
+      para,
+      dataset,
+      device_id,
+      global_num_configurations,
+      global_num_atoms,
+      global_virial_components,
+      lambda_e,
+      lambda_f,
+      lambda_v);
+  }
+  CHECK(cudaSetDevice(0));
+}
+
+// One column of the force-consistent linear output basis. Every site energy enters the force
+// kernels, including its contributions to neighboring atoms.
+static __global__ void apply_output_basis(
+  int N,
+  GNEP::ANN ann,
+  int column,
+  const int* type,
+  const float* q,
+  const float* scaler,
+  float* energy,
+  float* fp)
+{
+  int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= N) {
+    return;
+  }
+  const int t = column / (ann.num_neurons1 + 1);
+  const int h = column % (ann.num_neurons1 + 1);
+  float phi = 0.0f;
+  const bool active = type[i] == t;
+  if (active && h < ann.num_neurons1) {
+    float z = -ann.b0[t][h];
+    for (int d = 0; d < ann.dim; ++d) {
+      z += ann.w0[t][h * ann.dim + d] * q[d * N + i] * scaler[d];
+    }
+    phi = tanhf(z);
+  }
+  energy[i] = active ? (h == ann.num_neurons1 ? -1.0f : phi) : 0.0f;
+  for (int d = 0; d < ann.dim; ++d) {
+    fp[d * N + i] =
+      active && h < ann.num_neurons1 ? (1.0f - phi * phi) * ann.w0[t][h * ann.dim + d] * scaler[d]
+                                     : 0.0f;
+  }
+}
+
+void GNEP::find_output_basis(Parameters& para, Dataset& data, int column, int device_id)
+{
+  CHECK(cudaSetDevice(device_id));
+  const int block_size = 32;
+  const int grid_size = (data.N - 1) / block_size + 1;
+  GNEP_Data& cached = contexts[device_id]->data;
+  const ANN& ann = contexts[device_id]->ann;
+  data.force.fill(0.0f);
+  data.virial.fill(0.0f);
+  apply_output_basis<<<grid_size, block_size>>>(
+    data.N,
+    ann,
+    column,
+    data.type.data(),
+    cached.descriptors.data(),
+    para.q_scaler_gpu(device_id).data(),
+    data.energy.data(),
+    cached.Fp.data());
+  GPU_CHECK_KERNEL
+  // Bias columns have no coordinate derivatives.
+  if (column % (para.num_neurons1 + 1) == para.num_neurons1) {
+    return;
+  }
+  find_force_radial<<<grid_size, block_size>>>(
+    data.N,
+    cached.NN_radial.data(),
+    cached.NL_radial.data(),
+    paramb,
+    ann,
+    data.type.data(),
+    cached.x12_radial.data(),
+    cached.y12_radial.data(),
+    cached.z12_radial.data(),
+    cached.Fp.data(),
+    data.force.data(),
+    data.force.data() + data.N,
+    data.force.data() + data.N * 2,
+    data.virial.data());
+  GPU_CHECK_KERNEL
+  find_force_angular<<<grid_size, block_size>>>(
+    false,
+    data.N,
+    cached.NN_angular.data(),
+    cached.NL_angular.data(),
+    paramb,
+    ann,
+    data.type.data(),
+    cached.x12_angular.data(),
+    cached.y12_angular.data(),
+    cached.z12_angular.data(),
+    cached.Fp.data(),
+    cached.sum_fxyz.data(),
+    cached.sum_s2xyz.data(),
+    cached.sum_s2xyz123.data(),
+    data.force.data(),
+    data.force.data() + data.N,
+    data.force.data() + data.N * 2,
+    data.virial.data());
+  GPU_CHECK_KERNEL
 }
 
 #include "nep_lm_impl.cuh"

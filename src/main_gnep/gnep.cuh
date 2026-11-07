@@ -73,6 +73,7 @@ public:
     int num_c_radial = 0;
     int N_times_max_NN_radial;
     int N_times_max_NN_angular;
+    bool consistent_loss = false; // loss_rmse with Adam: isolated atoms keep energy gradients
   };
 
   struct ANN {
@@ -120,6 +121,30 @@ public:
     int global_num_configurations,
     int global_num_atoms,
     int global_virial_components);
+
+  // Loss gradients from the forward data of the preceding find_force on this device.
+  void accumulate_gradients(
+    Parameters& para,
+    std::vector<Dataset>& dataset,
+    int device_id,
+    int global_num_configurations,
+    int global_num_atoms,
+    int global_virial_components,
+    float lambda_e,
+    float lambda_f,
+    float lambda_v);
+
+  // loss_rmse: d(lambda sqrt(MSE + eps^2)) needs the MSE of the whole batch, so find_force
+  // leaves the gradients to this call once every shard has its forward data.
+  void accumulate_rmse_gradients(
+    Parameters& para,
+    std::vector<Dataset>& dataset,
+    int global_num_configurations,
+    int global_num_atoms,
+    int global_virial_components);
+
+  // FCVP: energy, force and virial of one output column, from the cached descriptors.
+  void find_output_basis(Parameters& para, Dataset& dataset, int column, int device_id);
 
   // Neighbor and descriptor data of the immediately preceding find_force.
   GNEP_Data& cached_data(int device_id = 0)
