@@ -33,6 +33,8 @@ public:
   std::vector<double> cpu_spin_per_atom;
   std::vector<double> cpu_spin_velocity_per_atom;
   std::vector<std::string> cpu_atom_symbol;
+  std::vector<char> cpu_fixed;        // atoms frozen by the last fix shell, type or group
+  std::vector<char> cpu_shell_frozen; // fix shell mode grow ratchet
   GPU_Vector<int> type;                  // per-atom type (1 component)
   GPU_Vector<double> mass;               // per-atom mass (1 component)
   GPU_Vector<float> charge;              // per-atom charge (1 component)

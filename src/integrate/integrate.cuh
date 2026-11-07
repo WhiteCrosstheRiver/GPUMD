@@ -24,10 +24,31 @@
 
 class Atom;
 
+namespace shell2
+{
+struct GrowState; // extensions/common/surface/substrate_shell_v2.cuh
+}
+
+// State of fix shell, fix type and fix group for the current run block.
+struct FixUnionState {
+  std::vector<char> frozen;
+  bool active = false;
+  bool created_group = false;  // grouping method 0 did not exist in the model
+  std::vector<int> user_label; // grouping method 0 as read from the model
+  int user_number = 0;
+  std::shared_ptr<shell2::GrowState> grow_state; // mode grow; survives finalize()
+  bool grow_committed = false;
+};
+
 class Integrate
 {
 private:
   std::unique_ptr<Ensemble> ensemble_;
+  FixUnionState fix_union;
+
+  void parse_fix_union(
+    const std::vector<std::string>& tokens, std::vector<Group>& group, Atom& atom, Box& box);
+  void commit_fix_union(std::vector<Group>& group, Atom& atom);
 
   EnsembleType type = EnsembleType::UNKNOWN;
   int fixed_group = -1; // ID of the group in which the atoms will be fixed
@@ -122,6 +143,8 @@ public:
     const Box& box,
     const std::vector<Group>& group,
     Force& force);
-  void parse_fix(const std::vector<std::string>& tokens, const std::vector<Group>& group);
+  void parse_fix(
+    const std::vector<std::string>& tokens, std::vector<Group>& group, Atom& atom, Box& box);
+  void finish_fix_union(std::vector<Group>& group);
   void parse_move(const std::vector<std::string>& tokens, const std::vector<Group>& group);
 };
