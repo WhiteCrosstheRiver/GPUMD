@@ -34,6 +34,10 @@ public:
   using Potential::compute;
   LJ(FILE*, int, int);
   virtual ~LJ(void);
+  virtual InfluencePolicy influence_policy() const override
+  {
+    return InfluencePolicy::ActiveOnly;
+  }
   virtual void compute(
     Box& box,
     const GPU_Vector<int>& type,

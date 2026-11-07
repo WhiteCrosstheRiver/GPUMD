@@ -379,6 +379,79 @@ void NEP::update_potential(float* parameters, ANN& ann)
   ann.c = pointer;
 }
 
+// Candidate lists reach rc + skin, so a frozen atom whose list holds no active atom is
+// beyond rc of every active atom until the list is rebuilt.
+static __global__ void gpu_build_influence_mask(
+  const int N, const char* active, const int* candidate_NN, const int* candidate_NL, char* mask)
+{
+  const int i = blockIdx.x * blockDim.x + threadIdx.x;
+  if (i >= N) {
+    return;
+  }
+  char found = active[i];
+  for (int j = 0; j < candidate_NN[i] && !found; ++j) {
+    found = active[candidate_NL[static_cast<size_t>(N) * j + i]];
+  }
+  mask[i] = found;
+}
+
+// Returns the number of centers, or -1 to compute every atom.
+int NEP::update_influence_centers(const int N)
+{
+  if (ptr_active_mask == nullptr) {
+    nep_data.influence_built_N = -1;
+    return -1;
+  }
+  const int neighbor_build = neighbor_manager.get_build_count();
+  if (
+    nep_data.influence_built_N == N && nep_data.influence_built_generation == active_generation &&
+    nep_data.influence_built_neighbor == neighbor_build) {
+    return nep_data.influence_num_centers;
+  }
+  if (static_cast<int>(nep_data.influence_mask.size()) != N) {
+    nep_data.influence_mask.resize(N);
+  }
+  gpu_build_influence_mask<<<(N - 1) / 128 + 1, 128>>>(
+    N,
+    ptr_active_mask->data(),
+    neighbor_manager.get_candidate_NN().data(),
+    neighbor_manager.get_candidate_NL().data(),
+    nep_data.influence_mask.data());
+  GPU_CHECK_KERNEL
+  std::vector<char> mask(N);
+  nep_data.influence_mask.copy_to_host(mask.data());
+  std::vector<int> centers;
+  for (int i = 0; i < N; ++i) {
+    if (mask[i]) {
+      centers.push_back(i);
+    }
+  }
+  nep_data.influence_num_centers = static_cast<int>(centers.size());
+  if (!centers.empty()) {
+    nep_data.influence_indices.resize(centers.size());
+    nep_data.influence_indices.copy_from_host(centers.data());
+  }
+  nep_data.influence_built_N = N;
+  nep_data.influence_built_generation = active_generation;
+  nep_data.influence_built_neighbor = neighbor_build;
+  return nep_data.influence_num_centers;
+}
+
+static __device__ bool select_center(
+  const int N1, const int N2, const int* centers, const int num_centers, int& n1)
+{
+  if (centers != nullptr) {
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= num_centers) {
+      return false;
+    }
+    n1 = centers[t];
+    return true;
+  }
+  n1 = blockIdx.x * blockDim.x + threadIdx.x + N1;
+  return n1 < N2;
+}
+
 static __global__ void find_neighbor_list_large_box(
   NEP::ParaMB paramb,
   const int N,
@@ -394,10 +467,12 @@ static __global__ void find_neighbor_list_large_box(
   int* g_NN_radial,
   int* g_NL_radial,
   int* g_NN_angular,
-  int* g_NL_angular)
+  int* g_NL_angular,
+  const int* g_centers,
+  const int num_centers)
 {
-  int n1 = blockIdx.x * blockDim.x + threadIdx.x + N1;
-  if (n1 >= N2) {
+  int n1;
+  if (!select_center(N1, N2, g_centers, num_centers, n1)) {
     return;
   }
 
@@ -449,10 +524,12 @@ static __global__ void find_descriptor(
   double* g_pe,
   float* g_Fp,
   double* g_virial,
-  float* g_sum_fxyz)
+  float* g_sum_fxyz,
+  const int* g_centers,
+  const int num_centers)
 {
-  int n1 = blockIdx.x * blockDim.x + threadIdx.x + N1;
-  if (n1 < N2) {
+  int n1;
+  if (select_center(N1, N2, g_centers, num_centers, n1)) {
     int t1 = g_type[n1];
     double x1 = g_x[n1];
     double y1 = g_y[n1];
@@ -567,10 +644,12 @@ static __global__ void find_force_radial(
   double* g_fx,
   double* g_fy,
   double* g_fz,
-  double* g_virial)
+  double* g_virial,
+  const int* g_centers,
+  const int num_centers)
 {
-  int n1 = blockIdx.x * blockDim.x + threadIdx.x + N1;
-  if (n1 < N2) {
+  int n1;
+  if (select_center(N1, N2, g_centers, num_centers, n1)) {
     int t1 = g_type[n1];
     float s_fx = 0.0f;
     float s_fy = 0.0f;
@@ -673,10 +752,12 @@ static __global__ void find_partial_force_angular(
   const float* __restrict__ g_sum_fxyz,
   float* g_f12x,
   float* g_f12y,
-  float* g_f12z)
+  float* g_f12z,
+  const int* g_centers,
+  const int num_centers)
 {
-  int n1 = blockIdx.x * blockDim.x + threadIdx.x + N1;
-  if (n1 < N2) {
+  int n1;
+  if (select_center(N1, N2, g_centers, num_centers, n1)) {
 
     float Fp[MAX_DIM_ANGULAR] = {0.0f};
     float sum_fxyz[NUM_OF_ABC * MAX_NUM_N];
@@ -765,10 +846,12 @@ static __global__ void find_force_ZBL(
   double* g_fy,
   double* g_fz,
   double* g_virial,
-  double* g_pe)
+  double* g_pe,
+  const int* g_centers,
+  const int num_centers)
 {
-  int n1 = blockIdx.x * blockDim.x + threadIdx.x + N1;
-  if (n1 < N2) {
+  int n1;
+  if (select_center(N1, N2, g_centers, num_centers, n1)) {
     float s_pe = 0.0f;
     float s_fx = 0.0f;
     float s_fy = 0.0f;
@@ -873,12 +956,24 @@ void NEP::compute_large_box(
 {
   const int BLOCK_SIZE = 64;
   const int N = type.size();
-  const int grid_size = (N2 - N1 - 1) / BLOCK_SIZE + 1;
+  int grid_size = (N2 - N1 - 1) / BLOCK_SIZE + 1;
 
   neighbor_manager.update(
     box, 
     type, 
     position_per_atom);
+
+  const int num_centers = update_influence_centers(N);
+  const int* centers = num_centers >= 0 ? nep_data.influence_indices.data() : nullptr;
+  if (num_centers == 0) {
+    return;
+  }
+  if (num_centers > 0) {
+    grid_size = (num_centers - 1) / BLOCK_SIZE + 1;
+    // Unselected atoms must read as having no neighbors in the many-body force sum.
+    CHECK(gpuMemset(nep_data.NN_radial.data(), 0, sizeof(int) * N));
+    CHECK(gpuMemset(nep_data.NN_angular.data(), 0, sizeof(int) * N));
+  }
 
   find_neighbor_list_large_box<<<grid_size, BLOCK_SIZE>>>(
     paramb,
@@ -895,7 +990,9 @@ void NEP::compute_large_box(
     nep_data.NN_radial.data(),
     nep_data.NL_radial.data(),
     nep_data.NN_angular.data(),
-    nep_data.NL_angular.data());
+    nep_data.NL_angular.data(),
+    centers,
+    num_centers);
   GPU_CHECK_KERNEL
 
   static int num_calls = 0;
@@ -938,7 +1035,9 @@ void NEP::compute_large_box(
     potential_per_atom.data(),
     nep_data.Fp.data(),
     virial_per_atom.data(),
-    nep_data.sum_fxyz.data());
+    nep_data.sum_fxyz.data(),
+    centers,
+    num_centers);
   GPU_CHECK_KERNEL
 
   find_force_radial<<<grid_size, BLOCK_SIZE>>>(
@@ -958,7 +1057,9 @@ void NEP::compute_large_box(
     force_per_atom.data(),
     force_per_atom.data() + N,
     force_per_atom.data() + N * 2,
-    virial_per_atom.data());
+    virial_per_atom.data(),
+    centers,
+    num_centers);
   GPU_CHECK_KERNEL
 
   find_partial_force_angular<<<grid_size, BLOCK_SIZE>>>(
@@ -978,7 +1079,9 @@ void NEP::compute_large_box(
     nep_data.sum_fxyz.data(),
     nep_data.f12x.data(),
     nep_data.f12y.data(),
-    nep_data.f12z.data());
+    nep_data.f12z.data(),
+    centers,
+    num_centers);
   GPU_CHECK_KERNEL
 
   find_properties_many_body(
@@ -990,7 +1093,9 @@ void NEP::compute_large_box(
     nep_data.f12z.data(),
     position_per_atom,
     force_per_atom,
-    virial_per_atom);
+    virial_per_atom,
+    num_centers,
+    centers);
   GPU_CHECK_KERNEL
 
   if (zbl.enabled) {
@@ -1011,7 +1116,9 @@ void NEP::compute_large_box(
       force_per_atom.data() + N,
       force_per_atom.data() + N * 2,
       virial_per_atom.data(),
-      potential_per_atom.data());
+      potential_per_atom.data(),
+    centers,
+    num_centers);
     GPU_CHECK_KERNEL
   }
 }
@@ -1278,10 +1385,12 @@ static __global__ void find_descriptor(
   double* g_pe,
   float* g_Fp,
   double* g_virial,
-  float* g_sum_fxyz)
+  float* g_sum_fxyz,
+  const int* g_centers,
+  const int num_centers)
 {
-  int n1 = blockIdx.x * blockDim.x + threadIdx.x + N1;
-  if (n1 < N2) {
+  int n1;
+  if (select_center(N1, N2, g_centers, num_centers, n1)) {
     int t1 = g_type[n1];
     double x1 = g_x[n1];
     double y1 = g_y[n1];
@@ -1382,12 +1491,24 @@ void NEP::compute_large_box(
 {
   const int BLOCK_SIZE = 64;
   const int N = type.size();
-  const int grid_size = (N2 - N1 - 1) / BLOCK_SIZE + 1;
+  int grid_size = (N2 - N1 - 1) / BLOCK_SIZE + 1;
 
   neighbor_manager.update(
     box, 
     type, 
     position_per_atom);
+
+  const int num_centers = update_influence_centers(N);
+  const int* centers = num_centers >= 0 ? nep_data.influence_indices.data() : nullptr;
+  if (num_centers == 0) {
+    return;
+  }
+  if (num_centers > 0) {
+    grid_size = (num_centers - 1) / BLOCK_SIZE + 1;
+    // Unselected atoms must read as having no neighbors in the many-body force sum.
+    CHECK(gpuMemset(nep_data.NN_radial.data(), 0, sizeof(int) * N));
+    CHECK(gpuMemset(nep_data.NN_angular.data(), 0, sizeof(int) * N));
+  }
 
   find_neighbor_list_large_box<<<grid_size, BLOCK_SIZE>>>(
     paramb,
@@ -1404,7 +1525,9 @@ void NEP::compute_large_box(
     nep_data.NN_radial.data(),
     nep_data.NL_radial.data(),
     nep_data.NN_angular.data(),
-    nep_data.NL_angular.data());
+    nep_data.NL_angular.data(),
+    centers,
+    num_centers);
   GPU_CHECK_KERNEL
 
   static int num_calls = 0;
@@ -1448,7 +1571,9 @@ void NEP::compute_large_box(
     potential_per_atom.data(),
     nep_data.Fp.data(),
     virial_per_atom.data(),
-    nep_data.sum_fxyz.data());
+    nep_data.sum_fxyz.data(),
+    centers,
+    num_centers);
   GPU_CHECK_KERNEL
 
   find_force_radial<<<grid_size, BLOCK_SIZE>>>(
@@ -1468,7 +1593,9 @@ void NEP::compute_large_box(
     force_per_atom.data(),
     force_per_atom.data() + N,
     force_per_atom.data() + N * 2,
-    virial_per_atom.data());
+    virial_per_atom.data(),
+    centers,
+    num_centers);
   GPU_CHECK_KERNEL
 
   find_partial_force_angular<<<grid_size, BLOCK_SIZE>>>(
@@ -1488,7 +1615,9 @@ void NEP::compute_large_box(
     nep_data.sum_fxyz.data(),
     nep_data.f12x.data(),
     nep_data.f12y.data(),
-    nep_data.f12z.data());
+    nep_data.f12z.data(),
+    centers,
+    num_centers);
   GPU_CHECK_KERNEL
 
   find_properties_many_body(
@@ -1500,7 +1629,9 @@ void NEP::compute_large_box(
     nep_data.f12z.data(),
     position_per_atom,
     force_per_atom,
-    virial_per_atom);
+    virial_per_atom,
+    num_centers,
+    centers);
   GPU_CHECK_KERNEL
 
   if (zbl.enabled) {
@@ -1521,7 +1652,9 @@ void NEP::compute_large_box(
       force_per_atom.data() + N,
       force_per_atom.data() + N * 2,
       virial_per_atom.data(),
-      potential_per_atom.data());
+      potential_per_atom.data(),
+    centers,
+    num_centers);
     GPU_CHECK_KERNEL
   }
 }

@@ -48,9 +48,20 @@ static __global__ void gpu_find_force_many_body(
   double* g_fx,
   double* g_fy,
   double* g_fz,
-  double* g_virial)
+  double* g_virial,
+  const int num_centers,
+  const int* centers)
 {
-  int n1 = blockIdx.x * blockDim.x + threadIdx.x + N1;
+  int n1;
+  if (centers != nullptr) {
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= num_centers) {
+      return;
+    }
+    n1 = centers[t];
+  } else {
+    n1 = blockIdx.x * blockDim.x + threadIdx.x + N1;
+  }
   double s_fx = 0.0;  // force_x
   double s_fy = 0.0;  // force_y
   double s_fz = 0.0;  // force_z
@@ -142,10 +153,13 @@ void Potential::find_properties_many_body(
   const double* f12z,
   const GPU_Vector<double>& position_per_atom,
   GPU_Vector<double>& force_per_atom,
-  GPU_Vector<double>& virial_per_atom)
+  GPU_Vector<double>& virial_per_atom,
+  const int num_centers,
+  const int* centers)
 {
   const int number_of_atoms = position_per_atom.size() / 3;
-  int grid_size = (N2 - N1 - 1) / BLOCK_SIZE_FORCE + 1;
+  int grid_size = centers != nullptr ? (num_centers - 1) / BLOCK_SIZE_FORCE + 1
+                                     : (N2 - N1 - 1) / BLOCK_SIZE_FORCE + 1;
 
   gpu_find_force_many_body<<<grid_size, BLOCK_SIZE_FORCE>>>(
     number_of_atoms,
@@ -163,7 +177,9 @@ void Potential::find_properties_many_body(
     force_per_atom.data(),
     force_per_atom.data() + number_of_atoms,
     force_per_atom.data() + 2 * number_of_atoms,
-    virial_per_atom.data());
+    virial_per_atom.data(),
+    num_centers,
+    centers);
   GPU_CHECK_KERNEL
 }
 
@@ -183,9 +199,20 @@ static __global__ void gpu_find_force_many_body(
   double* g_fx,
   double* g_fy,
   double* g_fz,
-  double* g_virial)
+  double* g_virial,
+  const int num_centers,
+  const int* centers)
 {
-  int n1 = blockIdx.x * blockDim.x + threadIdx.x + N1;
+  int n1;
+  if (centers != nullptr) {
+    const int t = blockIdx.x * blockDim.x + threadIdx.x;
+    if (t >= num_centers) {
+      return;
+    }
+    n1 = centers[t];
+  } else {
+    n1 = blockIdx.x * blockDim.x + threadIdx.x + N1;
+  }
   float s_fx = 0.0f;  // force_x
   float s_fy = 0.0f;  // force_y
   float s_fz = 0.0f;  // force_z
@@ -295,10 +322,13 @@ void Potential::find_properties_many_body(
   const float* f12z,
   const GPU_Vector<double>& position_per_atom,
   GPU_Vector<double>& force_per_atom,
-  GPU_Vector<double>& virial_per_atom)
+  GPU_Vector<double>& virial_per_atom,
+  const int num_centers,
+  const int* centers)
 {
   const int number_of_atoms = position_per_atom.size() / 3;
-  int grid_size = (N2 - N1 - 1) / BLOCK_SIZE_FORCE + 1;
+  int grid_size = centers != nullptr ? (num_centers - 1) / BLOCK_SIZE_FORCE + 1
+                                     : (N2 - N1 - 1) / BLOCK_SIZE_FORCE + 1;
 
   gpu_find_force_many_body<<<grid_size, BLOCK_SIZE_FORCE>>>(
     number_of_atoms,
@@ -316,6 +346,8 @@ void Potential::find_properties_many_body(
     force_per_atom.data(),
     force_per_atom.data() + number_of_atoms,
     force_per_atom.data() + 2 * number_of_atoms,
-    virial_per_atom.data());
+    virial_per_atom.data(),
+    num_centers,
+    centers);
   GPU_CHECK_KERNEL
 }

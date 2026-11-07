@@ -223,6 +223,13 @@ void Run::compute_force()
 void Run::perform_a_run(const int number_of_steps)
 {
   integrate.initialize(time_step, atom, box, group);
+  // Other ensembles read the full virial or per-atom energy, or use replicas.
+  const EnsembleType ensemble_type = integrate.get_type();
+  force.set_fixed_group(integrate.get_fixed_grouping_method(), integrate.get_fixed_group());
+  force.set_need_full_observables(
+    full_observables_next_run_ ||
+    !(ensemble_type == EnsembleType::NVE || is_standard_nvt(ensemble_type)));
+  full_observables_next_run_ = false;
   measure.pre_run(number_of_steps, time_step, integrate, group, atom, box, force);
 
   // setup force for the first integrate step
@@ -349,6 +356,13 @@ void Run::parse_one_keyword(
     parse_time_step(tokens);
   } else if (tokens[0] == "correct_velocity") {
     parse_correct_velocity(tokens, group);
+  } else if (tokens[0] == "fix_skip") {
+    parse_fix_skip(tokens);
+  } else if (tokens[0] == "full_observables") {
+    if (tokens.size() != 1) {
+      PRINT_INPUT_ERROR("full_observables has no parameters.");
+    }
+    full_observables_next_run_ = true;
   } else if (tokens[0] == "fix") {
     integrate.parse_fix(tokens, group);
   } else if (tokens[0] == "move") {
@@ -455,6 +469,40 @@ void Run::parse_correct_velocity(
   }
 
   velocity.do_velocity_correction = true;
+}
+
+// fix_skip [off] [min_frozen <f>]. Propagating: stays until the next fix_skip line.
+void Run::parse_fix_skip(const std::vector<std::string>& tokens)
+{
+  SkipOptions options = force.skip_options();
+  options.enabled = true;
+  size_t i = 1;
+  while (i < tokens.size()) {
+    if (tokens[i] == "off") {
+      options.enabled = false;
+      ++i;
+    } else if (tokens[i] == "min_frozen" && i + 1 < tokens.size()) {
+      if (
+        !is_valid_real(tokens[i + 1], &options.min_frozen_fraction) ||
+        options.min_frozen_fraction < 0.0 || options.min_frozen_fraction > 1.0) {
+        PRINT_INPUT_ERROR("fix_skip min_frozen should be in [0, 1].");
+      }
+      i += 2;
+    } else if (
+      (tokens[i] == "rebuild" || tokens[i] == "skin" || tokens[i] == "cache_alloc") &&
+      i + 1 < tokens.size()) {
+      // The candidate neighbor list now decides when the influence set is rebuilt.
+      printf("fix_skip ignores %s: it is no longer needed.\n", tokens[i].c_str());
+      i += 2;
+    } else {
+      PRINT_INPUT_ERROR("Usage: fix_skip [off] [min_frozen <f>]");
+    }
+  }
+  force.set_skip_options(options);
+  printf(
+    "fix_skip: %s, min_frozen %g.\n",
+    options.enabled ? "on" : "off",
+    options.min_frozen_fraction);
 }
 
 void Run::parse_time_step(const std::vector<std::string>& tokens)
