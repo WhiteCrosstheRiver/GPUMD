@@ -27,6 +27,7 @@ Dump per-atom data to user-specified file(s) in the extended XYZ format
 #include "utilities/gpu_macro.cuh"
 #include "utilities/gpu_vector.cuh"
 #include "utilities/read_file.cuh"
+#include <cmath>
 #include <cstring>
 
 static __global__ void gpu_sum(const int N, const double* g_data, double* g_data_sum)
@@ -131,6 +132,37 @@ void Dump_XYZ::parse(
       continue;
     }
 
+    if (tokens[m] == "speed") {
+      has_speed_ = true;
+      continue;
+    }
+    if (tokens[m] == "force_norm") {
+      has_force_norm_ = true;
+      continue;
+    }
+    if (tokens[m] == "volume") {
+      if (m + 2 >= num_param) {
+        PRINT_INPUT_ERROR("dump_xyz volume should be followed by R and the number of directions.\n");
+      }
+      voronoi_.set(tokens[m + 1], tokens[m + 2]);
+      has_volume_ = true;
+      m += 2;
+      continue;
+    }
+    if (tokens[m] == "stress" || tokens[m] == "stress_norm" || tokens[m] == "pressure") {
+      (tokens[m] == "stress" ? has_stress_ : tokens[m] == "pressure" ? has_pressure_ : has_stress_norm_) = true;
+      // R and the number of directions are optional here, but come as a pair.
+      double probe = 0.0;
+      if (m + 1 < num_param && is_valid_real(tokens[m + 1], &probe)) {
+        if (m + 2 >= num_param) {
+          PRINT_INPUT_ERROR("Voronoi radius R should be followed by the number of directions.\n");
+        }
+        voronoi_.set(tokens[m + 1], tokens[m + 2]);
+        m += 2;
+      }
+      continue;
+    }
+
     if (tokens[m] == "group") {
       if (group_seen) {
         PRINT_INPUT_ERROR("Option 'group' is specified more than once in dump_xyz.\n");
@@ -175,6 +207,18 @@ void Dump_XYZ::parse(
     }
   }
 
+  if (needs_stress() && !voronoi_.enabled()) {
+    PRINT_INPUT_ERROR(
+      "dump_xyz stress, stress_norm and pressure need R and the number of directions, given after "
+      "them or after volume.\n");
+  }
+  if (needs_volume()) {
+    printf(
+      "    has Voronoi volume with R = %g A and %d directions.\n",
+      voronoi_.radius(),
+      voronoi_.directions());
+  }
+
   if (split_frames_ > 0 && separated_) {
     PRINT_INPUT_ERROR("Option 'split' cannot be combined with a filename ending in '*'.\n");
   }
@@ -206,7 +250,7 @@ void Dump_XYZ::pre_run(
 
   gpu_total_virial_.resize(6);
   cpu_total_virial_.resize(6);
-  if (quantities.has_force_) {
+  if (quantities.has_force_ || has_force_norm_) {
     cpu_force_per_atom_.resize(atom.number_of_atoms * 3);
   }
   if ((has_spin_ || has_mforce_ || has_spin_velocity_) && !atom.has_spin) {
@@ -233,7 +277,7 @@ void Dump_XYZ::pre_run(
   if (quantities.has_unwrapped_position_) {
     cpu_unwrapped_position_.resize(atom.number_of_atoms * 3);
   }
-  if (quantities.has_virial_) {
+  if (quantities.has_virial_ || needs_stress()) {
     cpu_virial_per_atom_.resize(atom.number_of_atoms * 9);
   }
   if (quantities.has_bec_) {
@@ -314,6 +358,10 @@ void Dump_XYZ::output_line2(
     cpu_thermo[7],
     cpu_thermo[4]};
   print_tensor("stress", stress);
+  if (has_pressure_) {
+    fprintf(fid_, " pressure=");
+    fprintf(fid_, fmt_.c_str() + 1, box_pressure_);
+  }
 
   // Properties
   fprintf(fid_, " Properties=species:S:1:pos:R:3");
@@ -356,6 +404,24 @@ void Dump_XYZ::output_line2(
     const int num_grouping_methods = groups.size();
     fprintf(fid_, ":group:I:%d", num_grouping_methods);
   }
+  if (has_speed_) {
+    fprintf(fid_, ":speed:R:1");
+  }
+  if (has_force_norm_) {
+    fprintf(fid_, ":force_norm:R:1");
+  }
+  if (has_volume_) {
+    fprintf(fid_, ":volume_atom:R:1");
+  }
+  if (has_stress_) {
+    fprintf(fid_, ":stress:R:9");
+  }
+  if (has_stress_norm_) {
+    fprintf(fid_, ":stress_norm:R:1");
+  }
+  if (has_pressure_) {
+    fprintf(fid_, ":pressure:R:1");
+  }
 
   // Over
   fprintf(fid_, "\n");
@@ -384,7 +450,7 @@ void Dump_XYZ::end_of_step(
   }
 
   atom.position_per_atom.copy_to_host(atom.cpu_position_per_atom.data());
-  if (quantities.has_mass_) {
+  if (quantities.has_mass_ || needs_stress()) {
     atom.mass.copy_to_host(atom.cpu_mass.data());
   }
   if (quantities.has_charge_) {
@@ -399,10 +465,10 @@ void Dump_XYZ::end_of_step(
     GPU_Vector<float>& gpu_bec = force.get_potential(0).get_bec_reference();
     gpu_bec.copy_to_host(cpu_bec_.data());
   }
-  if (quantities.has_velocity_) {
+  if (quantities.has_velocity_ || has_speed_ || needs_stress()) {
     atom.velocity_per_atom.copy_to_host(atom.cpu_velocity_per_atom.data());
   }
-  if (quantities.has_force_) {
+  if (quantities.has_force_ || has_force_norm_) {
     atom.force_per_atom.copy_to_host(cpu_force_per_atom_.data());
   }
   if (has_spin_) {
@@ -421,8 +487,21 @@ void Dump_XYZ::end_of_step(
   if (quantities.has_unwrapped_position_) {
     atom.unwrapped_position.copy_to_host(cpu_unwrapped_position_.data());
   }
-  if (quantities.has_virial_) {
+  if (quantities.has_virial_ || needs_stress()) {
     atom.virial_per_atom.copy_to_host(cpu_virial_per_atom_.data());
+  }
+  if (needs_volume()) {
+    voronoi_.compute(box, atom, cpu_volume_per_atom_);
+  }
+  if (has_pressure_) {
+    // Every atom and the box volume, even when only a group is dumped.
+    const int N = atom.number_of_atoms;
+    double sum = 0.0;
+    for (int i = 0; i < N; ++i) {
+      sum += cpu_virial_per_atom_[i] + cpu_virial_per_atom_[i + N] +
+             cpu_virial_per_atom_[i + 2 * N] + atom.cpu_mass[i] * kinetic_trace(atom, i);
+    }
+    box_pressure_ = PRESSURE_UNIT_CONVERSION * sum / (3.0 * box.get_volume());
   }
 
   if (separated_) {
@@ -519,6 +598,7 @@ void Dump_XYZ::end_of_step(
         fprintf(fid_, " %d", groups[d].cpu_label[m]);
       }
     }
+    write_extras(atom, m);
     fprintf(fid_, "\n");
   }
   if (separated_) {
@@ -528,6 +608,63 @@ void Dump_XYZ::end_of_step(
     if (split_frames_ > 0) {
       splitter_.frame_written();
     }
+  }
+}
+
+// |v|^2 in natural units.
+double Dump_XYZ::kinetic_trace(const Atom& atom, const int i) const
+{
+  const int N = atom.number_of_atoms;
+  double v2 = 0.0;
+  for (int d = 0; d < 3; ++d) {
+    const double v = atom.cpu_velocity_per_atom[i + N * d];
+    v2 += v * v;
+  }
+  return v2;
+}
+
+void Dump_XYZ::write_extras(const Atom& atom, const int m)
+{
+  const int N = atom.number_of_atoms;
+  if (has_speed_) {
+    fprintf(fid_, fmt_.c_str(), sqrt(kinetic_trace(atom, m)) / TIME_UNIT_CONVERSION);
+  }
+  if (has_force_norm_) {
+    double f2 = 0.0;
+    for (int d = 0; d < 3; ++d) {
+      f2 += cpu_force_per_atom_[m + N * d] * cpu_force_per_atom_[m + N * d];
+    }
+    fprintf(fid_, fmt_.c_str(), sqrt(f2));
+  }
+  if (has_volume_) {
+    fprintf(fid_, fmt_.c_str(), cpu_volume_per_atom_[m]);
+  }
+  if (has_stress_ || has_stress_norm_) {
+    // sigma = (W + m v v^T) / Omega, in eV/A^3, in the component order of virial.
+    const int index[9] = {0, 3, 4, 6, 1, 5, 7, 8, 2};
+    const int va[9] = {0, 0, 0, 1, 1, 1, 2, 2, 2};
+    const int vb[9] = {0, 1, 2, 0, 1, 2, 0, 1, 2};
+    double sigma[9];
+    double norm2 = 0.0;
+    for (int d = 0; d < 9; ++d) {
+      const double w = cpu_virial_per_atom_[m + N * index[d]];
+      const double vv = atom.cpu_velocity_per_atom[m + N * va[d]] * atom.cpu_velocity_per_atom[m + N * vb[d]];
+      sigma[d] = (w + atom.cpu_mass[m] * vv) / cpu_volume_per_atom_[m];
+      norm2 += sigma[d] * sigma[d];
+    }
+    if (has_stress_) {
+      for (int d = 0; d < 9; ++d) {
+        fprintf(fid_, fmt_.c_str(), sigma[d]);
+      }
+    }
+    if (has_stress_norm_) {
+      fprintf(fid_, fmt_.c_str(), sqrt(norm2));
+    }
+  }
+  if (has_pressure_) {
+    const double trace = cpu_virial_per_atom_[m] + cpu_virial_per_atom_[m + N] +
+                         cpu_virial_per_atom_[m + 2 * N] + atom.cpu_mass[m] * kinetic_trace(atom, m);
+    fprintf(fid_, fmt_.c_str(), PRESSURE_UNIT_CONVERSION * trace / (3.0 * cpu_volume_per_atom_[m]));
   }
 }
 
