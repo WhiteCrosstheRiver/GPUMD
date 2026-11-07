@@ -40,6 +40,27 @@ The :attr:`group_labels` property writes one integer column per grouping method,
 
 * The wrapped positions will always be included in the output.
 
+* :attr:`speed` writes :math:`|\mathbf v|` in Å/fs and :attr:`force_norm` writes :math:`|\mathbf F|` in eV/Å.
+  Neither needs :attr:`velocity` or :attr:`force`.
+
+* :attr:`volume` ``<R> <M>`` writes the per-atom ball-restricted Voronoi volume
+  :math:`\Omega_i(R)=\mathrm{Vol}[C_i\cap B(\mathbf r_i,R)]` in Å\ :sup:`3` as ``volume_atom``,
+  from equal-weight quadrature over :attr:`M` = 128 or 256 directions.
+  Neighbors within :math:`2R` bound each cell, so :math:`R` should reach the farthest vertex of a bulk cell.
+  Every periodic box thickness must be at least :math:`4R`.
+
+* :attr:`stress` writes the per-atom stress :math:`\sigma_i=(\mathbf W_i+m_i\mathbf v_i\mathbf v_i^{\mathsf T})/\Omega_i(R)`
+  in eV/Å\ :sup:`3`, with 9 components in the order of :attr:`virial`.
+  :attr:`stress_norm` writes its Frobenius norm.
+  :attr:`pressure` writes :math:`p_i=C_P\,\mathrm{Tr}(\mathbf W_i+m_i\mathbf v_i\mathbf v_i^{\mathsf T})/(3\Omega_i)` in GPa,
+  and adds ``pressure=`` to the header for the whole box, from every atom and the box volume, even when ``group`` limits the output.
+  Each of them takes ``<R> <M>`` unless :attr:`volume` or another of them already gave the same pair. Different pairs are an error.
+  They need the per-atom virial but not the :attr:`virial` column.
+
+Example::
+
+    dump_xyz 100 dump.xyz velocity speed force force_norm stress 3.0 128 stress_norm pressure
+
 
 Examples
 --------

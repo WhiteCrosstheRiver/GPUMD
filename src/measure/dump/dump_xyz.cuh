@@ -17,6 +17,7 @@
 #include "measure/parse_utilities.cuh"
 #include "measure/action.cuh"
 #include "utilities/gpu_vector.cuh"
+#include "voronoi_volume.cuh"
 #include "xyz_frame_splitter.cuh"
 #include <string>
 #include <vector>
@@ -74,6 +75,18 @@ private:
   bool has_spin_ = false;
   bool has_mforce_ = false;
   bool has_spin_velocity_ = false;
+  // Extras: scalar norms and per-atom Voronoi volume, stress and pressure.
+  bool has_speed_ = false;
+  bool has_force_norm_ = false;
+  bool has_volume_ = false;
+  bool has_stress_ = false;
+  bool has_stress_norm_ = false;
+  bool has_pressure_ = false;
+  VoronoiVolume voronoi_;
+  std::vector<double> cpu_volume_per_atom_;
+  double box_pressure_ = 0.0;
+  bool needs_volume() const { return has_volume_ || needs_stress(); }
+  bool needs_stress() const { return has_stress_ || has_stress_norm_ || has_pressure_; }
   int separated_ = 0;
   int split_frames_ = 0;
   XYZFrameSplitter splitter_;
@@ -93,6 +106,8 @@ private:
   std::vector<float> cpu_bec_;
 
   void print_tensor(const char* name, const double* tensor);
+  double kinetic_trace(const Atom& atom, const int i) const;
+  void write_extras(const Atom& atom, const int m);
 
   void output_line2(
     const double time,
