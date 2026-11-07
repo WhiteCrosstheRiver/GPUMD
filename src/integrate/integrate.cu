@@ -168,6 +168,9 @@ void Integrate::initialize(
     if (fixed_group < 0) {
       PRINT_INPUT_ERROR("It is not allowed to have moving group but no fixed group.");
     }
+    if (fix_union.active) {
+      PRINT_INPUT_ERROR("move cannot be used with fix shell, type or group.");
+    }
     if (fixed_grouping_method != move_grouping_method) {
       PRINT_INPUT_ERROR("The fixed and moving groups must use the same grouping method.");
     }
@@ -452,9 +455,17 @@ void Integrate::parse_ensemble(
 }
 
 void Integrate::parse_fix(
-  const std::vector<std::string>& tokens, const std::vector<Group>& group)
+  const std::vector<std::string>& tokens, std::vector<Group>& group, Atom& atom, Box& box)
 {
   const int num_param = tokens.size();
+  if (num_param >= 2 && (tokens[1] == "shell" || tokens[1] == "type" || tokens[1] == "group")) {
+    parse_fix_union(tokens, group, atom, box);
+    return;
+  }
+  if (fix_union.active) {
+    PRINT_INPUT_ERROR(
+      "Plain fix cannot follow fix shell, type or group in a run block. Use fix group <id>.");
+  }
   if (num_param != 2 && num_param != 3) {
     PRINT_INPUT_ERROR("Keyword 'fix' should have 1 or 2 parameters.");
   }

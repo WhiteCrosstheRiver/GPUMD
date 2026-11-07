@@ -298,6 +298,7 @@ void Run::perform_a_run(const int number_of_steps)
     atom, box, integrate, number_of_steps, time_step, integrate.get_temperature2());
 
   integrate.finalize(atom, box);
+  integrate.finish_fix_union(group);
   velocity.finalize();
   force.finalize();
   max_distance_per_step = 0.0;
@@ -364,7 +365,10 @@ void Run::parse_one_keyword(
     }
     full_observables_next_run_ = true;
   } else if (tokens[0] == "fix") {
-    integrate.parse_fix(tokens, group);
+    if (tokens.size() > 1 && tokens[1] == "shell") {
+      atom.position_per_atom.copy_to_host(atom.cpu_position_per_atom.data());
+    }
+    integrate.parse_fix(tokens, group, atom, box);
   } else if (tokens[0] == "move") {
     integrate.parse_move(tokens, group);
   } else if (tokens[0] == "kspace") {
