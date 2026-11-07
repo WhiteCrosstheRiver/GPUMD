@@ -37,6 +37,13 @@ struct NEP_Data {
   GPU_Vector<float> parameters; // parameters to be optimized
   std::vector<int> cpu_NN_radial;
   std::vector<int> cpu_NN_angular;
+  // fix_skip centers: active atoms plus everything that can reach them.
+  GPU_Vector<char> influence_mask;
+  GPU_Vector<int> influence_indices;
+  int influence_num_centers = -1;
+  int influence_built_N = -1;
+  int influence_built_generation = -1;
+  int influence_built_neighbor = -1;
 };
 
 class NEP : public Potential
@@ -128,6 +135,8 @@ public:
     GPU_Vector<double>& force,
     GPU_Vector<double>& virial);
 
+  InfluencePolicy influence_policy() const override { return InfluencePolicy::LocalRadius; }
+
   const GPU_Vector<int>& get_NN_radial_ptr();
 
   const GPU_Vector<int>& get_NL_radial_ptr();
@@ -141,6 +150,7 @@ private:
   NeighborManager neighbor_manager;
 
   void update_potential(float* parameters, ANN& ann);
+  int update_influence_centers(const int N);
 
   void compute_small_box(
     Box& box,

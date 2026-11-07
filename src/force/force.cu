@@ -348,6 +348,125 @@ static __global__ void initialize_properties(
 void Force::finalize()
 {
   multiple_potentials_mode_ = "observe";
+  fixed_group_ = -1;
+  need_full_observables_ = false;
+  clear_active_set();
+}
+
+void Force::clear_active_set()
+{
+  for (auto& potential : potentials) {
+    potential->ptr_active_mask = nullptr;
+    potential->ptr_active_indices = nullptr;
+    potential->num_active = -1;
+  }
+  skip_in_use_ = false;
+  active_set_valid_ = false;
+}
+
+void Force::set_fixed_group(const int grouping_method, const int fixed_group)
+{
+  fixed_grouping_method_ = grouping_method;
+  fixed_group_ = fixed_group;
+  clear_active_set();
+}
+
+void Force::set_need_full_observables(const bool need_full)
+{
+  need_full_observables_ = need_full;
+  clear_active_set();
+}
+
+void Force::set_skip_options(const SkipOptions& options)
+{
+  skip_options_ = options;
+  clear_active_set();
+}
+
+// Group labels and N are constant inside a run, so this runs once per run.
+void Force::prepare_active_atoms(const int number_of_atoms, const std::vector<Group>& group)
+{
+  if (active_set_valid_ && active_set_N_ == number_of_atoms) {
+    return;
+  }
+  clear_active_set();
+  active_set_valid_ = true;
+  active_set_N_ = number_of_atoms;
+  if (
+    !skip_options_.enabled || need_full_observables_ || fixed_group_ < 0 ||
+    fixed_grouping_method_ >= static_cast<int>(group.size())) {
+    return;
+  }
+  const std::vector<int>& label = group[fixed_grouping_method_].cpu_label;
+  if (static_cast<int>(label.size()) != number_of_atoms) {
+    PRINT_INPUT_ERROR("fix_skip found group labels that do not match the atom count.");
+  }
+  std::vector<char> mask(number_of_atoms);
+  std::vector<int> indices;
+  for (int n = 0; n < number_of_atoms; ++n) {
+    mask[n] = label[n] != fixed_group_;
+    if (mask[n]) {
+      indices.push_back(n);
+    }
+  }
+  const int num_active = static_cast<int>(indices.size());
+  const int num_frozen = number_of_atoms - num_active;
+  if (
+    num_active == 0 || num_frozen == 0 ||
+    num_frozen < skip_options_.min_frozen_fraction * number_of_atoms) {
+    printf("fix_skip is off for this run: %d of %d atoms frozen.\n", num_frozen, number_of_atoms);
+    return;
+  }
+  active_mask_.resize(number_of_atoms);
+  active_mask_.copy_from_host(mask.data());
+  active_indices_.resize(num_active);
+  active_indices_.copy_from_host(indices.data());
+  ++active_generation_;
+  for (auto& potential : potentials) {
+    if (potential->influence_policy() != InfluencePolicy::Full) {
+      potential->ptr_active_mask = &active_mask_;
+      potential->ptr_active_indices = &active_indices_;
+      potential->num_active = num_active;
+      potential->active_generation = active_generation_;
+      skip_in_use_ = true;
+    }
+  }
+  if (skip_in_use_) {
+    printf(
+      "fix_skip is on: %d of %d atoms frozen. Active forces stay exact; per-atom energy, virial "
+      "and forces of frozen atoms are omitted.\n",
+      num_frozen,
+      number_of_atoms);
+  }
+}
+
+static __global__ void gpu_zero_fixed_forces(
+  const int N, const int fixed_group, const int* label, double* fx, double* fy, double* fz)
+{
+  const int n = blockIdx.x * blockDim.x + threadIdx.x;
+  if (n < N && label[n] == fixed_group) {
+    fx[n] = 0.0;
+    fy[n] = 0.0;
+    fz[n] = 0.0;
+  }
+}
+
+void Force::zero_fixed_forces(
+  const int number_of_atoms,
+  const std::vector<Group>& group,
+  GPU_Vector<double>& force_per_atom)
+{
+  if (!skip_in_use_) {
+    return;
+  }
+  gpu_zero_fixed_forces<<<(number_of_atoms - 1) / 128 + 1, 128>>>(
+    number_of_atoms,
+    fixed_group_,
+    group[fixed_grouping_method_].label.data(),
+    force_per_atom.data(),
+    force_per_atom.data() + number_of_atoms,
+    force_per_atom.data() + 2 * number_of_atoms);
+  GPU_CHECK_KERNEL
 }
 
 static __global__ void gpu_apply_pbc(
@@ -535,6 +654,7 @@ void Force::compute_potentials(
   GPU_Vector<double>& force_per_atom,
   GPU_Vector<double>& virial_per_atom)
 {
+  prepare_active_atoms(number_of_atoms, group);
   if (multiple_potentials_mode_.compare("observe") == 0) {
     // If observing, calculate using main potential only
     compute_single_potential(
@@ -571,6 +691,7 @@ void Force::compute_potentials(
   } else {
     PRINT_INPUT_ERROR("Invalid mode for multiple potentials.\n");
   }
+  zero_fixed_forces(number_of_atoms, group, force_per_atom);
 }
 
 void Force::compute(

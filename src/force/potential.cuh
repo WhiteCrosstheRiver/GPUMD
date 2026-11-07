@@ -14,6 +14,7 @@
 */
 
 #pragma once
+#include "force_domain.cuh"
 #include "model/box.cuh"
 #include "model/group.cuh"
 #include "utilities/gpu_vector.cuh"
@@ -57,6 +58,13 @@ public:
     GPU_Vector<double>& /* virial */,
     const std::vector<Group>& /* group */){}
 
+  // Force sets these only for a fix_skip run of a potential that opts in.
+  virtual InfluencePolicy influence_policy() const { return InfluencePolicy::Full; }
+  const GPU_Vector<char>* ptr_active_mask = nullptr; // 1 = unfixed
+  const GPU_Vector<int>* ptr_active_indices = nullptr;
+  int num_active = -1;        // -1 = all atoms
+  int active_generation = -1; // bumped whenever the active set is rebuilt
+
   virtual const GPU_Vector<int>& get_NN_radial_ptr()
   {
     static GPU_Vector<int> dummy_NN;
@@ -91,7 +99,9 @@ protected:
     const double* f12z,
     const GPU_Vector<double>& position_per_atom,
     GPU_Vector<double>& force_per_atom,
-    GPU_Vector<double>& virial_per_atom);
+    GPU_Vector<double>& virial_per_atom,
+    const int num_centers = -1,
+    const int* centers = nullptr);
 
   void find_properties_many_body(
     Box& box,
@@ -102,5 +112,7 @@ protected:
     const float* f12z,
     const GPU_Vector<double>& position_per_atom,
     GPU_Vector<double>& force_per_atom,
-    GPU_Vector<double>& virial_per_atom);
+    GPU_Vector<double>& virial_per_atom,
+    const int num_centers = -1,
+    const int* centers = nullptr);
 };

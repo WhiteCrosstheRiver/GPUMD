@@ -154,6 +154,7 @@ public:
   void initialize(const double rc, const int num_atoms, const int num_neighbors);
   double get_skin() const;
   int get_capacity() const;
+  int get_build_count() const { return build_count; }
   void find_neighbor_global(
     const double rc,
     Box& box, 
@@ -168,6 +169,7 @@ public:
 
 private:
   double skin = 1.0;              // skin distance
+  int build_count = 0;            // number of candidate-list rebuilds
   GPU_Vector<int> cell_count;     // for cell list
   GPU_Vector<int> cell_count_sum; // for cell list
   GPU_Vector<int> cell_contents;  // for cell list
@@ -194,6 +196,7 @@ public:
     const GPU_Vector<double>& position_per_atom);
   const GPU_Vector<int>& get_candidate_NN() const;
   const GPU_Vector<int>& get_candidate_NL() const;
+  int get_build_count() const { return neighbor.get_build_count(); }
   void set_candidate_capacity(const int capacity);
   void find_local_neighbor(
     const double rc,

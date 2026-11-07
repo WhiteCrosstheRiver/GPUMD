@@ -85,6 +85,11 @@ public:
 #endif
 
   void finalize();
+  // Set before each run; fix_skip applies only to the run they describe.
+  void set_fixed_group(const int grouping_method, const int fixed_group);
+  void set_need_full_observables(const bool need_full);
+  void set_skip_options(const SkipOptions& options);
+  const SkipOptions& skip_options() const { return skip_options_; }
 
   int get_number_of_types(FILE* fid_potential);
   void set_multiple_potentials_mode(std::string mode);
@@ -116,7 +121,23 @@ private:
   bool has_non_nep = false;
   std::string multiple_potentials_mode_ = "observe"; // "observe" or "average"
   std::string atom_types[NUM_ELEMENTS];
+  SkipOptions skip_options_;
+  int fixed_group_ = -1;
+  int fixed_grouping_method_ = 0;
+  bool need_full_observables_ = false;
+  bool skip_in_use_ = false;
+  bool active_set_valid_ = false;
+  int active_set_N_ = -1;
+  int active_generation_ = 0;
+  GPU_Vector<char> active_mask_;
+  GPU_Vector<int> active_indices_;
 
+  void clear_active_set();
+  void prepare_active_atoms(const int number_of_atoms, const std::vector<Group>& group);
+  void zero_fixed_forces(
+    const int number_of_atoms,
+    const std::vector<Group>& group,
+    GPU_Vector<double>& force_per_atom);
   void check_types(const std::string& file_potential);
   void prepare_compute(
     const int number_of_atoms,

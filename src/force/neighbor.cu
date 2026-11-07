@@ -797,6 +797,7 @@ void Neighbor::find_neighbor_global(
       NN,
       NL);
 
+    ++build_count;
     gpu_update_xyz0<<<(N - 1) / 128 + 1, 128>>>(
       N, 
       x, 

@@ -90,9 +90,19 @@ static __global__ void gpu_find_force(
   double* g_fy,
   double* g_fz,
   double* g_virial,
-  double* g_potential)
+  double* g_potential,
+  const int num_centers,
+  const int* centers)
 {
-  int n1 = blockIdx.x * blockDim.x + threadIdx.x + N1; // particle index
+  const int t = blockIdx.x * blockDim.x + threadIdx.x;
+  int n1 = -1; // particle index
+  if (centers != nullptr) {
+    if (t < num_centers) {
+      n1 = centers[t];
+    }
+  } else if (t + N1 < N2) {
+    n1 = t + N1;
+  }
   float s_fx = 0.0f;                                   // force_x
   float s_fy = 0.0f;                                   // force_y
   float s_fz = 0.0f;                                   // force_z
@@ -107,7 +117,7 @@ static __global__ void gpu_find_force(
   float s_szy = 0.0f;                                  // virial_stress_zy
   float s_szz = 0.0f;                                  // virial_stress_zz
 
-  if (n1 < N2) {
+  if (n1 >= 0) {
     int neighbor_number = g_neighbor_number[n1];
     int type1 = g_type[n1];
     double x1 = g_x[n1];
@@ -190,7 +200,9 @@ void LJ::compute(
   GPU_Vector<double>& virial_per_atom)
 {
   const int number_of_atoms = type.size();
-  int grid_size = (N2 - N1 - 1) / BLOCK_SIZE_FORCE + 1;
+  const int* centers = ptr_active_indices != nullptr ? ptr_active_indices->data() : nullptr;
+  int grid_size = centers != nullptr ? (num_active - 1) / BLOCK_SIZE_FORCE + 1
+                                     : (N2 - N1 - 1) / BLOCK_SIZE_FORCE + 1;
 
   neighbor_manager.update(box, type, position_per_atom);
 
@@ -213,6 +225,8 @@ void LJ::compute(
     force_per_atom.data() + number_of_atoms,
     force_per_atom.data() + 2 * number_of_atoms,
     virial_per_atom.data(),
-    potential_per_atom.data());
+    potential_per_atom.data(),
+    centers != nullptr ? num_active : 0,
+    centers);
   GPU_CHECK_KERNEL
 }
