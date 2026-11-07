@@ -32,6 +32,7 @@ Run simulation according to the inputs in the run.in file.
 #include "utilities/nep_io/compact_nep.cuh"
 #include "utilities/gpu_macro.cuh"
 #include "utilities/read_file.cuh"
+#include "control.cuh"
 #include "utilities/run_input.cuh"
 #include "velocity.cuh"
 #include <chrono>
@@ -165,6 +166,19 @@ Run::Run(const RunInput& run_input)
   execute_run_in(run_input);
 }
 
+void Run::execute_command(std::vector<std::string> tokens)
+{
+  if (tokens.size() >= 2 && tokens[0] == "potential") {
+    tokens[1] = get_compact_nep_filename(tokens[1]);
+  }
+  if (has_replicate_ && first_effective_command_ && tokens[0] == "replicate") {
+    first_effective_command_ = false;
+    return;
+  }
+  first_effective_command_ = false;
+  parse_one_keyword(tokens, *run_input_);
+}
+
 void Run::execute_run_in(const RunInput& run_input)
 {
   print_line_1();
@@ -172,22 +186,9 @@ void Run::execute_run_in(const RunInput& run_input)
   fflush(stdout);
   print_line_2();
 
-  bool first_effective_command = true;
-  for (const auto& line : run_input.lines()) {
-    if (!line.tokens.empty()) {
-      std::vector<std::string> tokens = line.tokens;
-      if (tokens.size() >= 2 && tokens[0] == "potential") {
-        tokens[1] = get_compact_nep_filename(tokens[1]);
-      }
-      if (has_replicate_ && first_effective_command &&
-          tokens[0] == "replicate") {
-        first_effective_command = false;
-        continue;
-      }
-      first_effective_command = false;
-      parse_one_keyword(tokens, run_input);
-    }
-  }
+  run_input_ = &run_input;
+  first_effective_command_ = true;
+  execute_control_script(*this, run_input);
 
   if (integrate.has_ensemble()) {
     PRINT_INPUT_ERROR("The last ensemble is not followed by a run.");
