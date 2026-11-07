@@ -80,10 +80,39 @@ static __device__ void get_neighbor_cell_offset_range(
     const int count = num_bins < 5 ? num_bins : 5;
     begin = -(count / 2);
     end = begin + count;
+  } else if (num_bins > 1) {
+    begin = -2;
+    end = 3;
   } else {
     begin = 0;
     end = 1;
   }
+}
+
+// Free axes clamp atoms into the outer cells. Clamping only brings two cells closer, so the
+// usual offset range still reaches every neighbor.
+static __device__ int wrap_cell_id(int id, const int num_bins, const int pbc)
+{
+  if (pbc) {
+    while (id < 0) {
+      id += num_bins;
+    }
+    while (id >= num_bins) {
+      id -= num_bins;
+    }
+    return id;
+  }
+  return id < 0 ? 0 : (id >= num_bins ? num_bins - 1 : id);
+}
+
+// Returns -1 past the edge of a free axis, where there is no cell.
+static __device__ int shift_cell_id(const int id, const int delta, const int num_bins, const int pbc)
+{
+  const int shifted = id + delta;
+  if (pbc) {
+    return shifted < 0 ? shifted + num_bins : (shifted >= num_bins ? shifted - num_bins : shifted);
+  }
+  return shifted < 0 || shifted >= num_bins ? -1 : shifted;
 }
 
 static __device__ void find_cell_id(
@@ -107,18 +136,9 @@ static __device__ void find_cell_id(
   cell_id_y = floor(sy * box.thickness_y * rc_inv);
   cell_id_z = floor(sz * box.thickness_z * rc_inv);
 
-  while (cell_id_x < 0)
-    cell_id_x += nx;
-  while (cell_id_x >= nx)
-    cell_id_x -= nx;
-  while (cell_id_y < 0)
-    cell_id_y += ny;
-  while (cell_id_y >= ny)
-    cell_id_y -= ny;
-  while (cell_id_z < 0)
-    cell_id_z += nz;
-  while (cell_id_z >= nz)
-    cell_id_z -= nz;
+  cell_id_x = wrap_cell_id(cell_id_x, nx, box.pbc_x);
+  cell_id_y = wrap_cell_id(cell_id_y, ny, box.pbc_y);
+  cell_id_z = wrap_cell_id(cell_id_z, nz, box.pbc_z);
   cell_id = cell_id_x + nx * cell_id_y + nx * ny * cell_id_z;
 }
 
