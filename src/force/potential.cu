@@ -351,3 +351,8 @@ void Potential::find_properties_many_body(
     centers);
   GPU_CHECK_KERNEL
 }
+
+void Potential::update_number_of_atoms(const int)
+{
+  PRINT_INPUT_ERROR("This potential does not support changing the number of atoms.");
+}

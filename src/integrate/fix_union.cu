@@ -131,6 +131,13 @@ void Integrate::commit_fix_union(std::vector<Group>& group, Atom& atom)
     group[0].cpu_size[1]);
 }
 
+void Integrate::update_fix_union(const Atom& atom)
+{
+  if (fix_union.active) {
+    fix_union.frozen = atom.cpu_fixed;
+  }
+}
+
 void Integrate::finish_fix_union(std::vector<Group>& group)
 {
   if (fix_union.grow_state && !fix_union.grow_committed) {
@@ -142,13 +149,18 @@ void Integrate::finish_fix_union(std::vector<Group>& group)
     if (fix_union.created_group) {
       group.clear();
     } else {
-      apply_group0_labels(group[0], fix_union.user_label, fix_union.user_number);
+      const std::vector<int> user_label = group[0].cpu_label_user;
+      group[0].cpu_label_user.clear();
+      int number = fix_union.user_number;
+      for (const int label : user_label) {
+        number = std::max(number, label + 1);
+      }
+      apply_group0_labels(group[0], user_label, number);
     }
   }
   fix_union.active = false;
   fix_union.created_group = false;
   fix_union.frozen.clear();
-  fix_union.user_label.clear();
 }
 
 void Integrate::parse_fix_union(
@@ -172,7 +184,7 @@ void Integrate::parse_fix_union(
       }
     }
     if (!group.empty()) {
-      fix_union.user_label = group[0].cpu_label;
+      group[0].cpu_label_user = group[0].cpu_label;
       fix_union.user_number = group[0].number;
     }
     fix_union.active = true;
@@ -444,7 +456,7 @@ void Integrate::parse_fix_union(
         if (!is_valid_int(tokens[i], &id)) {
           PRINT_INPUT_ERROR("Usage: fix group <group_id> [group_id ...]");
         }
-        if (fix_union.user_label.empty() || id < 0 || id >= fix_union.user_number) {
+        if (group.empty() || fix_union.created_group || id < 0 || id >= fix_union.user_number) {
           PRINT_INPUT_ERROR("fix group needs a group ID of grouping method 0.");
         }
         group_ids.push_back(id);
@@ -462,7 +474,7 @@ void Integrate::parse_fix_union(
   const std::unordered_set<int> id_set(group_ids.begin(), group_ids.end());
   int n_added = 0;
   for (int n = 0; n < N; ++n) {
-    const bool by_group = !id_set.empty() && id_set.count(fix_union.user_label[n]) > 0;
+    const bool by_group = !id_set.empty() && id_set.count(group[0].cpu_label_user[n]) > 0;
     const bool by_type = !types.empty() && types.count(atom.cpu_atom_symbol[n]) > 0;
     if ((by_group || by_type) && !fix_union.frozen[n]) {
       fix_union.frozen[n] = 1;

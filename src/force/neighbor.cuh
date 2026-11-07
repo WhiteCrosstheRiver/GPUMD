@@ -173,6 +173,7 @@ public:
   GPU_Vector<int> NN, NL; // global neighbor list
   void initialize(const double rc, const int num_atoms, const int num_neighbors);
   double get_skin() const;
+  void update_number_of_atoms(const int num_atoms);
   int get_capacity() const;
   int get_build_count() const { return build_count; }
   void find_neighbor_global(
@@ -218,6 +219,7 @@ public:
   const GPU_Vector<int>& get_candidate_NL() const;
   int get_build_count() const { return neighbor.get_build_count(); }
   void set_candidate_capacity(const int capacity);
+  void update_number_of_atoms(const int num_atoms); // the next update rebuilds the lists
   void find_local_neighbor(
     const double rc,
     Box& box,

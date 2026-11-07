@@ -34,6 +34,8 @@ public:
   using Potential::compute;
   LJ(FILE*, int, int);
   virtual ~LJ(void);
+  void update_number_of_atoms(const int number_of_atoms) override;
+  double deposition_clearance() const override;
   virtual InfluencePolicy influence_policy() const override
   {
     return InfluencePolicy::ActiveOnly;

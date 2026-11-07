@@ -60,6 +60,10 @@ public:
 
   // Force sets these only for a fix_skip run of a potential that opts in.
   virtual InfluencePolicy influence_policy() const { return InfluencePolicy::Full; }
+  // Per-atom buffers are sized at construction, so a potential must opt in to atom count changes.
+  virtual void update_number_of_atoms(const int number_of_atoms);
+  // Separation that guarantees zero force between two atom sets. 0 means no such guarantee.
+  virtual double deposition_clearance() const { return 0.0; }
   const GPU_Vector<char>* ptr_active_mask = nullptr; // 1 = unfixed
   const GPU_Vector<int>* ptr_active_indices = nullptr;
   int num_active = -1;        // -1 = all atoms

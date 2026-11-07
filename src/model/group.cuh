@@ -28,6 +28,7 @@ public:
   GPU_Vector<int> contents; // atom indices sorted based on groups
   // CPU data corresponding to the above GPU data
   std::vector<int> cpu_label;
+  std::vector<int> cpu_label_user; // model labels while fix rewrites cpu_label; else empty
   std::vector<int> cpu_size;
   std::vector<int> cpu_size_sum;
   std::vector<int> cpu_contents;

@@ -473,3 +473,12 @@ void Measure::post_force(
     action->post_force(step, time_step, integrate, group, atom, box, force);
   }
 }
+
+std::vector<std::string> Measure::action_names() const
+{
+  std::vector<std::string> names;
+  for (const auto& action : actions_) {
+    names.push_back(action->action_name);
+  }
+  return names;
+}

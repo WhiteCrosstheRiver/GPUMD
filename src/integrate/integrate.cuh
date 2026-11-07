@@ -34,7 +34,6 @@ struct FixUnionState {
   std::vector<char> frozen;
   bool active = false;
   bool created_group = false;  // grouping method 0 did not exist in the model
-  std::vector<int> user_label; // grouping method 0 as read from the model
   int user_number = 0;
   std::shared_ptr<shell2::GrowState> grow_state; // mode grow; survives finalize()
   bool grow_committed = false;
@@ -146,5 +145,7 @@ public:
   void parse_fix(
     const std::vector<std::string>& tokens, std::vector<Group>& group, Atom& atom, Box& box);
   void finish_fix_union(std::vector<Group>& group);
+  // Deposit and delete change the atom order, and cpu_fixed follows it.
+  void update_fix_union(const Atom& atom);
   void parse_move(const std::vector<std::string>& tokens, const std::vector<Group>& group);
 };

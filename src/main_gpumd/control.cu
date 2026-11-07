@@ -301,11 +301,33 @@ void CommandNode::execute(Run& run, VariableScope& scope)
   run.execute_command(expanded);
 }
 
+static bool is_delete_isolated_command(const Node& node, VariableScope& scope, const Box& box)
+{
+  const auto* cmd = dynamic_cast<const CommandNode*>(&node);
+  if (cmd == nullptr || cmd->tokens.size() < 2) {
+    return false;
+  }
+  return scope.expand_text(cmd->tokens[0], box) == "delete" &&
+         scope.expand_text(cmd->tokens[1], box) == "isolated";
+}
+
 static void execute_node_list(
   Run& run, std::vector<std::unique_ptr<Node>>& nodes, VariableScope& scope)
 {
-  for (auto& node : nodes) {
-    node->execute(run, scope);
+  size_t i = 0;
+  while (i < nodes.size()) {
+    if (is_delete_isolated_command(*nodes[i], scope, run.current_box())) {
+      std::vector<std::vector<std::string>> batch;
+      while (i < nodes.size() && is_delete_isolated_command(*nodes[i], scope, run.current_box())) {
+        const auto* cmd = static_cast<const CommandNode*>(nodes[i].get());
+        batch.push_back(expand_tokens(cmd->tokens, scope, run.current_box()));
+        ++i;
+      }
+      run.delete_isolated_batch(batch);
+    } else {
+      nodes[i]->execute(run, scope);
+      ++i;
+    }
   }
 }
 
@@ -367,5 +389,7 @@ void execute_control_script(Run& run, const RunInput& run_input)
   std::vector<std::string> enclosing;
   auto nodes = parse_statements(input, enclosing, ParseMode::Top, nullptr);
   VariableScope scope;
+  run.variables = &scope;
   execute_node_list(run, nodes, scope);
+  run.variables = nullptr;
 }

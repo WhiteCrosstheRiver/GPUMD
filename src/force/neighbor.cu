@@ -796,7 +796,7 @@ void Neighbor::find_neighbor_global(
 
   bool is_first_time = false;
 
-  if (x0.size() == 0) {
+  if (static_cast<int>(x0.size()) != N) {
     is_first_time = true;
     x0.resize(N);
     y0.resize(N);
@@ -863,6 +863,14 @@ void Neighbor::initialize(const double rc, const int num_atoms, const int num_ne
   cell_contents.resize(num_atoms);
 }
 
+void Neighbor::update_number_of_atoms(const int num_atoms)
+{
+  const int capacity = get_capacity();
+  NN.resize(num_atoms);
+  NL.resize(static_cast<size_t>(num_atoms) * capacity);
+  cell_contents.resize(num_atoms);
+}
+
 double Neighbor::get_skin() const
 {
   return skin;
@@ -911,6 +919,12 @@ const GPU_Vector<int>& NeighborManager::get_candidate_NN() const
 const GPU_Vector<int>& NeighborManager::get_candidate_NL() const
 {
   return neighbor.NL;
+}
+
+void NeighborManager::update_number_of_atoms(const int num_atoms)
+{
+  neighbor.update_number_of_atoms(num_atoms);
+  requirement.num_atoms = num_atoms;
 }
 
 void NeighborManager::set_candidate_capacity(const int capacity)

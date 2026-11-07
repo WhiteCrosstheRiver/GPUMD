@@ -39,6 +39,7 @@ public:
   using Potential::compute;
   Tersoff1989(FILE*, int sum_of_types, const int num_atoms);
   virtual ~Tersoff1989(void);
+  void update_number_of_atoms(const int number_of_atoms) override;
   virtual void compute(
     Box& box,
     const GPU_Vector<int>& type,
@@ -48,6 +49,7 @@ public:
     GPU_Vector<double>& virial);
 
 protected:
+  void allocate_atom_buffers(const int num_atoms);
   Tersoff1989_Parameters ters0;
   Tersoff1989_Parameters ters1;
   Tersoff1989_Parameters ters2;
