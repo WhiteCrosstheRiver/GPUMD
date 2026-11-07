@@ -37,6 +37,10 @@ class Run
 public:
   Run(const RunInput& run_input);
 
+  // Used by the control layer for each command after variable expansion.
+  void execute_command(std::vector<std::string> tokens);
+  const Box& current_box() const { return box; }
+
 private:
   void execute_run_in(const RunInput& run_input);
   void perform_a_run(const int number_of_steps);
@@ -58,6 +62,8 @@ private:
   bool has_seen_dftd3_command = false;
   bool has_seen_kspace_command = false;
   bool has_replicate_ = false;
+  bool first_effective_command_ = true;
+  const RunInput* run_input_ = nullptr;
   bool full_observables_next_run_ = false;
   int replicate_size_[3] = {1, 1, 1};
   std::string first_potential_filename_;
