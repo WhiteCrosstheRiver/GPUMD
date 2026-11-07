@@ -13,6 +13,7 @@ Adjust the marking rules in classify().
 import argparse
 import html
 import json
+import os
 import re
 import stat
 import subprocess
@@ -37,10 +38,13 @@ exit 0
 
 
 def git(root, *args, check=True):
+    # Hooks run with GIT_DIR, GIT_INDEX_FILE, etc. of the worktree that
+    # committed. Drop them, or `git -C <other worktree>` reports that worktree.
+    env = {k: v for k, v in os.environ.items() if not k.startswith('GIT_')}
     result = subprocess.run(
         ['git', '-C', str(root)] + list(args),
         stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True,
-        errors='replace')
+        errors='replace', env=env)
     if check and result.returncode:
         raise SystemExit('git %s failed: %s' % (' '.join(args), result.stderr.strip()))
     return result.stdout if result.returncode == 0 else ''
