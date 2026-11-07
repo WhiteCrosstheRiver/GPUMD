@@ -504,6 +504,13 @@ void Integrate::parse_fix(
     PRINT_INPUT_ERROR("Fixed group ID should < number of groups.");
   }
 
+  // delete never removes frozen atoms.
+  const std::vector<int>& fixed_label = group[fixed_grouping_method].cpu_label;
+  atom.cpu_fixed.assign(fixed_label.size(), 0);
+  for (size_t n = 0; n < fixed_label.size(); ++n) {
+    atom.cpu_fixed[n] = fixed_label[n] == fixed_group ? 1 : 0;
+  }
+
   printf("Group %d in grouping method %d will be fixed.\n", fixed_group, fixed_grouping_method);
 }
 

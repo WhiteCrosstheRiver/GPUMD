@@ -136,6 +136,8 @@ public:
     GPU_Vector<double>& virial);
 
   InfluencePolicy influence_policy() const override { return InfluencePolicy::LocalRadius; }
+  void update_number_of_atoms(const int number_of_atoms) override;
+  double deposition_clearance() const override;
 
   const GPU_Vector<int>& get_NN_radial_ptr();
 
@@ -151,6 +153,7 @@ private:
 
   void update_potential(float* parameters, ANN& ann);
   int update_influence_centers(const int N);
+  void allocate_atom_buffers(const int num_atoms);
 
   void compute_small_box(
     Box& box,

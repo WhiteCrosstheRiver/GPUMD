@@ -105,6 +105,8 @@ public:
     Box& box,
     Force& force);
 
+  std::vector<std::string> action_names() const;
+
 private:
   std::vector<std::unique_ptr<Action>> actions_;
 };

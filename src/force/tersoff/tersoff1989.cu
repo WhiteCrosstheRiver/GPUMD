@@ -28,6 +28,26 @@ The double-element version of the Tersoff potential as described in
 
 #define BLOCK_SIZE_FORCE 64 // 128 is also good
 
+void Tersoff1989::allocate_atom_buffers(const int num_atoms)
+{
+  const int num_of_neighbors = 50 * num_atoms;
+  tersoff_data.b.resize(num_of_neighbors);
+  tersoff_data.bp.resize(num_of_neighbors);
+  tersoff_data.f12x.resize(num_of_neighbors);
+  tersoff_data.f12y.resize(num_of_neighbors);
+  tersoff_data.f12z.resize(num_of_neighbors);
+  tersoff_data.NN.resize(num_atoms);
+  tersoff_data.NL.resize(num_of_neighbors);
+}
+
+void Tersoff1989::update_number_of_atoms(const int number_of_atoms)
+{
+  N1 = 0;
+  N2 = number_of_atoms;
+  neighbor_manager.update_number_of_atoms(number_of_atoms);
+  allocate_atom_buffers(number_of_atoms);
+}
+
 Tersoff1989::Tersoff1989(FILE* fid, int num_of_types, const int num_atoms)
 {
   printf("Use Tersoff-1989 (%d-element) potential with element(s):", num_of_types);
@@ -138,14 +158,7 @@ Tersoff1989::Tersoff1989(FILE* fid, int num_of_types, const int num_atoms)
     rc = (ters0.r2 > ters1.r2) ? ters0.r2 : ters1.r2;
   }
 
-  const int num_of_neighbors = 50 * num_atoms;
-  tersoff_data.b.resize(num_of_neighbors);
-  tersoff_data.bp.resize(num_of_neighbors);
-  tersoff_data.f12x.resize(num_of_neighbors);
-  tersoff_data.f12y.resize(num_of_neighbors);
-  tersoff_data.f12z.resize(num_of_neighbors);
-  tersoff_data.NN.resize(num_atoms);
-  tersoff_data.NL.resize(num_of_neighbors);
+  allocate_atom_buffers(num_atoms);
   neighbor_manager.initialize(rc, num_atoms, 50);
 }
 

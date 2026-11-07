@@ -694,5 +694,24 @@ RunInput Deposition::prepare_subrun(int run_idx)
 
 bool Deposition::has_deposition(const RunInput& run_input)
 {
-  return run_input.contains("deposit");
+  bool has_interval_form = false;
+  bool has_named_form = false;
+  int interval_value = 0;
+  for (const RunInputLine* line : run_input.find_all("deposit")) {
+    if (line->tokens.size() > 1 && is_valid_int(line->tokens[1], &interval_value)) {
+      has_interval_form = true;
+    } else {
+      has_named_form = true;
+    }
+  }
+  if (!has_interval_form) {
+    return false;
+  }
+  // The interval form re-launches slices of run.in, which cannot follow control flow.
+  if (has_named_form || run_input.contains("for") || run_input.contains("if") ||
+      run_input.contains("variable")) {
+    PRINT_INPUT_ERROR(
+      "deposit <interval> cannot be combined with named deposit, for, if or variable.");
+  }
+  return true;
 }

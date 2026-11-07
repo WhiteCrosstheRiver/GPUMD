@@ -291,6 +291,8 @@ inline bool eval_coord_cmp(int n, CoordCmp cmp, int value)
       return n == value;
     case CoordCmp::NE:
       return n != value;
+    default:
+      break;
   }
   return false;
 }
@@ -323,6 +325,8 @@ inline bool eval_coord_expr(
       return eval_coord_expr(*e.a, total, by_sym) || eval_coord_expr(*e.b, total, by_sym);
     case CoordExpr::NOT:
       return !eval_coord_expr(*e.a, total, by_sym);
+    default:
+      break;
   }
   return false;
 }
@@ -343,6 +347,8 @@ inline bool coord_expr_needs_by_sym(const CoordExpr& e)
       return coord_expr_needs_by_sym(*e.a) || coord_expr_needs_by_sym(*e.b);
     case CoordExpr::NOT:
       return coord_expr_needs_by_sym(*e.a);
+    default:
+      break;
   }
   return false;
 }
@@ -362,6 +368,8 @@ inline std::string coord_cmp_str(CoordCmp cmp)
       return "==";
     case CoordCmp::NE:
       return "!=";
+    default:
+      break;
   }
   return "?";
 }

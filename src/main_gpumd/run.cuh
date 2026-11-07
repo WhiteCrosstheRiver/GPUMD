@@ -19,6 +19,7 @@ class Force;
 class Integrate;
 class Measure;
 class RunInput;
+class VariableScope;
 
 #include "force/force.cuh"
 #include "integrate/integrate.cuh"
@@ -28,6 +29,7 @@ class RunInput;
 #include "model/group.cuh"
 #include "utilities/common.cuh"
 #include "utilities/gpu_vector.cuh"
+#include "deposit.cuh"
 #include "velocity.cuh"
 #include <string>
 #include <vector>
@@ -40,11 +42,17 @@ public:
   // Used by the control layer for each command after variable expansion.
   void execute_command(std::vector<std::string> tokens);
   const Box& current_box() const { return box; }
+  void delete_isolated_batch(const std::vector<std::vector<std::string>>& commands);
+  VariableScope* variables = nullptr;
 
 private:
   void execute_run_in(const RunInput& run_input);
   void perform_a_run(const int number_of_steps);
   void compute_force();
+  void check_atom_count_change() const;
+  void parse_deposit(const std::vector<std::string>& tokens);
+  void validate_deposit_dynamics(const bool pulse) const;
+  bool update_deposit_entry();
   void parse_one_keyword(
     const std::vector<std::string>& tokens, const RunInput& run_input);
 
@@ -62,6 +70,7 @@ private:
   bool has_seen_dftd3_command = false;
   bool has_seen_kspace_command = false;
   bool has_replicate_ = false;
+  bool pending_skipped_flight_ = false;
   bool first_effective_command_ = true;
   const RunInput* run_input_ = nullptr;
   bool full_observables_next_run_ = false;
@@ -79,4 +88,9 @@ private:
   Force force;
   Integrate integrate;
   Measure measure;
+
+  DepositRegistry deposit_registry;
+  DepositEvent deposit_event;
+  GPU_Vector<int> deposit_entered;
+  GPU_Vector<int> deposit_entry_status;
 };

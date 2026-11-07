@@ -29,10 +29,13 @@ Run simulation according to the inputs in the run.in file.
 #include "replicate.cuh"
 #include "run.cuh"
 #include "utilities/error.cuh"
-#include "utilities/nep_io/compact_nep.cuh"
 #include "utilities/gpu_macro.cuh"
 #include "utilities/read_file.cuh"
+#include "atom_mutation.cuh"
 #include "control.cuh"
+#include "delete.cuh"
+#include "variable.cuh"
+#include "utilities/nep_io/compact_nep.cuh"
 #include "utilities/run_input.cuh"
 #include "velocity.cuh"
 #include <chrono>
@@ -129,6 +132,7 @@ Run::Run(const RunInput& run_input)
   print_line_2();
 
   has_replicate_ = parse_initial_replicate(run_input, replicate_size_);
+  register_named_deposit_species(run_input);
 
   initialize_position(
     run_input,
@@ -164,6 +168,148 @@ Run::Run(const RunInput& run_input)
   print_line_2();
 
   execute_run_in(run_input);
+}
+
+// Ensembles and measurements are built for the current atom count when they are parsed.
+void Run::check_atom_count_change() const
+{
+  const EnsembleType type = integrate.get_type();
+  if (integrate.has_ensemble() && type != EnsembleType::NVE && !is_standard_nvt(type)) {
+    PRINT_INPUT_ERROR("Put deposit and delete before this ensemble in a run block.");
+  }
+  for (const std::string& name : measure.action_names()) {
+    if (name != "dump_xyz" && name != "dump_thermo" && name != "dump_restart") {
+      PRINT_INPUT_ERROR("Put deposit and delete before computes and dumps in a run block.");
+    }
+  }
+}
+
+void Run::delete_isolated_batch(const std::vector<std::vector<std::string>>& commands)
+{
+  check_atom_count_change();
+  AtomMutation::sync_cpu_from_gpu(atom);
+  DeleteIsolatedSequence(commands, box, atom, group, thermo, force);
+  integrate.update_fix_union(atom);
+}
+
+static __global__ void gpu_deposit_entry(
+  int N, int first, int count, double nx, double ny, double nz, double height,
+  const double* position, int* entered, int* status)
+{
+  const int j = blockIdx.x * blockDim.x + threadIdx.x;
+  if (j >= count) {
+    return;
+  }
+  const int i = first + j;
+  const double x = position[i], y = position[i + N], z = position[i + 2 * N];
+  if (!isfinite(x) || !isfinite(y) || !isfinite(z)) {
+    atomicExch(status + 1, 1);
+    return;
+  }
+  if (x * nx + y * ny + z * nz <= height + 1.0e-10) {
+    entered[j] = 1;
+  }
+  if (!entered[j]) {
+    atomicAdd(status, 1);
+  }
+}
+
+bool Run::update_deposit_entry()
+{
+  int status[2] = {0, 0};
+  deposit_entry_status.copy_from_host(status);
+  gpu_deposit_entry<<<(deposit_event.count + 127) / 128, 128>>>(
+    atom.number_of_atoms,
+    deposit_event.first_atom,
+    deposit_event.count,
+    deposit_event.normal[0],
+    deposit_event.normal[1],
+    deposit_event.normal[2],
+    deposit_event.entry_height,
+    atom.position_per_atom.data(),
+    deposit_entered.data(),
+    deposit_entry_status.data());
+  GPU_CHECK_KERNEL
+  deposit_entry_status.copy_to_host(status);
+  if (status[1]) {
+    PRINT_INPUT_ERROR("Non-finite coordinate during deposit pulse entry check.");
+  }
+  return status[0] == 0;
+}
+
+void Run::validate_deposit_dynamics(const bool pulse) const
+{
+  const EnsembleType type = integrate.get_type();
+  if (!integrate.has_ensemble() || (type != EnsembleType::NVE && !is_standard_nvt(type))) {
+    PRINT_INPUT_ERROR("deposit flight skip/pulse requires an NVE or constant-temperature NVT ensemble.");
+  }
+  if (type != EnsembleType::NVE && integrate.get_temperature1() != integrate.get_temperature2()) {
+    PRINT_INPUT_ERROR("deposit flight skip/pulse does not support a temperature ramp.");
+  }
+  if (velocity.do_velocity_correction || integrate.get_move_group() >= 0) {
+    PRINT_INPUT_ERROR("deposit flight skip/pulse does not support velocity correction or moving groups.");
+  }
+  if (!std::isfinite(time_step) || time_step <= 0.0) {
+    PRINT_INPUT_ERROR("deposit flight skip/pulse requires a positive finite MD time step.");
+  }
+  for (const std::string& name : measure.action_names()) {
+    if (
+      name == "add_efield" || name == "add_force" || name == "add_random_force" ||
+      name == "add_spring" || name == "electron_stop" || name == "mc" || name == "deform" ||
+      name == "compute_hnemd" || name == "compute_hnemdec" || name == "enhanced_sampling" ||
+      name == "plumed") {
+      PRINT_INPUT_ERROR("deposit flight skip/pulse does not support driven dynamics.");
+    }
+    if (pulse && name != "dump_xyz" && name != "dump_thermo" && name != "dump_restart") {
+      PRINT_INPUT_ERROR(
+        "deposit pulse supports only dump_xyz, dump_thermo and dump_restart. Use emit plus run.");
+    }
+  }
+}
+
+void Run::parse_deposit(const std::vector<std::string>& tokens)
+{
+  check_atom_count_change();
+  const bool execution = tokens.size() >= 3 && (tokens[2] == "emit" || tokens[2] == "pulse");
+  const bool pulse = execution && tokens[2] == "pulse";
+  const std::string name = !execution ? std::string{}
+                           : variables ? variables->expand_text(tokens[1], box)
+                                       : tokens[1];
+  const bool skip = execution && deposit_registry.skips_flight(name);
+  // An emit may come before the ensemble of its run, which then checks at the run.
+  if (pulse || (skip && integrate.has_ensemble())) {
+    validate_deposit_dynamics(pulse);
+  }
+  if (skip) {
+    printf(
+      "Flight skipping is ballistic time compression: substrate evolution and thermostat action "
+      "during omitted time are not integrated.\n");
+  }
+  DepositEvent event =
+    deposit_registry.execute(tokens, box, atom, group, thermo, force, variables);
+  integrate.update_fix_union(atom);
+  if (!event.active) {
+    return;
+  }
+  pending_skipped_flight_ = pending_skipped_flight_ || skip;
+  if (!event.pulse) {
+    return;
+  }
+  if (
+    event.count <= 0 || event.max_wait <= 0 || event.relax_steps < 0 ||
+    event.max_wait > std::numeric_limits<int>::max() - event.relax_steps) {
+    PRINT_INPUT_ERROR("Invalid deposit pulse step budget or particle count.");
+  }
+  deposit_event = event;
+  deposit_entered.resize(event.count);
+  std::vector<int> not_entered(event.count, 0);
+  deposit_entered.copy_from_host(not_entered.data());
+  deposit_entry_status.resize(2);
+  const int number_of_steps = event.max_wait + event.relax_steps;
+  force.set_temperature_range(
+    integrate.get_temperature1(), integrate.get_temperature2(), number_of_steps);
+  perform_a_run(number_of_steps);
+  deposit_event = DepositEvent{};
 }
 
 void Run::execute_command(std::vector<std::string> tokens)
@@ -223,6 +369,9 @@ void Run::compute_force()
 
 void Run::perform_a_run(const int number_of_steps)
 {
+  if (pending_skipped_flight_) {
+    validate_deposit_dynamics(deposit_event.pulse);
+  }
   integrate.initialize(time_step, atom, box, group);
   // Other ensembles read the full virial or per-atom energy, or use replicas.
   const EnsembleType ensemble_type = integrate.get_type();
@@ -242,7 +391,17 @@ void Run::perform_a_run(const int number_of_steps)
 
   const auto time_begin = std::chrono::high_resolution_clock::now();
 
+  int completed_steps = 0;
+  int entry_step = deposit_event.pulse && update_deposit_entry() ? 0 : -1;
+  bool pulse_timeout = false;
+  const double run_start_time = global_time;
+
   for (int step = 0; step < number_of_steps; ++step) {
+    if (
+      deposit_event.pulse && entry_step >= 0 &&
+      completed_steps >= entry_step + deposit_event.relax_steps) {
+      break;
+    }
 
     velocity.correct_velocity(step, group, atom);
 
@@ -265,6 +424,15 @@ void Run::perform_a_run(const int number_of_steps)
     integrate.compute2(time_step, step, number_of_steps, group, box, atom, thermo, force);
     atom.update_unwrapped_position(box);
 
+    completed_steps = step + 1;
+    if (deposit_event.pulse && entry_step < 0) {
+      if (update_deposit_entry()) {
+        entry_step = completed_steps;
+      } else if (completed_steps >= deposit_event.max_wait) {
+        pulse_timeout = true;
+      }
+    }
+
     measure.end_of_step(
       number_of_steps,
       step,
@@ -284,6 +452,9 @@ void Run::perform_a_run(const int number_of_steps)
       printf("    %d steps completed.\n", step + 1);
       fflush(stdout);
     }
+    if (pulse_timeout) {
+      break;
+    }
   }
 
   print_line_1();
@@ -291,15 +462,27 @@ void Run::perform_a_run(const int number_of_steps)
   const std::chrono::duration<double> time_used = time_finish - time_begin;
 
   printf("Time used for this run = %g second.\n", time_used.count());
-  double run_speed = atom.number_of_atoms * (number_of_steps * 1.0 / time_used.count());
+  double run_speed = atom.number_of_atoms * (completed_steps * 1.0 / time_used.count());
   printf("Speed of this run = %g atom*step/second.\n", run_speed);
   print_line_2();
 
   measure.post_run(
-    atom, box, integrate, number_of_steps, time_step, integrate.get_temperature2());
+    atom, box, integrate, completed_steps, time_step, integrate.get_temperature2());
+  if (deposit_event.pulse && !pulse_timeout) {
+    printf(
+      "Deposit pulse completed: wait_steps=%d relax_steps=%d md_steps=%d md_time_fs=%.17g\n",
+      entry_step,
+      deposit_event.relax_steps,
+      completed_steps,
+      (global_time - run_start_time) * TIME_UNIT_CONVERSION);
+  }
 
   integrate.finalize(atom, box);
   integrate.finish_fix_union(group);
+  pending_skipped_flight_ = false;
+  if (pulse_timeout) {
+    PRINT_INPUT_ERROR("deposit pulse reached max_wait before all particles entered.");
+  }
   velocity.finalize();
   force.finalize();
   max_distance_per_step = 0.0;
@@ -365,6 +548,17 @@ void Run::parse_one_keyword(
       PRINT_INPUT_ERROR("full_observables has no parameters.");
     }
     full_observables_next_run_ = true;
+  } else if (tokens[0] == "delete") {
+    check_atom_count_change();
+    AtomMutation::sync_cpu_from_gpu(atom);
+    std::vector<const char*> param;
+    for (const std::string& token : tokens) {
+      param.push_back(token.c_str());
+    }
+    Delete(param.data(), num_param, box, atom, group, thermo, force);
+    integrate.update_fix_union(atom);
+  } else if (tokens[0] == "deposit") {
+    parse_deposit(tokens);
   } else if (tokens[0] == "fix") {
     if (tokens.size() > 1 && tokens[1] == "shell") {
       atom.position_per_atom.copy_to_host(atom.cpu_position_per_atom.data());

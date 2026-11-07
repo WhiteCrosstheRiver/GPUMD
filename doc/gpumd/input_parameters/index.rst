@@ -43,6 +43,7 @@ Below you can find a listing of keywords for the ``run.in`` input file.
    add_efield
    add_mfield
    add_spring
+   delete
    deposit
    electron_stop
    fix

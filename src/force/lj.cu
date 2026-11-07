@@ -58,6 +58,16 @@ LJ::LJ(FILE* fid, int num_types, int num_atoms)
   neighbor_manager.initialize(rc, num_atoms, 700); // TODO
 }
 
+void LJ::update_number_of_atoms(const int number_of_atoms)
+{
+  N1 = 0;
+  N2 = number_of_atoms;
+  neighbor_manager.update_number_of_atoms(number_of_atoms);
+}
+
+// LJ forces are pairwise and vanish beyond the largest pair cutoff.
+double LJ::deposition_clearance() const { return rc; }
+
 LJ::~LJ(void)
 {
   // nothing

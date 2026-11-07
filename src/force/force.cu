@@ -377,6 +377,30 @@ void Force::set_need_full_observables(const bool need_full)
   clear_active_set();
 }
 
+void Force::update_number_of_atoms(const int number_of_atoms)
+{
+  clear_active_set();
+  for (auto& potential : potentials) {
+    potential->update_number_of_atoms(number_of_atoms);
+  }
+}
+
+double Force::deposition_clearance() const
+{
+  if (potentials.empty()) {
+    PRINT_INPUT_ERROR("deposition flight skip requires a potential.");
+  }
+  double clearance = 0.0;
+  for (const auto& potential : potentials) {
+    const double bound = potential->deposition_clearance();
+    if (!std::isfinite(bound) || bound <= 0.0) {
+      PRINT_INPUT_ERROR("deposition flight skip does not support one of the active potentials.");
+    }
+    clearance = std::max(clearance, bound);
+  }
+  return clearance;
+}
+
 void Force::set_skip_options(const SkipOptions& options)
 {
   skip_options_ = options;

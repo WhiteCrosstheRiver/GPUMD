@@ -54,6 +54,26 @@ The version of the Tersoff potential as described in
 
 #define NUM_PARAMS 19
 
+void Tersoff1988::allocate_atom_buffers(const int num_atoms)
+{
+  const int num_of_neighbors = 50 * num_atoms;
+  tersoff_data.b.resize(num_of_neighbors);
+  tersoff_data.bp.resize(num_of_neighbors);
+  tersoff_data.f12x.resize(num_of_neighbors);
+  tersoff_data.f12y.resize(num_of_neighbors);
+  tersoff_data.f12z.resize(num_of_neighbors);
+  tersoff_data.NN.resize(num_atoms);
+  tersoff_data.NL.resize(num_of_neighbors);
+}
+
+void Tersoff1988::update_number_of_atoms(const int number_of_atoms)
+{
+  N1 = 0;
+  N2 = number_of_atoms;
+  neighbor_manager.update_number_of_atoms(number_of_atoms);
+  allocate_atom_buffers(number_of_atoms);
+}
+
 Tersoff1988::Tersoff1988(FILE* fid, int num_of_types, const int num_atoms)
 {
   num_types = num_of_types;
@@ -179,14 +199,7 @@ Tersoff1988::Tersoff1988(FILE* fid, int num_of_types, const int num_atoms)
     rc = r2 > rc ? r2 : rc;
   }
 
-  int num_of_neighbors = 50 * num_atoms;
-  tersoff_data.b.resize(num_of_neighbors);
-  tersoff_data.bp.resize(num_of_neighbors);
-  tersoff_data.f12x.resize(num_of_neighbors);
-  tersoff_data.f12y.resize(num_of_neighbors);
-  tersoff_data.f12z.resize(num_of_neighbors);
-  tersoff_data.NN.resize(num_atoms);
-  tersoff_data.NL.resize(num_of_neighbors);
+  allocate_atom_buffers(num_atoms);
   neighbor_manager.initialize(rc, num_atoms, 50);
   ters.resize(n_entries * NUM_PARAMS);
   ters.copy_from_host(cpu_ters.data());

@@ -89,6 +89,8 @@ public:
   void set_fixed_group(const int grouping_method, const int fixed_group);
   void set_need_full_observables(const bool need_full);
   void set_skip_options(const SkipOptions& options);
+  void update_number_of_atoms(const int number_of_atoms);
+  double deposition_clearance() const;
   const SkipOptions& skip_options() const { return skip_options_; }
 
   int get_number_of_types(FILE* fid_potential);

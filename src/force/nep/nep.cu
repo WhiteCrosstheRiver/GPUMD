@@ -340,19 +340,8 @@ NEP::NEP(const char* file_potential, const int num_atoms, const RunInput& run_in
     zbl.num_types = paramb.num_types;
   }
 
-  nep_data.f12x.resize(num_atoms * paramb.MN_angular);
-  nep_data.f12y.resize(num_atoms * paramb.MN_angular);
-  nep_data.f12z.resize(num_atoms * paramb.MN_angular);
   neighbor_manager.initialize(rc, num_atoms, paramb.MN_radial);
-  nep_data.NN_radial.resize(num_atoms);
-  nep_data.NL_radial.resize(static_cast<size_t>(num_atoms) * paramb.MN_radial);
-  nep_data.NN_angular.resize(num_atoms);
-  nep_data.NL_angular.resize(num_atoms * paramb.MN_angular);
-  nep_data.Fp.resize(static_cast<size_t>(num_atoms) * annmb.dim);
-  nep_data.sum_fxyz.resize(
-    static_cast<size_t>(num_atoms) * (paramb.n_max_angular + 1) * ((paramb.L_max + 1) * (paramb.L_max + 1) - 1));
-  nep_data.cpu_NN_radial.resize(num_atoms);
-  nep_data.cpu_NN_angular.resize(num_atoms);
+  allocate_atom_buffers(num_atoms);
 
   initialize_dftd3(run_input);
 }
@@ -377,6 +366,47 @@ void NEP::update_potential(float* parameters, ANN& ann)
   pointer += 1;
 
   ann.c = pointer;
+}
+
+void NEP::allocate_atom_buffers(const int num_atoms)
+{
+  nep_data.f12x.resize(num_atoms * paramb.MN_angular);
+  nep_data.f12y.resize(num_atoms * paramb.MN_angular);
+  nep_data.f12z.resize(num_atoms * paramb.MN_angular);
+  nep_data.NN_radial.resize(num_atoms);
+  nep_data.NL_radial.resize(static_cast<size_t>(num_atoms) * paramb.MN_radial);
+  nep_data.NN_angular.resize(num_atoms);
+  nep_data.NL_angular.resize(num_atoms * paramb.MN_angular);
+  nep_data.Fp.resize(static_cast<size_t>(num_atoms) * annmb.dim);
+  nep_data.sum_fxyz.resize(
+    static_cast<size_t>(num_atoms) * (paramb.n_max_angular + 1) *
+    ((paramb.L_max + 1) * (paramb.L_max + 1) - 1));
+  nep_data.cpu_NN_radial.resize(num_atoms);
+  nep_data.cpu_NN_angular.resize(num_atoms);
+}
+
+void NEP::update_number_of_atoms(const int number_of_atoms)
+{
+  if (has_dftd3) {
+    PRINT_INPUT_ERROR("NEP with DFT-D3 does not support changing the number of atoms.");
+  }
+  N1 = 0;
+  N2 = number_of_atoms;
+  neighbor_manager.update_number_of_atoms(number_of_atoms);
+  allocate_atom_buffers(number_of_atoms);
+}
+
+double NEP::deposition_clearance() const
+{
+  const double reach = paramb.rc_radial_max;
+  if (paramb.model_type != 0 || has_dftd3 || !std::isfinite(reach) || reach <= 0.0) {
+    return 0.0;
+  }
+  if (zbl.enabled && (!std::isfinite(zbl.rc_outer) || zbl.rc_outer > reach)) {
+    return 0.0;
+  }
+  // A descriptor centered on a third atom can couple two atoms each within reach.
+  return 2.0 * reach;
 }
 
 // Candidate lists reach rc + skin, so a frozen atom whose list holds no active atom is
