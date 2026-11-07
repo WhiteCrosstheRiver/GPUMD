@@ -22,6 +22,8 @@ neighbor list.
 #include "utilities/gpu_macro.cuh"
 #include <thrust/execution_policy.h>
 #include <thrust/scan.h>
+#include <algorithm>
+#include <cmath>
 #include <cstring>
 
 static __device__ void find_cell_id(
@@ -123,21 +125,21 @@ static __global__ void gpu_find_neighbor_ON1(
 
     // get radial descriptors
     for (int k = z_begin; k < z_end; ++k) {
+      const int cell_z = shift_cell_id(cell_id_z, k, nz, box.pbc_z);
+      if (cell_z < 0) {
+        continue;
+      }
       for (int j = y_begin; j < y_end; ++j) {
+        const int cell_y = shift_cell_id(cell_id_y, j, ny, box.pbc_y);
+        if (cell_y < 0) {
+          continue;
+        }
         for (int i = x_begin; i < x_end; ++i) {
-          int neighbor_cell = cell_id + k * nx * ny + j * nx + i;
-          if (cell_id_x + i < 0)
-            neighbor_cell += nx;
-          else if (cell_id_x + i >= nx)
-            neighbor_cell -= nx;
-          if (cell_id_y + j < 0)
-            neighbor_cell += ny * nx;
-          else if (cell_id_y + j >= ny)
-            neighbor_cell -= ny * nx;
-          if (cell_id_z + k < 0)
-            neighbor_cell += nz * ny * nx;
-          else if (cell_id_z + k >= nz)
-            neighbor_cell -= nz * ny * nx;
+          const int cell_x = shift_cell_id(cell_id_x, i, nx, box.pbc_x);
+          if (cell_x < 0) {
+            continue;
+          }
+          const int neighbor_cell = cell_x + nx * cell_y + nx * ny * cell_z;
 
           const int num_atoms_neighbor_cell = cell_counts[neighbor_cell];
           const int num_atoms_previous_cells = cell_count_sum[neighbor_cell];
@@ -297,6 +299,24 @@ void find_cell_list(
   GPU_CHECK_KERNEL
 }
 
+// Periodic axes follow Box::get_num_bins. Free axes get real cells, at most 4 per atom in total
+// so that a tall vacuum box cannot exhaust memory.
+static void get_num_bins_with_free_axes(Box& box, const double rc, const int N, int num_bins[3])
+{
+  box.get_num_bins(rc, num_bins);
+  const int pbc[3] = {box.pbc_x, box.pbc_y, box.pbc_z};
+  const double thickness[3] = {box.thickness_x, box.thickness_y, box.thickness_z};
+  for (int d = 0; d < 3; ++d) {
+    if (!pbc[d]) {
+      const long long others =
+        static_cast<long long>(num_bins[(d + 1) % 3]) * num_bins[(d + 2) % 3];
+      const long long limit = std::max(1LL, 4LL * N / others);
+      const long long wanted = std::max(1LL, static_cast<long long>(floor(thickness[d] / rc)));
+      num_bins[d] = static_cast<int>(std::min(wanted, limit));
+    }
+  }
+}
+
 void find_neighbor(
   const int N1,
   const int N2,
@@ -320,7 +340,7 @@ void find_neighbor(
   const double rc_inv_cell_list = 2.0 / rc;
 
   int num_bins[3];
-  box.get_num_bins(rc_cell_list, num_bins);
+  get_num_bins_with_free_axes(box, rc_cell_list, N, num_bins);
 
   find_cell_list(
     rc_cell_list, num_bins, box, position_per_atom, cell_count, cell_count_sum, cell_contents);
