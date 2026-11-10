@@ -17,6 +17,7 @@
 #include "force/potential.cuh"
 #include "utilities/common.cuh"
 #include "utilities/gpu_vector.cuh"
+#include "utilities/nep_utilities.cuh"
 #include <stdio.h>
 #include <cstdint>
 #include <vector>
@@ -98,7 +99,13 @@ struct ILP_Data {
 #define NTS             17    // num_types_sq
 #define NCR             18    // num_c_radial
 #define NT              19    // num_types
-#define PTRQS           20    // pointer of q_scaler
+#define HAS_Q_222       20    // has_q_222
+#define HAS_Q_1111      21    // has_q_1111
+#define HAS_Q_112       22    // has_q_112
+#define HAS_Q_123       23    // has_q_123
+#define HAS_Q_233       24    // has_q_233
+#define HAS_Q_134       25    // has_q_134
+#define PTRQS           26    // pointer of q_scaler
 #define PTRAN           (PTRQS + PTR_OFFSET)  // pointer of atomic number
 #define H_PAR_OFFSET    (PTRAN + PTR_OFFSET)  // ptr offset of head of paramb            
 
@@ -138,6 +145,12 @@ public:
     int n_max_radial = 0;  // n_radial = 0, 1, 2, ..., n_max_radial
     int n_max_angular = 0; // n_angular = 0, 1, 2, ..., n_max_angular
     int L_max = 0;         // l = 0, 1, 2, ..., L_max
+    int has_q_222 = 0;
+    int has_q_1111 = 0;
+    int has_q_112 = 0;
+    int has_q_123 = 0;
+    int has_q_233 = 0;
+    int has_q_134 = 0;
     int dim_angular;
     int num_L;
     int basis_size_radial = 8;
@@ -145,7 +158,7 @@ public:
     int num_types_sq = 0;
     int num_c_radial = 0;
     int num_types = 0;
-    float q_scaler[140];
+    float q_scaler[MAX_DIM];
     int atomic_numbers[NUM_ELEMENTS];
   };
 

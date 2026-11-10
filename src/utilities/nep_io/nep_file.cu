@@ -325,7 +325,202 @@ bool NEP_File::parse_double(const std::string& token, double& value)
   return true;
 }
 
+static bool is_nep5_header(const std::string& token)
+{
+  const std::string name = lower(token);
+  return name == "nep5" || name == "nep5_zbl";
+}
+
+bool NEP_File::is_nep_header(const std::string& token)
+{
+  return lower(token) == "nep" || is_nep5_header(token);
+}
+
+// gnep writes NEP5 files: the legacy NEP4 text layout plus one output bias per element
+// after each element's [w0 b0 w1] block. That bias is a constant energy per atom, so it maps
+// exactly onto energy_reference and the rest is a plain "nep" model. first holds the
+// tokens of the header line, which has already been read from input.
+static bool translate_nep5(
+  std::istream& input, const std::vector<std::string>& first, std::string& text, std::string& error)
+{
+  if (first.size() < 3) {
+    return fail(error, "NEP5 header requires: nep5 <num_types> <elements...>.", 1);
+  }
+  std::size_t num_types;
+  if (!NEP_File::parse_size(first[1], num_types) || num_types == 0 ||
+      num_types != first.size() - 2) {
+    return fail(error, "element count does not match first line.", 1);
+  }
+  const int T = static_cast<int>(num_types);
+  std::ostringstream out;
+  out.imbue(std::locale::classic());
+  out << "nep " << T;
+  for (std::size_t i = 2; i < first.size(); ++i) {
+    out << ' ' << first[i];
+  }
+  out << "\nformat_version 1\nmodel nep\n";
+
+  std::string line;
+  std::vector<std::string> tokens;
+  std::size_t line_number = 1;
+  int n_max_radial = -1, n_max_angular = -1, basis_radial = -1, basis_angular = -1;
+  int l_max = -1, l_max_4 = 0, l_max_5 = 0, neurons = -1;
+  bool flexible_zbl = false;
+  auto to_int = [](const std::string& token, int& value) {
+    std::size_t parsed;
+    if (!NEP_File::parse_size(token, parsed) || parsed > 100000) {
+      return false;
+    }
+    value = static_cast<int>(parsed);
+    return true;
+  };
+  while (neurons < 0) {
+    const int status = next_line(input, line);
+    ++line_number;
+    if (status <= 0) {
+      return fail(error, "NEP5 model ended before its ANN line.", line_number);
+    }
+    if (!tokenize(line, tokens)) {
+      return fail(error, "invalid control character.", line_number);
+    }
+    if (tokens.empty()) {
+      continue;
+    }
+    const std::string key = lower(tokens[0]);
+    bool ok = true;
+    if (key == "zbl" && (tokens.size() == 3 || tokens.size() == 4)) {
+      double inner, outer;
+      ok = NEP_File::parse_double(tokens[1], inner) && NEP_File::parse_double(tokens[2], outer);
+      flexible_zbl = ok && inner == 0.0 && outer == 0.0;
+      out << line << '\n';
+    } else if (key == "cutoff") {
+      out << line << '\n';
+    } else if (key == "n_max" && tokens.size() == 3) {
+      ok = to_int(tokens[1], n_max_radial) && to_int(tokens[2], n_max_angular);
+      out << line << '\n';
+    } else if (key == "basis_size" && tokens.size() == 3) {
+      ok = to_int(tokens[1], basis_radial) && to_int(tokens[2], basis_angular);
+      out << line << '\n';
+    } else if (key == "l_max" && tokens.size() >= 2 && tokens.size() <= 4) {
+      ok = to_int(tokens[1], l_max) && (tokens.size() < 3 || to_int(tokens[2], l_max_4)) &&
+           (tokens.size() < 4 || to_int(tokens[3], l_max_5));
+      out << "l_max " << l_max << ' ' << l_max_4 << ' ' << l_max_5 << '\n';
+    } else if (key == "ann" && tokens.size() == 3) {
+      int second = -1;
+      ok = to_int(tokens[1], neurons) && to_int(tokens[2], second);
+      if (ok && second != 0) {
+        return fail(error, "NEP5 models with two hidden layers are not supported.", line_number);
+      }
+      ok = ok && neurons >= 1;
+      out << "ann " << neurons << " 0\n";
+    } else {
+      return fail(error, "unexpected NEP5 header line '" + tokens[0] + "'.", line_number);
+    }
+    if (!ok) {
+      return fail(error, "invalid value in NEP5 header line '" + tokens[0] + "'.", line_number);
+    }
+  }
+  if (n_max_radial < 0 || n_max_angular < 0 || basis_radial < 0 || basis_angular < 0 ||
+      l_max < 0) {
+    return fail(error, "NEP5 model has an incomplete header.", line_number);
+  }
+
+  std::vector<std::string> values;
+  int status;
+  while ((status = next_line(input, line)) > 0) {
+    ++line_number;
+    if (!tokenize(line, tokens)) {
+      return fail(error, "invalid control character.", line_number);
+    }
+    values.insert(values.end(), tokens.begin(), tokens.end());
+  }
+  if (status < 0) {
+    return fail(error, "input stream failure.", line_number + 1);
+  }
+
+  const int num_l = l_max + (l_max_4 == 2 ? 1 : 0) + (l_max_5 == 1 ? 1 : 0);
+  const std::size_t dim = n_max_radial + 1 + std::size_t(n_max_angular + 1) * num_l;
+  const std::size_t block = (dim + 2) * neurons + 1;
+  const std::size_t descriptor =
+    num_types * num_types *
+    (std::size_t(n_max_radial + 1) * (basis_radial + 1) +
+     std::size_t(n_max_angular + 1) * (basis_angular + 1));
+  const std::size_t zbl = flexible_zbl ? 10 * num_types * (num_types + 1) / 2 : 0;
+  const std::size_t expected = block * num_types + 1 + descriptor + dim + zbl;
+  if (values.size() != expected) {
+    return fail(
+      error,
+      "NEP5 model has " + std::to_string(values.size()) + " values after its header, expected " +
+        std::to_string(expected) + ".",
+      line_number);
+  }
+  std::vector<double> numbers(values.size());
+  for (std::size_t i = 0; i < values.size(); ++i) {
+    if (!NEP_File::parse_double(values[i], numbers[i])) {
+      return fail(error, "invalid value '" + values[i] + "' in NEP5 model.");
+    }
+  }
+
+  // E_atom = ANN(q) - b_t - b_shared for NEP5; for "nep" it is ANN(q) - b + reference[t].
+  const double shared_bias = numbers[block * num_types];
+  out << std::setprecision(std::numeric_limits<double>::max_digits10) << "energy_reference";
+  for (int t = 0; t < T; ++t) {
+    out << ' ' << -(numbers[t * block + block - 1] + shared_bias);
+  }
+  out << '\n';
+  out << "@ parameters " << (block - 1) * num_types + 1 + descriptor << '\n';
+  for (int t = 0; t < T; ++t) {
+    for (std::size_t n = 0; n + 1 < block; ++n) {
+      out << values[t * block + n] << '\n';
+    }
+  }
+  out << "0\n";
+  // NEP5 (legacy) descriptor coefficients are basis-major, c[basis][type_pair], separately for
+  // the radial and the angular part; the "nep" format stores them type-pair-major.
+  std::size_t index = block * num_types + 1;
+  const std::size_t pairs = num_types * num_types;
+  const std::size_t bases[2] = {
+    std::size_t(n_max_radial + 1) * (basis_radial + 1),
+    std::size_t(n_max_angular + 1) * (basis_angular + 1)};
+  for (const std::size_t basis_count : bases) {
+    for (std::size_t pair = 0; pair < pairs; ++pair) {
+      for (std::size_t basis = 0; basis < basis_count; ++basis) {
+        out << values[index + basis * pairs + pair] << '\n';
+      }
+    }
+    index += basis_count * pairs;
+  }
+  out << "@ q_scaler " << dim << '\n';
+  for (std::size_t n = 0; n < dim; ++n) {
+    out << values[index++] << '\n';
+  }
+  if (zbl) {
+    out << "@ zbl_parameters " << zbl << '\n';
+    for (std::size_t n = 0; n < zbl; ++n) {
+      out << values[index++] << '\n';
+    }
+  }
+  text = out.str();
+  return true;
+}
+
 bool NEP_File::read(std::istream& input, std::string& error)
+{
+  return read_impl(input, error, false);
+}
+
+bool NEP_File::read_model_name(std::istream& input, std::string& name, std::string& error)
+{
+  name.clear();
+  NEP_File file;
+  if (!file.read_impl(input, error, true)) {
+    return false;
+  }
+  name = file.find_field("model")->values[0];
+  return true;
+}
+
+bool NEP_File::read_impl(std::istream& input, std::string& error, bool model_only)
 {
   *this = NEP_File();
   error.clear();
@@ -336,8 +531,17 @@ bool NEP_File::read(std::istream& input, std::string& error)
   if (status < 0) {
     return fail(error, "input stream failure.", 1);
   }
-  if (status == 0 || !tokenize(line, tokens) || tokens.size() < 3 || lower(tokens[0]) != "nep") {
+  if (status == 0 || !tokenize(line, tokens) || tokens.size() < 3 || !is_nep_header(tokens[0])) {
     return fail(error, "expected first line: nep <num_types> <elements...>.", 1);
+  }
+  if (is_nep5_header(tokens[0])) {
+    std::string text;
+    if (!translate_nep5(input, tokens, text, error)) {
+      return false;
+    }
+    std::istringstream translated(text);
+    translated.imbue(std::locale::classic());
+    return read_impl(translated, error, model_only);
   }
   std::size_t num_types;
   if (!parse_size(tokens[1], num_types) || num_types == 0 || num_types != tokens.size() - 2) {
@@ -359,13 +563,15 @@ bool NEP_File::read(std::istream& input, std::string& error)
       if (tokens.size() > remaining) {
         return fail(error, "too many values in block '" + block.name + "'.", line_number);
       }
-      for (const std::string& token : tokens) {
-        double value;
-        if (!parse_double(token, value)) {
-          return fail(
-            error, "expected finite decimal value in block '" + block.name + "'.", line_number);
+      if (!model_only) {
+        for (const std::string& token : tokens) {
+          double value;
+          if (!parse_double(token, value)) {
+            return fail(
+              error, "expected finite decimal value in block '" + block.name + "'.", line_number);
+          }
+          block.values.push_back(value);
         }
-        block.values.push_back(value);
       }
       remaining -= tokens.size();
     } else if (tokens[0] == "@") {
@@ -388,6 +594,15 @@ bool NEP_File::read(std::istream& input, std::string& error)
       field.name = lower(tokens[0]);
       field.values.assign(tokens.begin() + 1, tokens.end());
       field.line = line_number;
+      if (model_only && field.name == "model") {
+        if (field.values.size() != 1 || !identifier(field.values[0])) {
+          return fail(error, "model requires one identifier.", line_number);
+        }
+        field.values[0] = lower(field.values[0]);
+        parsed.fields.push_back(std::move(field));
+        *this = std::move(parsed);
+        return true;
+      }
       parsed.fields.push_back(std::move(field));
     }
   }
