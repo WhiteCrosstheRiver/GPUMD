@@ -475,9 +475,20 @@ static bool translate_nep5(
     }
   }
   out << "0\n";
+  // NEP5 (legacy) descriptor coefficients are basis-major, c[basis][type_pair], separately for
+  // the radial and the angular part; the "nep" format stores them type-pair-major.
   std::size_t index = block * num_types + 1;
-  for (std::size_t n = 0; n < descriptor; ++n) {
-    out << values[index++] << '\n';
+  const std::size_t pairs = num_types * num_types;
+  const std::size_t bases[2] = {
+    std::size_t(n_max_radial + 1) * (basis_radial + 1),
+    std::size_t(n_max_angular + 1) * (basis_angular + 1)};
+  for (const std::size_t basis_count : bases) {
+    for (std::size_t pair = 0; pair < pairs; ++pair) {
+      for (std::size_t basis = 0; basis < basis_count; ++basis) {
+        out << values[index + basis * pairs + pair] << '\n';
+      }
+    }
+    index += basis_count * pairs;
   }
   out << "@ q_scaler " << dim << '\n';
   for (std::size_t n = 0; n < dim; ++n) {
