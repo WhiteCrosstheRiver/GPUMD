@@ -48,6 +48,16 @@ public:
 private:
   Potential& potential;
   int num_batches = 0;
+  // Experimental racing (GPUMD_SNES_RACE=keep fraction): every candidate is scored on one
+  // mini-batch, and only the leading candidates of each ranking are scored on a second one.
+  float race_keep = 0.0f;
+  long race_evaluations = 0;
+  long race_generations = 0;
+  void compute_race(
+    const int generation,
+    Parameters& para,
+    const float* population,
+    float* fitness_total);
   std::vector<float> fitness_L1;
   std::vector<float> fitness_L2;
   std::vector<float> cost_L1reg;

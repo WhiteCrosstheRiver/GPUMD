@@ -65,6 +65,7 @@ protected:
 
   void initialize_rng(const int seed);
   void calculate_utility();
+  bool mirrored = false; // GPUMD_SNES_MIRROR: antithetic pairs s and -s
   void create_population(bool native = false);
   void sort_population(Parameters& para);
   void update_mu_and_sigma();

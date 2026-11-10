@@ -20,8 +20,11 @@ Get the fitness
 #include "fitness.cuh"
 #include "parameters.cuh"
 #include "utilities/error.cuh"
+#include <algorithm>
 #include <cmath>
+#include <cstdlib>
 #include <ctime>
+#include <numeric>
 
 Fitness::Fitness(Potential& potential) : potential(potential)
 {
@@ -35,6 +38,80 @@ Fitness::Fitness(Potential& potential) : potential(potential)
     gpuSetDevice(0);
     gpu_cost_L1reg.resize(para.population_size);
     gpu_cost_L2reg.resize(para.population_size);
+    const char* race = std::getenv("GPUMD_SNES_RACE");
+    if (race) {
+      race_keep = std::atof(race);
+      if (!(race_keep >= 0.5f && race_keep < 1.0f) || num_batches < 2) {
+        PRINT_INPUT_ERROR("GPUMD_SNES_RACE needs a keep fraction in [0.5, 1) and >= 2 batches.");
+      }
+      printf("Experimental SNES racing: keep fraction %g, two mini-batches per generation.\n",
+        race_keep);
+    }
+  }
+}
+
+void Fitness::compute_race(
+  const int generation,
+  Parameters& para,
+  const float* population,
+  float* fitness_total)
+{
+  const int P = para.population_size;
+  const int size = P * (para.num_types + 1);
+  const int batch_a = (2 * generation) % num_batches;
+  const int batch_b = (2 * generation + 1) % num_batches;
+  std::vector<float> stage_a(size, 0.0f), stage_b(size, 0.0f);
+
+  potential.evaluate(batch_a, population);
+  potential.accumulate_fitness(stage_a.data());
+
+  // Candidates outside the better half of a ranking all receive the same utility, so only
+  // the leading candidates (with a margin) need the second mini-batch.
+  const int keep = std::min(P, static_cast<int>(std::ceil(race_keep * P)));
+  std::vector<char> active(P, 0);
+  std::vector<int> order(P);
+  for (int t = 0; t <= para.num_types; ++t) {
+    std::iota(order.begin(), order.end(), 0);
+    const float* reg = fitness_total + t * P;
+    const float* loss = stage_a.data() + t * P;
+    std::sort(order.begin(), order.end(), [&](int a, int b) {
+      return reg[a] + loss[a] < reg[b] + loss[b];
+    });
+    for (int k = 0; k < keep; ++k) {
+      active[order[k]] = 1;
+    }
+  }
+  if (!potential.evaluate_subset(batch_b, population, active)) {
+    PRINT_INPUT_ERROR("GPUMD_SNES_RACE is not supported by this model.");
+  }
+  potential.accumulate_fitness(stage_b.data());
+
+  int survivors = 0;
+  for (int p = 0; p < P; ++p) {
+    survivors += active[p];
+  }
+  for (int t = 0; t <= para.num_types; ++t) {
+    float worst = 0.0f;
+    for (int p = 0; p < P; ++p) {
+      if (active[p]) {
+        worst = std::max(worst, 0.5f * (stage_a[p + t * P] + stage_b[p + t * P]) +
+                                  fitness_total[p + t * P]);
+      }
+    }
+    for (int p = 0; p < P; ++p) {
+      int index = p + t * P;
+      if (active[p]) {
+        fitness_total[index] += 0.5f * (stage_a[index] + stage_b[index]);
+      } else {
+        // Dropped candidates keep their first-stage order behind every survivor.
+        fitness_total[index] += stage_a[index] + worst;
+      }
+    }
+  }
+  race_evaluations += P + survivors;
+  if (++race_generations % 500 == 0) {
+    printf("RACE generations %ld mean half-batch evaluations %.2f per generation (of %d)\n",
+      race_generations, double(race_evaluations) / race_generations, 2 * P);
   }
 }
 
@@ -53,6 +130,10 @@ void Fitness::compute(
 {
   if (generation == 0) {
     potential.prepare_training();
+  } else if (race_keep > 0.0f) {
+    regularize(para, gpu_population, gpu_type_of_variable, fitness_total);
+    compute_race(generation, para, population, fitness_total);
+    return;
   } else {
     potential.evaluate(generation % num_batches, population);
   }

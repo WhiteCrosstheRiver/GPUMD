@@ -43,6 +43,8 @@ public:
   int prepare_data() override;
   void prepare_training() override;
   void evaluate(int batch, const float* population) override;
+  bool evaluate_subset(
+    int batch, const float* population, const std::vector<char>& active) override;
   void accumulate_fitness(float* fitness_total) override;
   void print_training_header() override;
   void report_error(const TrainingReport& report) override;
