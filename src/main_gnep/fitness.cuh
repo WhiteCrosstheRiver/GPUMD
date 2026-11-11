@@ -52,6 +52,8 @@ public:
     const float lr,
     float* step_parameters);
   void predict(Parameters& para, float* step_parameters);
+  // Experimental optimizers selected by GNEP_EXPERIMENT (experimental_optimizers.cuh).
+  void run_experiment(Parameters& para, float* initial_parameters);
 
 protected:
   bool has_test_set = false;

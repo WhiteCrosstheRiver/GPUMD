@@ -291,9 +291,14 @@ GNEP::GNEP(
       static_cast<size_t>(max_atoms) * static_cast<size_t>(context->ann.dim));
     data.Fp.resize(
       static_cast<size_t>(max_atoms) * static_cast<size_t>(context->ann.dim));
+    // GNEP_EXPERIMENT with GNEP_FASTGRAD and no exact-gradient check never uses the exact
+    // gradient, whose per-atom arrays (Fp2, Fp_wb) dominate GPU memory.
+    const bool fast_only = std::getenv("GNEP_EXPERIMENT") && std::getenv("GNEP_FASTGRAD") &&
+                           !std::getenv("GNEP_FASTCHECK") && !std::getenv("GNEP_FASTCHECK_EVERY");
     data.Fp2.resize(
-      static_cast<size_t>(max_training_atoms) * static_cast<size_t>(context->ann.dim) *
-      static_cast<size_t>(context->ann.dim));
+      fast_only ? 1
+                : static_cast<size_t>(max_training_atoms) * static_cast<size_t>(context->ann.dim) *
+                    static_cast<size_t>(context->ann.dim));
     data.sum_fxyz.resize(
       static_cast<size_t>(max_atoms) * static_cast<size_t>(paramb.n_max_angular + 1) *
       NUM_OF_ABC);
@@ -305,7 +310,7 @@ GNEP::GNEP(
       NUM_OF_ABC * 6);
     data.parameters.resize(context->ann.num_para);
     // LM builds its own rows; only its lm_check gate needs the native gradient arrays.
-    if (!para.use_lm || para.lm_check) {
+    if ((!para.use_lm || para.lm_check) && !fast_only) {
       if (para.use_lm) {
         size_t free_bytes = 0;
         size_t total_bytes = 0;
@@ -1732,9 +1737,11 @@ void GNEP::find_force(
 
   for (int device_id = device_begin; device_id < device_begin + device_count; ++device_id) {
     CHECK(cudaSetDevice(device_id));
-    contexts[device_id]->data.Fp2.fill(0.0f);
-    contexts[device_id]->data.sum_s2xyz.fill(0.0f);
-    contexts[device_id]->data.sum_s2xyz123.fill(0.0f);
+    if (require_grad) { // only the exact-gradient path accumulates into these
+      contexts[device_id]->data.Fp2.fill(0.0f);
+      contexts[device_id]->data.sum_s2xyz.fill(0.0f);
+      contexts[device_id]->data.sum_s2xyz123.fill(0.0f);
+    }
     contexts[device_id]->data.parameters.copy_from_host(parameters);
     update_potential(para, contexts[device_id]->data.parameters.data(), contexts[device_id]->ann);
     if (require_grad) {
@@ -2234,3 +2241,5 @@ void GNEP::find_output_basis(Parameters& para, Dataset& data, int column, int de
 }
 
 #include "nep_lm_impl.cuh"
+
+#include "fast_gradient.cuh"

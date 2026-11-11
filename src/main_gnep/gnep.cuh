@@ -21,6 +21,7 @@
 #include <memory>
 #include <vector>
 class Parameters;
+struct GNEP_FastGradientScratch;
 class Dataset;
 
 struct GNEP_Data {
@@ -104,6 +105,7 @@ public:
     ANN ann;
     GNEP_Data data;
     Gradients gradients;
+    std::shared_ptr<GNEP_FastGradientScratch> fast; // fast_rmse_gradient work arrays
   };
 
   GNEP(
@@ -142,6 +144,16 @@ public:
     int global_num_configurations,
     int global_num_atoms,
     int global_virial_components);
+
+  // loss_rmse gradient from energy-parameter gradients only (fast_gradient.cuh). Needs the
+  // forward data of a preceding find_force without gradients on every shard.
+  void fast_rmse_gradient(
+    Parameters& para,
+    std::vector<Dataset>& dataset,
+    int global_num_configurations,
+    int global_num_atoms,
+    int global_virial_components,
+    std::vector<double>& gradient);
 
   // FCVP: energy, force and virial of one output column, from the cached descriptors.
   void find_output_basis(Parameters& para, Dataset& dataset, int column, int device_id);
