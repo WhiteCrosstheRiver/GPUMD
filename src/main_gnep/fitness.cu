@@ -427,6 +427,10 @@ void Fitness::compute(Parameters& para)
     if (para.fcvp_check) {
       fcvp_verify_gradient(para, *static_cast<GNEP*>(potential.get()), train_set[0], parameters);
     }
+    if (std::getenv("GNEP_EXPERIMENT")) {
+      run_experiment(para, parameters);
+      return;
+    }
 #ifdef GNEP_TEST_DIAGNOSTICS
     write_diagnostic_values("gnep_diagnostic_scaler.txt", para.q_scaler_cpu);
 #endif
@@ -1006,3 +1010,5 @@ void Fitness::predict(Parameters& para, float* parameters)
   fclose(fid_virial);
   fclose(fid_stress);
 }
+
+#include "experimental_optimizers.cuh"

@@ -50,6 +50,12 @@ public:
   // Evaluate candidate parameter vectors stored contiguously on the host. The model
   // owns intermediate losses; accumulate_fitness adds them after common regularization.
   virtual void evaluate(int batch, const float* population) = 0;
+  // Evaluate only the candidates flagged in active; losses of the others are left as they
+  // were. Returns false when the model does not support it.
+  virtual bool evaluate_subset(int batch, const float* population, const std::vector<char>& active)
+  {
+    return false;
+  }
   virtual void accumulate_fitness(float* fitness_total) = 0;
   virtual void print_training_header() = 0;
   virtual void report_error(const TrainingReport& report) = 0;

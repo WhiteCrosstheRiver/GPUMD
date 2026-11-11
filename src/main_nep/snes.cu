@@ -82,6 +82,10 @@ SNES::SNES(Parameters& para, Potential& potential) : potential(potential)
   potential.parameter_groups(type_of_variable);
   gpu_type_of_variable.copy_from_host(type_of_variable.data());
 
+  mirrored = std::getenv("GPUMD_SNES_MIRROR") != nullptr;
+  if (mirrored) {
+    printf("Experimental SNES mirrored sampling: candidates come in +s/-s pairs.\n");
+  }
   const char* experimental_optimizer = std::getenv("GPUMD_EXPERIMENT_OPTIMIZER");
   if (experimental_optimizer && std::strcmp(experimental_optimizer, "snes") != 0) {
     if (std::strcmp(experimental_optimizer, "lmma") != 0) {
@@ -216,6 +220,24 @@ static __global__ void gpu_create_population(
   }
 }
 
+static __global__ void gpu_mirror_population(
+  const int half,
+  const int number_of_variables,
+  const float* g_mu,
+  const float* g_sigma,
+  float* g_s,
+  float* g_population)
+{
+  int n = blockIdx.x * blockDim.x + threadIdx.x;
+  if (n < half * number_of_variables) {
+    int v = n % number_of_variables;
+    int m = n + half * number_of_variables;
+    float s = -g_s[n];
+    g_s[m] = s;
+    g_population[m] = g_sigma[v] * s + g_mu[v];
+  }
+}
+
 void SNES::create_population(bool native)
 {
   gpuSetDevice(0); // normally use GPU-0
@@ -234,6 +256,13 @@ void SNES::create_population(bool native)
     gpu_s.data(),
     gpu_population.data());
   GPU_CHECK_KERNEL
+  if (mirrored) {
+    const int half = population_size / 2;
+    gpu_mirror_population<<<(half * number_of_variables - 1) / 128 + 1, 128>>>(
+      half, number_of_variables, gpu_mu.data(), gpu_sigma.data(), gpu_s.data(),
+      gpu_population.data());
+    GPU_CHECK_KERNEL
+  }
   gpu_population.copy_to_host(population.data());
 }
 

@@ -30,6 +30,48 @@ heat transport, Phys. Rev. B. 104, 104309 (2021).
 #include "main_nep/common/nep_parameters.cuh"
 #include "utilities/error.cuh"
 #include <algorithm>
+#include <chrono>
+#include <cstdlib>
+
+namespace
+{
+// Optional phase timing (GPUMD_SNES_PROFILE=1). Synchronizes the device, so use one GPU.
+struct SNES_Profile {
+  bool on = std::getenv("GPUMD_SNES_PROFILE") != nullptr;
+  double t[6] = {0, 0, 0, 0, 0, 0};
+  long calls = 0;
+  std::chrono::high_resolution_clock::time_point last;
+  void start()
+  {
+    if (on) {
+      gpuDeviceSynchronize();
+      last = std::chrono::high_resolution_clock::now();
+    }
+  }
+  void lap(int k)
+  {
+    if (on) {
+      gpuDeviceSynchronize();
+      auto now = std::chrono::high_resolution_clock::now();
+      t[k] += std::chrono::duration<double>(now - last).count();
+      last = now;
+    }
+  }
+  void report(int every)
+  {
+    if (on && ++calls % every == 0) {
+      double sum = 0;
+      for (double v : t) sum += v;
+      printf("PROFILE calls %ld total %.3f s | neighbor %.1f%% descriptor %.1f%% ann %.1f%% "
+             "force %.1f%% zbl %.1f%% loss %.1f%% | %.3f ms/individual\n",
+        calls, sum, 100 * t[0] / sum, 100 * t[1] / sum, 100 * t[2] / sum, 100 * t[3] / sum,
+        100 * t[4] / sum, 100 * t[5] / sum, 1000 * sum / calls);
+      fflush(stdout);
+    }
+  }
+};
+SNES_Profile snes_profile;
+} // namespace
 
 void NEP::initialize(NEP_Potential_Parameters& para, int N, int deviceCount)
 {
@@ -136,11 +178,14 @@ void NEP::find_force(
 
   for (int device_id = 0; device_id < device_in_this_iter; ++device_id) {
     CHECK(gpuSetDevice(device_id));
+    snes_profile.start();
     neighbor[device_id].prepare(para, dataset[device_id], device_id);
+    snes_profile.lap(0);
 
     compute_nep_descriptors(
       paramb, annmb[device_id].c, dataset[device_id], neighbor[device_id],
       nep_data[device_id], compiled_kernel_.get());
+    snes_profile.lap(1);
 
     if (para.prediction == 1 && para.output_descriptor >= 1) {
       output_nep_descriptors(
@@ -162,14 +207,17 @@ void NEP::find_force(
       para.model_type == 3 ? temperature_data.get(dataset[device_id]).temperature.data() : nullptr,
       dataset[device_id], nep_data[device_id],
       para.q_scaler_gpu[device_id].data(), compiled_kernel_.get());
+    snes_profile.lap(2);
 
     compute_nep_forces(
       paramb, annmb[device_id].c, dataset[device_id], neighbor[device_id],
       nep_data[device_id], compiled_kernel_.get());
+    snes_profile.lap(3);
 
     if (zbl.enabled) {
       add_nep_zbl(zbl, dataset[device_id], neighbor[device_id]);
     }
+    snes_profile.lap(4);
   }
 }
 
@@ -320,9 +368,44 @@ void NEP::evaluate(int batch, const float* population)
       training->train_set[batch], false, count);
     for (int device = 0; device < count; ++device) {
       Dataset& data = training->train_set[batch][device];
+      snes_profile.start();
       energy_loss.evaluate(para, data, energy_difference, batch, first + device, device);
+      snes_profile.lap(5);
+      snes_profile.report(1000);
     }
   }
+}
+
+bool NEP::evaluate_subset(int batch, const float* population, const std::vector<char>& active)
+{
+  NEP_Potential_Parameters& para = *model_parameters;
+  int devices = training->device_count;
+  std::vector<int> candidates;
+  for (int p = 0; p < para.population_size; ++p) {
+    if (active[p]) {
+      candidates.push_back(p);
+    }
+  }
+  std::vector<float> group(devices * para.number_of_variables);
+  for (size_t first = 0; first < candidates.size(); first += devices) {
+    int count = std::min(devices, static_cast<int>(candidates.size() - first));
+    for (int device = 0; device < count; ++device) {
+      std::copy(
+        population + candidates[first + device] * para.number_of_variables,
+        population + (candidates[first + device] + 1) * para.number_of_variables,
+        group.begin() + device * para.number_of_variables);
+    }
+    find_force(para, group.data(), training->train_set[batch], false, count);
+    for (int device = 0; device < count; ++device) {
+      Dataset& data = training->train_set[batch][device];
+      snes_profile.start();
+      energy_loss.evaluate(
+        para, data, energy_difference, batch, candidates[first + device], device);
+      snes_profile.lap(5);
+      snes_profile.report(1000);
+    }
+  }
+  return true;
 }
 
 void NEP::accumulate_fitness(float* fitness_total)
