@@ -14,10 +14,12 @@ premise diagnostics are excluded from the reported algorithm time.
   ngd   sketched natural gradient. The full Gauss-Newton matrix F (num_para^2) is kept
         on the GPU as an exponential average of probe rows from GNEP::fast_fisher_rows
         (two rows per configuration per call), and the step is the Newton-scale
-        -eta (F + damping diag F)^-1 m, with m the momentum-averaged fast gradient.
-        The step is halved while it raises the loss of its own mini-batch, and the
-        damping follows these rejections (Levenberg-Marquardt). No learning-rate
-        schedule: eta = 1 is the Gauss-Newton step.
+        -alpha (F + damping diag F)^-1 m, with m the momentum-averaged fast gradient.
+        alpha comes from a parabola through the mini-batch loss, its slope and one trial
+        (eta = 1 is the Gauss-Newton step), and the damping follows alpha
+        (Levenberg-Marquardt). A step uses `group` mini-batches; an inner-product test
+        doubles the group when gradient noise along the step exceeds the signal, so the
+        run ends as full-batch Gauss-Newton. No learning-rate schedule.
 
 Environment (all optional): GNEP_BUDGET seconds of algorithm time, GNEP_REPORT seconds
 between test reports, GNEP_POP, GNEP_MIRROR, GNEP_SIGMA0, GNEP_PREMISE (diagnose every
@@ -26,9 +28,10 @@ GNEP_IVON_BETA2, GNEP_IVON_CLIP, GNEP_GRADCHECK. For ngd: GNEP_NGD_ETA (1),
 GNEP_NGD_BETA1 (0.9), GNEP_NGD_DAMPING (0.1, initial), GNEP_NGD_DAMPING_MIN (1e-4),
 GNEP_NGD_WINDOW (4, rows of the Fisher average in units of num_para), GNEP_NGD_WARM (1,
 probe every step until this many rows, same units), GNEP_NGD_PROBE_EVERY (4),
-GNEP_NGD_FACTOR_EVERY (10), GNEP_NGD_AVERAGE (0.2, tail fraction of the averaged iterate),
-GNEP_NGD_LINE (1: step length from a parabola through the batch loss, its slope and one
-trial; 0: halving only).
+GNEP_NGD_FACTOR_EVERY (10), GNEP_NGD_WINDOW_FRACTION (0.5: the window is at least this
+fraction of all rows seen), GNEP_NGD_GROUP (2, initial mini-batches per step),
+GNEP_NGD_GROUP_MAX, GNEP_NGD_THETA (1; 0 keeps the group fixed), GNEP_NGD_LINE_BATCHES (2,
+mini-batches of the step used for the step length), GNEP_NGD_CHECK (1).
 ------------------------------------------------------------------------------*/
 
 #include <algorithm>
@@ -194,7 +197,10 @@ public:
       run(x, batch, false);
       gnep.fast_rmse_gradient(
         para, batch.shards, batch.num_configurations, batch.num_atoms, batch.virial_components, g);
-      const double value = combine(get_batch_mse(para, batch.shards, true));
+      const Batch_MSE mse = get_batch_mse(para, batch.shards, true);
+      const double value = combine(mse);
+      const double eps2 = double(para.fcvp_epsilon) * para.fcvp_epsilon;
+      force_scale = para.lambda_f > 0 ? para.lambda_f / (2.0 * std::sqrt(mse.force + eps2)) : 1.0;
       gradient_seconds += seconds_since(t0);
       ++gradients;
       return value;
@@ -245,6 +251,7 @@ public:
   }
 
   bool fast = std::getenv("GNEP_FASTGRAD") != nullptr;
+  double force_scale = 1.0; // lambda_f / (2 RMSE_f) of the last fast gradient: F = force_scale * F_rows
   long forwards = 0;
   long gradients = 0;
   double forward_seconds = 0.0;
@@ -541,37 +548,41 @@ void Fitness::run_experiment(Parameters& para, float* initial_parameters)
     const double beta1 = env_double("GNEP_NGD_BETA1", 0.9);
     double damping = env_double("GNEP_NGD_DAMPING", 0.1);
     const double damping_min = env_double("GNEP_NGD_DAMPING_MIN", 1e-4);
-    const double window = env_double("GNEP_NGD_WINDOW", 4.0) * n;
+    const double window_min = env_double("GNEP_NGD_WINDOW", 4.0) * n;
+    const double window_fraction = env_double("GNEP_NGD_WINDOW_FRACTION", 0.5);
     const double warm_rows = env_double("GNEP_NGD_WARM", 1.0) * n;
     const long probe_every = static_cast<long>(env_double("GNEP_NGD_PROBE_EVERY", 4));
     const long factor_every = static_cast<long>(env_double("GNEP_NGD_FACTOR_EVERY", 10));
-    const double average_tail = env_double("GNEP_NGD_AVERAGE", 0.2);
-    const bool line_search = env_double("GNEP_NGD_LINE", 1.0) > 0;
-    long line_steps = 0;
-    double alpha_sum = 0.0;
+    long group = static_cast<long>(env_double("GNEP_NGD_GROUP", 2));
+    const long group_max =
+      std::min<long>(num_batches, static_cast<long>(env_double("GNEP_NGD_GROUP_MAX", 1e9)));
+    group = std::max<long>(1, std::min(group, group_max));
+    const double theta = env_double("GNEP_NGD_THETA", 1.0);
+    const long line_batches = static_cast<long>(env_double("GNEP_NGD_LINE_BATCHES", 2));
     Fisher_Solver fisher(n);
     GPU_Vector<double> rows;
-    std::vector<double> g, m1(n, 0.0), mhat(n), d, x(n), average(mu);
-    double rows_seen = 0.0, t_probe = 0.0, t_factor = 0.0, eta_sum = 0.0;
-    long probes = 0, factors = 0, accepted = 0, rejected = 0, halved = 0, since_factor = 0;
-    int clean = 0;
+    std::vector<double> g(n), m1(n, 0.0), mhat(n), d, x(n), g_line(n);
+    std::vector<std::vector<double>> gs;
+    std::vector<double> losses;
+    double rows_seen = 0.0, t_probe = 0.0, t_factor = 0.0, alpha_sum = 0.0, noise_ema = 0.0;
+    long probes = 0, factors = 0, accepted = 0, rejected = 0, short_steps = 0, since_factor = 0;
+    long noise_count = 0, batches_used = 0;
+    double train_loss = 0.0, momentum_weight = 0.0;
     bool need_factor = true;
     while (algorithm_time() < budget) {
       if (algorithm_time() >= next_report) {
-        char extra[256];
+        char extra[320];
         snprintf(
           extra, sizeof(extra),
-          "damping %.2e rows %.0f probes %ld factors %ld accepted %ld rejected %ld halved %ld "
-          "mean_eta %.3f t_probe %.3f t_factor %.3f",
-          damping, rows_seen, probes, factors, accepted, rejected, halved,
-          accepted ? eta_sum / accepted : 0.0, probes ? t_probe / probes : 0.0,
-          factors ? t_factor / factors : 0.0);
+          "train_loss %.5f group %ld batches %ld damping %.2e rows %.0f probes %ld factors %ld "
+          "accepted %ld rejected %ld short %ld mean_alpha %.3f noise %.2f t_probe %.3f "
+          "t_factor %.3f",
+          train_loss, group, batches_used, damping, rows_seen, probes, factors, accepted, rejected,
+          short_steps, accepted ? alpha_sum / accepted : 0.0, noise_ema,
+          probes ? t_probe / probes : 0.0, factors ? t_factor / factors : 0.0);
         report(extra);
-        report_point = &average;
-        report("averaged");
-        report_point = &mu;
         next_report += report_every;
-        if (!need_factor) {
+        if (!need_factor && env_double("GNEP_NGD_CHECK", 1.0) > 0) {
           // Scale check: curvature of the batch loss along the natural-gradient direction,
           // from loss differences, against the Gauss-Newton value d^T F d from the probes.
           const auto t0 = Clock::now();
@@ -579,6 +590,9 @@ void Fitness::run_experiment(Parameters& para, float* initial_parameters)
           std::vector<double> gc, dc;
           const double Lc = eval.gradient(mu, check, gc);
           fisher.solve(gc, dc);
+          for (int i = 0; i < n; ++i) {
+            dc[i] /= eval.force_scale;
+          }
           const double t = 0.05;
           for (int i = 0; i < n; ++i) {
             x[i] = mu[i] - t * dc[i];
@@ -588,30 +602,57 @@ void Fitness::run_experiment(Parameters& para, float* initial_parameters)
             x[i] = mu[i] + t * dc[i];
           }
           const double Lplus = eval.loss(x, check);
+          const double quadratic = fisher.quadratic(dc) * eval.force_scale;
           printf(
             "NGDCHECK step %ld loss %.5f slope_fd %.4e g.d %.4e | curvature_fd %.4e d.F.d %.4e"
-            " | full-step model reduction %.4e\n",
+            " ratio %.2f\n",
             step, Lc, (Lplus - Lminus) / (2 * t), dot(gc, dc), (Lplus + Lminus - 2 * Lc) / (t * t),
-            fisher.quadratic(dc), dot(gc, dc) - 0.5 * fisher.quadratic(dc));
+            quadratic, (Lplus + Lminus - 2 * Lc) / (t * t) / quadratic);
           fflush(stdout);
           excluded += seconds_since(t0);
         }
       }
-      GNEPTrainingBatch& batch = next_batch();
-      if (rows_seen < warm_rows || step % probe_every == 0) {
+      // One step uses `group` mini-batches at the same parameters.
+      std::vector<GNEPTrainingBatch*> batches(group);
+      for (long j = 0; j < group; ++j) {
+        batches[j] = &next_batch();
+      }
+      batches_used += group;
+      if (rows_seen < warm_rows || step % probe_every == 0 || group >= probe_every) {
         const auto t0 = Clock::now();
-        const int m = eval.fisher_rows(mu, batch, static_cast<unsigned int>(step + 1), rows);
+        const int m =
+          eval.fisher_rows(mu, *batches[0], static_cast<unsigned int>(step + 1), rows);
+        // About 4 rows per parameter leave the small eigenvalues of the estimate up to 4x
+        // too small (Marchenko-Pastur), so the window grows with the rows seen.
+        const double window = std::max(window_min, window_fraction * rows_seen);
         fisher.accumulate(rows.data(), m, std::exp(-m / window));
         CHECK(cudaDeviceSynchronize());
         rows_seen += m;
         ++probes;
         t_probe += seconds_since(t0);
       }
-      const double L0 = eval.gradient(mu, batch, g);
-      const double bc1 = 1.0 - std::pow(beta1, double(step + 1));
+      gs.resize(group);
+      losses.resize(group);
+      std::fill(g.begin(), g.end(), 0.0);
+      double scale = 0.0;
+      for (long j = 0; j < group; ++j) {
+        losses[j] = eval.gradient(mu, *batches[j], gs[j]);
+        scale += eval.force_scale / group;
+        for (int i = 0; i < n; ++i) {
+          g[i] += gs[j][i] / group;
+        }
+      }
+      // The momentum average spans a fixed number of mini-batches, 1 / (1 - beta1), so it
+      // fades out as the group grows and full-batch steps use the plain gradient.
+      const double beta = std::max(0.0, 1.0 - (1.0 - beta1) * group);
+      momentum_weight = beta * momentum_weight + (1.0 - beta);
+      train_loss = 0.0;
+      for (long j = 0; j < group; ++j) {
+        train_loss += losses[j] / group;
+      }
       for (int i = 0; i < n; ++i) {
-        m1[i] = beta1 * m1[i] + (1 - beta1) * g[i];
-        mhat[i] = m1[i] / bc1;
+        m1[i] = beta * m1[i] + (1 - beta) * g[i];
+        mhat[i] = m1[i] / momentum_weight;
       }
       if (need_factor || since_factor >= factor_every) {
         const auto t0 = Clock::now();
@@ -626,100 +667,86 @@ void Fitness::run_experiment(Parameters& para, float* initial_parameters)
       }
       ++since_factor;
       fisher.solve(mhat, d);
-      double step_eta = eta;
-      double L1 = 0.0;
-      int tries = 0;
-      if (line_search) {
-        // The Gauss-Newton model sets the direction; the length comes from the measured
-        // curvature along it: L(alpha) = L0 - alpha g.d + kappa alpha^2 / 2 through one trial.
-        const double slope = dot(g, d);
-        for (int i = 0; i < n; ++i) {
-          x[i] = mu[i] - eta * d[i];
-        }
-        const double Ltrial = eval.loss(x, batch);
-        const double kappa = 2.0 * (Ltrial - L0 + eta * slope) / (eta * eta);
-        double alpha = eta;
-        if (slope > 0.0 && kappa > 0.0) {
-          alpha = std::min(2.0 * eta, std::max(0.05 * eta, slope / kappa));
-        } else if (slope <= 0.0) {
-          alpha = 0.0; // not a descent direction for this batch
-        } else {
-          alpha = 2.0 * eta; // concave along d
-        }
-        double Lbest = Ltrial;
-        double best = eta;
-        if (alpha > 0.0 && std::abs(alpha - eta) > 0.15 * eta) {
-          for (int i = 0; i < n; ++i) {
-            x[i] = mu[i] - alpha * d[i];
-          }
-          const double Lalpha = eval.loss(x, batch);
-          if (Lalpha < Lbest) {
-            Lbest = Lalpha;
-            best = alpha;
-          }
-        }
-        if (alpha > 0.0 && Lbest <= L0) {
-          for (int i = 0; i < n; ++i) {
-            mu[i] -= best * d[i];
-          }
-          ++accepted;
-          eta_sum += best;
-        } else {
-          ++rejected;
-          need_factor = true;
-        }
-        ++line_steps;
-        alpha_sum += alpha;
-        // Damping follows the curvature mismatch: short steps mean the model is too soft.
-        if (alpha < 0.5 * eta) {
-          damping = std::min(damping * 1.3, 1e3);
-          ++halved;
-        } else if (alpha > 0.9 * eta) {
-          damping = std::max(damping / 1.1, damping_min);
-        }
-        const double horizon = std::max(1.0, average_tail * double(step + 1));
-        for (int i = 0; i < n; ++i) {
-          average[i] += (mu[i] - average[i]) / horizon;
-        }
-        ++step;
-        continue;
+      for (int i = 0; i < n; ++i) {
+        d[i] /= scale;
       }
-      for (;;) {
-        for (int i = 0; i < n; ++i) {
-          x[i] = mu[i] - step_eta * d[i];
+      // Inner-product test (Bollapragada et al. 2018): when the variance of g_j.d over the
+      // mini-batches of this step exceeds theta^2 (g.d)^2, noise dominates the step, and
+      // more mini-batches per step are the only way to go lower.
+      if (theta > 0.0 && group >= 2 && group < group_max) {
+        const double mean = dot(g, d);
+        double variance = 0.0;
+        for (long j = 0; j < group; ++j) {
+          const double pj = dot(gs[j], d);
+          variance += (pj - mean) * (pj - mean) / (group - 1);
         }
-        L1 = eval.loss(x, batch);
-        if (L1 <= L0 || tries == 3) {
-          break;
+        const double ratio = variance / group / (mean * mean + 1e-300);
+        noise_ema = noise_count == 0 ? ratio : 0.8 * noise_ema + 0.2 * ratio;
+        if (++noise_count >= 5 && noise_ema > theta * theta) {
+          group = std::min(2 * group, group_max);
+          noise_count = 0;
         }
-        step_eta *= 0.5;
-        ++tries;
       }
-      if (L1 <= L0) {
-        mu = x;
+      // Step length from the measured curvature on the first mini-batches of the step:
+      // L(alpha) = L0 - alpha g.d + kappa alpha^2 / 2 through one trial.
+      const long lb = std::max<long>(1, std::min(group, line_batches));
+      double L0 = 0.0;
+      std::fill(g_line.begin(), g_line.end(), 0.0);
+      for (long j = 0; j < lb; ++j) {
+        L0 += losses[j] / lb;
+        for (int i = 0; i < n; ++i) {
+          g_line[i] += gs[j][i] / lb;
+        }
+      }
+      auto line_loss = [&](double alpha) {
+        for (int i = 0; i < n; ++i) {
+          x[i] = mu[i] - alpha * d[i];
+        }
+        double value = 0.0;
+        for (long j = 0; j < lb; ++j) {
+          value += eval.loss(x, *batches[j]) / lb;
+        }
+        return value;
+      };
+      const double slope = dot(g_line, d);
+      const double Ltrial = line_loss(eta);
+      const double kappa = 2.0 * (Ltrial - L0 + eta * slope) / (eta * eta);
+      double alpha = eta;
+      if (slope > 0.0 && kappa > 0.0) {
+        alpha = std::min(2.0 * eta, std::max(0.05 * eta, slope / kappa));
+      } else if (slope <= 0.0) {
+        alpha = 0.0; // not a descent direction for these mini-batches
+      } else {
+        alpha = 2.0 * eta; // concave along d
+      }
+      double Lbest = Ltrial;
+      double best = eta;
+      if (alpha > 0.0 && std::abs(alpha - eta) > 0.15 * eta) {
+        const double Lalpha = line_loss(alpha);
+        if (Lalpha < Lbest) {
+          Lbest = Lalpha;
+          best = alpha;
+        }
+      }
+      if (alpha > 0.0 && Lbest <= L0) {
+        for (int i = 0; i < n; ++i) {
+          mu[i] -= best * d[i];
+        }
         ++accepted;
-        eta_sum += step_eta;
+        alpha_sum += best;
       } else {
         ++rejected;
+        need_factor = true;
       }
-      if (tries > 0) {
-        ++halved;
-        damping = std::min(damping * 2.0, 1e3);
-        clean = 0;
-        need_factor = !(L1 <= L0);
-      } else if (++clean >= 10) {
-        damping = std::max(damping / 1.5, damping_min);
-        clean = 0;
-      }
-      const double horizon = std::max(1.0, average_tail * double(step + 1));
-      for (int i = 0; i < n; ++i) {
-        average[i] += (mu[i] - average[i]) / horizon;
+      // Damping follows the curvature mismatch: short steps mean the model is too soft.
+      if (alpha < 0.5 * eta) {
+        damping = std::min(damping * 1.3, 1e3);
+        ++short_steps;
+      } else if (alpha > 0.9 * eta) {
+        damping = std::max(damping / 1.1, damping_min);
       }
       ++step;
     }
-    report_point = &average;
-    report("averaged final");
-    report_point = &mu;
   } else {
     // adam and ivon share the time-based cosine learning-rate schedule.
     const double lr0 = env_double("GNEP_LR", method == "adam" ? 1e-3 : 0.1);
