@@ -30,6 +30,7 @@ h_c = sum sqrt(p) z d rho satisfies E[h_c h_c^T] = F_c, and the energy row is ex
 Configurations do not interact, so one call returns two rows per configuration.
 ------------------------------------------------------------------------------*/
 
+#include <chrono>
 #include <cublas_v2.h>
 #include <cstring>
 
@@ -44,6 +45,7 @@ struct GNEP_FastGradientScratch {
   GPU_Vector<double> grad; // num_para
   GPU_Vector<float> D;     // Nc x 6 virial weights
   GPU_Vector<double> G_rows; // per-configuration G, energy rows then probe rows
+  GPU_Vector<float> P;       // N x num_types (n, k) partial sums of the coefficient pass
   GPU_Vector<unsigned int> max_bits;
   cublasHandle_t handle = nullptr;
   ~GNEP_FastGradientScratch()
@@ -56,6 +58,47 @@ struct GNEP_FastGradientScratch {
 
 namespace
 {
+
+// GNEP_FASTPROF: synchronized phase times of the fast gradient, printed every 200 calls.
+struct FG_Profile {
+  bool enabled = std::getenv("GNEP_FASTPROF") != nullptr;
+  double seconds[6] = {0, 0, 0, 0, 0, 0};
+  long calls = 0;
+  std::chrono::steady_clock::time_point last;
+  void start()
+  {
+    if (enabled) {
+      cudaDeviceSynchronize();
+      last = std::chrono::steady_clock::now();
+    }
+  }
+  void lap(int phase)
+  {
+    if (enabled) {
+      cudaDeviceSynchronize();
+      const auto now = std::chrono::steady_clock::now();
+      seconds[phase] += std::chrono::duration<double>(now - last).count();
+      last = now;
+    }
+  }
+  void finish(bool probe)
+  {
+    if (enabled && ++calls % 200 == 0) {
+      double total = 0;
+      for (double v : seconds) {
+        total += v;
+      }
+      printf(
+        "FASTPROF calls %ld (%s last) ms/call %.2f | weights+delta %.1f%% ann %.1f%% gemm %.1f%%"
+        " coefficients %.1f%% move+descriptors %.1f%% scatter %.1f%%\n",
+        calls, probe ? "probe" : "gradient", 1e3 * total / calls, 100 * seconds[0] / total,
+        100 * seconds[1] / total, 100 * seconds[2] / total, 100 * seconds[3] / total,
+        100 * seconds[4] / total, 100 * seconds[5] / total);
+      fflush(stdout);
+    }
+  }
+};
+static FG_Profile fg_profile;
 
 template <typename T>
 void fg_reserve(GPU_Vector<T>& vector, size_t size)
@@ -376,19 +419,16 @@ static __global__ void fg_scatter_rows(
   g_rows[index] = value;
 }
 
-static __device__ __forceinline__ void
-fg_add(double* s_acc, double* g_acc, const bool use_shared, const size_t index, const float value)
-{
-  if (use_shared) {
-    atomicAdd(&s_acc[index], double(value));
-  } else {
-    atomicAdd(&g_acc[index], double(value));
-  }
-}
+const int FG_ACC_CAPACITY = 512; // num_types * (basis_size + 1)
 
 // Descriptor-coefficient part of sum_i dU_i/dc with g_Fp = omega dU/dq (scaled).
+// dq_nl/dc_nk of a pair is fn_k times a factor that does not depend on k. One thread
+// handles one (atom, channel n): it forms dU/ds_nlm of that channel once, evaluates the
+// harmonics once per neighbor, and keeps the (neighbor type, k) sums in a small local
+// array, so the working set of a warp stays in the first-level cache.
 static __global__ void fg_coefficients(
   const int N,
+  const int channels, // max(n_max_radial, n_max_angular) + 1
   const GNEP::ParaMB paramb,
   const int* __restrict__ g_type,
   const int* __restrict__ g_NN_radial,
@@ -403,34 +443,33 @@ static __global__ void fg_coefficients(
   const float* __restrict__ g_z12_angular,
   const float* __restrict__ g_Fp,
   const float* __restrict__ g_sum_fxyz,
-  const int num_c,
-  const bool use_shared,
-  double* g_grad_c,
-  const int* __restrict__ g_batch_idx = nullptr,
-  const int row_count = 0, // positive: g_grad_c is row_count x num_c, column-major
-  const int row_offset = 0)
+  float* g_P) // column (t2 * (size_r + size_a) + i) of atom n1 at g_P[column * N + n1]
 {
-  extern __shared__ double s_acc[];
-  if (use_shared) {
-    for (int k = threadIdx.x; k < num_c; k += blockDim.x) {
-      s_acc[k] = 0.0;
-    }
-    __syncthreads();
+  const size_t index = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index >= static_cast<size_t>(N) * channels) {
+    return;
   }
-  const int n1 = blockIdx.x * blockDim.x + threadIdx.x;
-  if (n1 < N) {
-    const int t1 = g_type[n1];
-    const int T = paramb.num_types;
-    const size_t stride = row_count > 0 ? row_count : 1;
-    if (row_count > 0) {
-      g_grad_c += g_batch_idx[n1] + row_offset;
+  const int n1 = index / channels;
+  const int n = index % channels;
+  const int t1 = g_type[n1];
+  const int T = paramb.num_types;
+  const int size_r = (paramb.n_max_radial + 1) * (paramb.basis_size_radial + 1);
+  const int columns = size_r + (paramb.n_max_angular + 1) * (paramb.basis_size_angular + 1);
+  float acc[FG_ACC_CAPACITY];
+
+  if (n <= paramb.n_max_radial) {
+    const int K = paramb.basis_size_radial + 1;
+    const float fp = g_Fp[n1 + n * N];
+    for (int i = 0; i < T * K; ++i) {
+      acc[i] = 0.0f;
     }
-    for (int i1 = 0; i1 < g_NN_radial[n1]; ++i1) {
-      const int index = i1 * N + n1;
-      const int t2 = g_type[g_NL_radial[index]];
-      const float x12 = g_x12_radial[index];
-      const float y12 = g_y12_radial[index];
-      const float z12 = g_z12_radial[index];
+    const int NN = g_NN_radial[n1];
+    for (int i1 = 0; i1 < NN; ++i1) {
+      const int neighbor = i1 * N + n1;
+      const int t2 = g_type[g_NL_radial[neighbor]];
+      const float x12 = g_x12_radial[neighbor];
+      const float y12 = g_y12_radial[neighbor];
+      const float z12 = g_z12_radial[neighbor];
       const float d12 = sqrt(x12 * x12 + y12 * y12 + z12 * z12);
       const float rc = (paramb.rc_radial[t1] + paramb.rc_radial[t2]) * 0.5f;
       const float rcinv = 1.0f / rc;
@@ -438,23 +477,52 @@ static __global__ void fg_coefficients(
       find_fc(rc, rcinv, d12, fc12);
       float fn12[MAX_NUM_N];
       find_fn(paramb.basis_size_radial, rcinv, d12, fc12, fn12);
-      for (int n = 0; n <= paramb.n_max_radial; ++n) {
-        const float fp = g_Fp[n1 + n * N];
-        for (int k = 0; k <= paramb.basis_size_radial; ++k) {
-          const int c_index =
-            (n * (paramb.basis_size_radial + 1) + k) * paramb.num_types_sq + t1 * T + t2;
-          fg_add(s_acc, g_grad_c, use_shared, c_index * stride, fp * fn12[k]);
+      for (int k = 0; k < K; ++k) {
+        acc[t2 * K + k] += fp * fn12[k];
+      }
+    }
+    for (int t2 = 0; t2 < T; ++t2) {
+      for (int k = 0; k < K; ++k) {
+        g_P[static_cast<size_t>(t2 * columns + n * K + k) * N + n1] = acc[t2 * K + k];
+      }
+    }
+  }
+
+  if (n <= paramb.n_max_angular) {
+    const int K = paramb.basis_size_angular + 1;
+    const int stride_n = paramb.n_max_angular + 1;
+    const int abc_count = paramb.L_max * paramb.L_max + 2 * paramb.L_max;
+    const bool higher = paramb.num_L > paramb.L_max;
+    float dU[NUM_OF_ABC];
+    float dU_higher[8] = {0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f};
+    for (int L = 1; L <= paramb.L_max; ++L) {
+      const float fp = g_Fp[(paramb.n_max_radial + 1 + (L - 1) * stride_n + n) * N + n1];
+      for (int k = 0; k < 2 * L + 1; ++k) {
+        const int abc = L * L - 1 + k;
+        dU[abc] = fp * (k == 0 ? 2.0f : 4.0f) * C3B[abc] *
+                  g_sum_fxyz[(n * NUM_OF_ABC + abc) * N + n1];
+      }
+    }
+    if (higher) {
+      float s8[8];
+      float g8[8];
+      gnep_higher_body::load_s(N, n, &g_sum_fxyz[n1], s8);
+      for (int channel = paramb.L_max; channel < paramb.num_L; ++channel) {
+        const float fp = g_Fp[(paramb.n_max_radial + 1 + channel * stride_n + n) * N + n1];
+        gnep_higher_body::gradient(channel == paramb.L_max ? 4 : 5, s8, g8);
+        for (int a8 = 0; a8 < 8; ++a8) {
+          dU_higher[a8] += fp * g8[a8];
         }
       }
     }
-    float Fp[MAX_DIM_ANGULAR];
-    for (int d = 0; d < paramb.dim_angular; ++d) {
-      Fp[d] = g_Fp[(paramb.n_max_radial + 1 + d) * N + n1];
+    for (int i = 0; i < T * K; ++i) {
+      acc[i] = 0.0f;
     }
-    for (int i1 = 0; i1 < g_NN_angular[n1]; ++i1) {
-      const int index = i1 * N + n1;
-      const int t2 = g_type[g_NL_angular[index]];
-      float r12[3] = {g_x12_angular[index], g_y12_angular[index], g_z12_angular[index]};
+    const int NN = g_NN_angular[n1];
+    for (int i1 = 0; i1 < NN; ++i1) {
+      const int neighbor = i1 * N + n1;
+      const int t2 = g_type[g_NL_angular[neighbor]];
+      float r12[3] = {g_x12_angular[neighbor], g_y12_angular[neighbor], g_z12_angular[neighbor]};
       const float d12 = sqrt(r12[0] * r12[0] + r12[1] * r12[1] + r12[2] * r12[2]);
       const float rc = (paramb.rc_angular[t1] + paramb.rc_angular[t2]) * 0.5f;
       const float rcinv = 1.0f / rc;
@@ -462,28 +530,83 @@ static __global__ void fg_coefficients(
       find_fc(rc, rcinv, d12, fc12);
       float fn12[MAX_NUM_N];
       find_fn(paramb.basis_size_angular, rcinv, d12, fc12, fn12);
-      for (int n = 0; n <= paramb.n_max_angular; ++n) {
-        for (int k = 0; k <= paramb.basis_size_angular; ++k) {
-          float value = 0.0f;
-          for (int l = 0; l < paramb.num_L; ++l) {
-            float qc = 0.0f;
-            gnep_higher_body::qc(paramb, N, l, n, d12, r12, fn12[k], &g_sum_fxyz[n1], &qc);
-            value += Fp[l * (paramb.n_max_angular + 1) + n] * qc;
-          }
-          const int c_index = (n * (paramb.basis_size_angular + 1) + k) * paramb.num_types_sq +
-                              t1 * T + t2 + paramb.num_c_radial;
-          fg_add(s_acc, g_grad_c, use_shared, c_index * stride, value);
+      // The basis of sum_fxyz itself (accumulate_s with unit radial factor).
+      float Y[NUM_OF_ABC];
+      for (int abc = 0; abc < abc_count; ++abc) {
+        Y[abc] = 0.0f;
+      }
+      accumulate_s(paramb.L_max, d12, r12[0], r12[1], r12[2], 1.0f, Y);
+      float factor = 0.0f;
+      for (int abc = 0; abc < abc_count; ++abc) {
+        factor += dU[abc] * Y[abc];
+      }
+      if (higher) {
+        float edge_b[8];
+        float edge_db[24];
+        gnep_higher_body::edge(d12, r12, 1.0f, 0.0f, edge_b, edge_db);
+        for (int a8 = 0; a8 < 8; ++a8) {
+          factor += dU_higher[a8] * edge_b[a8];
         }
+      }
+      for (int k = 0; k < K; ++k) {
+        acc[t2 * K + k] += factor * fn12[k];
+      }
+    }
+    for (int t2 = 0; t2 < T; ++t2) {
+      for (int k = 0; k < K; ++k) {
+        g_P[static_cast<size_t>(t2 * columns + size_r + n * K + k) * N + n1] = acc[t2 * K + k];
       }
     }
   }
-  if (use_shared) {
-    __syncthreads();
-    for (int k = threadIdx.x; k < num_c; k += blockDim.x) {
-      if (s_acc[k] != 0.0) {
-        atomicAdd(&g_grad_c[k], s_acc[k]);
-      }
+}
+
+// Sums the partial sums of fg_coefficients over the atoms of each configuration and center
+// type: one thread per (configuration, center type, column). row_count > 0 writes row
+// (configuration + row_offset) of a row_count x num_c matrix; otherwise adds to g_target.
+static __global__ void fg_reduce_coefficients(
+  const int N,
+  const int Nc,
+  const GNEP::ParaMB paramb,
+  const int* __restrict__ g_Na,
+  const int* __restrict__ g_Na_sum,
+  const int* __restrict__ g_type,
+  const float* __restrict__ g_P,
+  double* g_target,
+  const int row_count,
+  const int row_offset)
+{
+  const int T = paramb.num_types;
+  const int size_r = (paramb.n_max_radial + 1) * (paramb.basis_size_radial + 1);
+  const int columns = size_r + (paramb.n_max_angular + 1) * (paramb.basis_size_angular + 1);
+  const size_t index = static_cast<size_t>(blockIdx.x) * blockDim.x + threadIdx.x;
+  if (index >= static_cast<size_t>(Nc) * T * T * columns) {
+    return;
+  }
+  const int c = index % Nc;
+  const size_t rest = index / Nc;
+  const int t1 = rest % T;
+  const int column = rest / T; // t2 * columns + i
+  const int t2 = column / columns;
+  const int i = column % columns;
+  const float* P = g_P + static_cast<size_t>(column) * N;
+  const int begin = g_Na_sum[c];
+  const int end = begin + g_Na[c];
+  double sum = 0.0;
+  for (int n = begin; n < end; ++n) {
+    if (g_type[n] == t1) {
+      sum += P[n];
     }
+  }
+  if (sum == 0.0) {
+    return;
+  }
+  const size_t c_index = i < size_r
+                           ? i * paramb.num_types_sq + t1 * T + t2
+                           : (i - size_r) * paramb.num_types_sq + t1 * T + t2 + paramb.num_c_radial;
+  if (row_count > 0) {
+    g_target[c + row_offset + c_index * row_count] += sum; // one thread per entry
+  } else {
+    atomicAdd(&g_target[c_index], sum);
   }
 }
 
@@ -535,13 +658,25 @@ void GNEP::fast_gradient_core(
   if (zbl.flexibled) {
     PRINT_INPUT_ERROR("The fast gradient does not support flexible ZBL parameters.");
   }
+  if (paramb.num_types *
+        (std::max(paramb.basis_size_radial, paramb.basis_size_angular) + 1) >
+      FG_ACC_CAPACITY) {
+    PRINT_INPUT_ERROR("The fast gradient needs num_types * (basis_size + 1) <= 512.");
+  }
   const bool probe = rows != nullptr;
   const Batch_MSE mse = get_batch_mse(para, dataset, true);
   const double eps2 = para.fcvp_epsilon * para.fcvp_epsilon;
-  const float lambda_e = para.lambda_e / (2.0 * std::sqrt(mse.energy + eps2));
-  const float lambda_f = para.lambda_f / (2.0 * std::sqrt(mse.force + eps2));
-  const float lambda_v =
+  float lambda_e = para.lambda_e / (2.0 * std::sqrt(mse.energy + eps2));
+  float lambda_f = para.lambda_f / (2.0 * std::sqrt(mse.force + eps2));
+  float lambda_v =
     mse.virial_configurations ? para.lambda_v / (2.0 * std::sqrt(mse.virial + eps2)) : 0.0f;
+  if (probe && lambda_f > 0.0f) {
+    // Rows of F / lambda_f: the 1/sqrt(MSE) factor that the loss gradient and F share grows
+    // as training proceeds, so an average of F over past iterates is kept without it.
+    lambda_e /= lambda_f;
+    lambda_v /= lambda_f;
+    lambda_f = 1.0f;
+  }
   const char* target_text = std::getenv("GNEP_FD_H");
   const double target = target_text ? std::atof(target_text) : 1e-2;
 
@@ -587,6 +722,10 @@ void GNEP::fast_gradient_core(
     fg_reserve(s.G, G_size);
     fg_reserve(s.grad, static_cast<size_t>(num_para));
     fg_reserve(s.D, static_cast<size_t>(Nc) * 6);
+    const int coefficient_columns =
+      (paramb.n_max_radial + 1) * (paramb.basis_size_radial + 1) +
+      (paramb.n_max_angular + 1) * (paramb.basis_size_angular + 1);
+    fg_reserve(s.P, static_cast<size_t>(N) * T * coefficient_columns);
     fg_reserve(s.max_bits, 1);
     CHECK(cudaMemset(s.max_bits.data(), 0, sizeof(unsigned int)));
     if (probe) {
@@ -599,6 +738,7 @@ void GNEP::fast_gradient_core(
 
     const int block = 64;
     const int grid = (N - 1) / block + 1;
+    fg_profile.start();
     if (probe) {
       fg_probe_weights<<<grid, block>>>(
         N, global_num_configurations, global_num_atoms, lambda_e, lambda_f, para.force_delta,
@@ -643,10 +783,8 @@ void GNEP::fast_gradient_core(
     float largest = 0.0f;
     std::memcpy(&largest, &bits, sizeof(float));
     const double h = largest > 0.0f ? target / largest : 0.0;
+    fg_profile.lap(0);
 
-    const int num_c = num_para - ann.num_ann;
-    const size_t shared_bytes = sizeof(double) * num_c;
-    const bool use_shared = !probe && shared_bytes <= 40000;
     // pass 0: energy term at r; pass 1, 2: r + h delta, r - h delta.
     auto energy_gradient = [&](const float* omega, float omega_scalar, int pass) {
       fg_ann<<<grid, block>>>(
@@ -654,6 +792,7 @@ void GNEP::fast_gradient_core(
         para.q_scaler_gpu(device_id).data(), omega, omega_scalar, cache.Fp.data(), s.Q.data(),
         s.B.data());
       GPU_CHECK_KERNEL
+      fg_profile.lap(1);
       const double alpha = 1.0;
       cublasStatus_t status = CUBLAS_STATUS_SUCCESS;
       if (probe) {
@@ -674,17 +813,25 @@ void GNEP::fast_gradient_core(
       if (status != CUBLAS_STATUS_SUCCESS) {
         PRINT_INPUT_ERROR("cublasDgemm failed in the fast gradient.");
       }
+      fg_profile.lap(2);
       const float* p[6];
       for (int a = 0; a < 6; ++a) {
         p[a] = pass > 0 ? s.moved[a].data() : xyz[a]->data();
       }
-      fg_coefficients<<<grid, block, use_shared ? shared_bytes : 0>>>(
-        N, paramb, data.type.data(), cache.NN_radial.data(), cache.NL_radial.data(), p[0], p[1],
+      const int channels = std::max(paramb.n_max_radial, paramb.n_max_angular) + 1;
+      const size_t channel_count = static_cast<size_t>(N) * channels;
+      fg_coefficients<<<(channel_count - 1) / 64 + 1, 64>>>(
+        N, channels, paramb, data.type.data(), cache.NN_radial.data(), cache.NL_radial.data(), p[0], p[1],
         p[2], cache.NN_angular.data(), cache.NL_angular.data(), p[3], p[4], p[5],
-        cache.Fp.data(), cache.sum_fxyz.data(), num_c, use_shared,
-        probe ? rows->data() + static_cast<size_t>(ann.num_ann) * m : s.grad.data() + ann.num_ann,
-        data.batch_idx.data(), probe ? m : 0, pass == 0 ? 0 : Nc);
+        cache.Fp.data(), cache.sum_fxyz.data(), s.P.data());
       GPU_CHECK_KERNEL
+      const size_t reduce_count = static_cast<size_t>(Nc) * T * T * coefficient_columns;
+      fg_reduce_coefficients<<<(reduce_count - 1) / 128 + 1, 128>>>(
+        N, Nc, paramb, data.Na.data(), data.Na_sum.data(), data.type.data(), s.P.data(),
+        probe ? rows->data() + static_cast<size_t>(ann.num_ann) * m : s.grad.data() + ann.num_ann,
+        probe ? m : 0, pass == 0 ? 0 : Nc);
+      GPU_CHECK_KERNEL
+      fg_profile.lap(3);
     };
 
     energy_gradient(s.omega.data(), 0.0f, 0);
@@ -709,6 +856,7 @@ void GNEP::fast_gradient_core(
           s.moved[3].data(), s.moved[4].data(), s.moved[5].data(), cache.descriptors.data(),
           cache.sum_fxyz.data());
         GPU_CHECK_KERNEL
+        fg_profile.lap(4);
         energy_gradient(nullptr, float(sign / (2.0 * h)), sign > 0 ? 1 : 2);
       }
     } else if (probe) {
@@ -726,6 +874,8 @@ void GNEP::fast_gradient_core(
         (*gradient)[i] += local[i];
       }
     }
+    fg_profile.lap(5);
+    fg_profile.finish(probe);
   }
   CHECK(cudaSetDevice(0));
 }
